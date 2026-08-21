@@ -1,0 +1,78 @@
+# 实施计划
+
+更新时间：2026-08-22
+
+## 目标
+
+先把 StS1 做成可重复采集、可检查、可回放的结构化轨迹系统，再以这些人类示范训练一个小型分层策略。第一版不追求论文结果，优先服务于可靠性和后续自媒体展示。
+
+## 阶段边界
+
+当前接口已支持四个原版角色、A0-A20 和固定/随机种子。采集时仍建议先使用 Ironclad A0，等数据格式和动作覆盖稳定后再扩展角色和进阶。
+
+不使用视觉识别、鼠标坐标作为主标签或隐藏信息。一个原子动作是一次出牌、药水操作、结束回合、地图/事件/奖励/商店等界面选择。每条样本都应包含动作前状态、合法动作、动作、动作后稳定状态和接受结果。
+
+## 当前架构
+
+```text
+Slay the Spire
+  -> CommunicationMod stdin/stdout
+  -> communication_controller.py
+  -> localhost TCP
+  -> human_terminal.py / future policy client
+  -> raw messages + normalized action trace
+```
+
+Python-only controller 是当前 MVP。它避免了 CommunicationMod 占用 stdin 导致无法直接 `input()` 的问题，并通过语义命令保证动作标签可靠。若未来必须保留原生鼠标操作，再开发 Java Recorder Mod，在游戏逻辑层 hook 实际动作。
+
+## 数据采集路线
+
+1. **协议验证**：启动一局，检查每次状态和动作是否一一对应。
+2. **完整人类局**：先采集 10 局，统计事件、地图、战斗、奖励、商店、营火等 screen 覆盖率。
+3. **数据清洗**：过滤中途退出、协议错误、动作未接受和状态不稳定的记录；按 `run_id/seed` 切分数据集。
+4. **冷启动 SFT**：先训练 combat adapter，再训练共享 high-level adapter。
+5. **闭环纠错**：shadow 记录模型建议，assist 由人类覆盖，之后采用 DAgger 风格继续采集。
+6. **自动运行**：增加合法动作验证、超时、重试、fallback、watchdog 和固定种子回归测试。
+
+SFT 只适合冷启动，不足以解决状态分布偏移、长程路线选择和稀有事件。无人值守运行必须加入闭环纠错和协议级 fallback。
+
+## 模型路线
+
+本机 RTX 3050 4GB 不适合同时部署多个完整模型。推荐一个共享 Qwen 小骨干配 LoRA adapter：
+
+```text
+Qwen3-0.6B backbone
+  |- combat adapter
+  `- high-level adapter
+```
+
+高层先按 `screen_type` 做确定性路由，不做参数级 sparse MoE。训练采用 4bit QLoRA、micro-batch 1、gradient checkpointing、短上下文；训练和游戏推理串行执行。若本机只负责采集，训练可以迁移到 RTX 5050 机器。
+
+建议数据规模：10 局用于发现缺陷，20-40 局用于判断第一版 SFT 是否有用，后续以模型 override 状态而不是局数决定 DAgger 采集量。每局动作数受路线和战斗长度影响，不应只按固定条数估算。
+
+## 验收标准
+
+- 动作前状态存在率 100%
+- 已接受动作的动作后稳定状态 >= 99%
+- 合法动作率 100%
+- 关键 screen 覆盖率 100%
+- 隐藏信息泄漏 0
+- 能按 run/seed 检查或重放 100%
+
+在这些指标达到前，不扩展模型规模，也不开始大规模训练。错误标签比缺数据更难修复。
+
+## 资源估计
+
+- CommunicationMod 与 Python 采集链路：已完成 MVP
+- 完整 screen 覆盖和清洗校验：约 1-2 周业余开发
+- Qwen3-0.6B combat LoRA 首次训练：预计数小时到一天，取决于序列长度和外部 GPU
+- 一局人类完整游戏：约 45-90 分钟
+- 最大成本：高质量示范时间，而不是原始日志磁盘空间
+
+## 后续任务
+
+- 完成一次不中途退出的完整局采集
+- 为每种 screen 建立最小 fixture 和轨迹校验脚本
+- 解析 CommunicationMod 某些字符串化 Java 对象，减少规范化状态中的噪声
+- 增加商店购买、营火、手牌选择等动作的显式语义标签
+- 再开始训练/评测代码，不把训练逻辑塞入游戏控制器

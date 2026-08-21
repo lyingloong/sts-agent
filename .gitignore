@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Generated data and model artifacts
+data/raw/
+data/trajectories/
+data/datasets/
+data/fixtures/generated/
+models/
+checkpoints/
+outputs/
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.gguf
+*.log
+
+# Local experiment/runtime files
+.cache/
+tmp/
+logs/
+coverage.xml
+htmlcov/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Machine-local Codex context
+CODEX_HANDOFF.md
