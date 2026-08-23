@@ -21,6 +21,7 @@ ENV/
 data/raw/
 data/trajectories/
 data/datasets/
+data/rollouts/
 data/knowledge/
 data/fixtures/generated/
 models/

@@ -299,9 +299,14 @@ def candidate_assist_allowed(message: dict[str, Any]) -> bool:
     }
     if not configured:
         return False
+    state = game_state(message)
+    # Terminal screens only need navigation back to the main menu. Ranking
+    # them would create a meaningless training decision when an autoplay
+    # client sends the standard return action after recording the outcome.
+    if str(state.get("screen_type") or "").upper() in {"GAME_OVER", "VICTORY"}:
+        return False
     if "ALL" in configured:
         return bool(message.get("in_game"))
-    state = game_state(message)
     return (
         "COMBAT" in configured
         and state.get("screen_type") == "NONE"
@@ -745,7 +750,11 @@ def candidate_action_for_input(
     return action["command"], action, None
 
 
-def candidate_source_for_input(text: str, decision: dict[str, Any] | None) -> str:
+def candidate_source_for_input(
+    text: str,
+    decision: dict[str, Any] | None,
+    autoplay: bool = False,
+) -> str:
     if not decision:
         return "human_only"
     if not decision.get("model_candidates"):
@@ -755,7 +764,7 @@ def candidate_source_for_input(text: str, decision: dict[str, Any] | None) -> st
     except ValueError:
         return "human_override"
     if parts and parts[0].lower() in {"a", "accept"}:
-        return "model_accept"
+        return "model_auto" if autoplay else "model_accept"
     if parts and parts[0].lower() in {"pick", "candidate", "k"}:
         return "human_choice"
     return "human_override"
@@ -1512,7 +1521,13 @@ def ask_action(
         if command == "STATE":
             print(command, flush=True)
             return command, {"id": "STATE", "kind": "state_request", "command": command}, None
-        source = candidate_source_for_input(text, decision)
+        autoplay = bool(response.get("autoplay"))
+        if autoplay and action.get("kind") == "start_run":
+            # The TCP client is still untrusted with game commands; this
+            # metadata only records that a valid START came from the solver.
+            action = dict(action)
+            action["run_mode"] = "single_seed_solver"
+        source = candidate_source_for_input(text, decision, autoplay=autoplay)
         return command, action, finalize_decision(decision, action, source)
 
 
@@ -1534,6 +1549,7 @@ def main() -> int:
     run_index = 0
     step_id = 0
     message_index = 0
+    run_terminal_recorded = False
     visited_shop_rooms: set[tuple[int, int]] = set()
     trace_output: TextIO | None = None
     event_output: TextIO | None = None
@@ -1696,6 +1712,30 @@ def main() -> int:
                     )
                     pending = None
 
+                terminal_screen = str(game_state(message).get("screen_type") or "").upper()
+                if run_config is not None and terminal_screen in {"GAME_OVER", "VICTORY"} and not run_terminal_recorded:
+                    state = game_state(message)
+                    write_event(
+                        {
+                            "event": "run_terminal",
+                            "run_id": run_id,
+                            "outcome": "victory" if terminal_screen == "VICTORY" else "death",
+                            "screen_type": terminal_screen,
+                            "mode": run_config.get("mode", "human"),
+                            "policy_version": policy.model,
+                            "step_count": step_id,
+                            "final_state": {
+                                "act": state.get("act"),
+                                "floor": state.get("floor"),
+                                "current_hp": state.get("current_hp"),
+                                "max_hp": state.get("max_hp"),
+                                "gold": state.get("gold"),
+                            },
+                            "at": now_iso(),
+                        }
+                    )
+                    run_terminal_recorded = True
+
                 current_message = message
                 if run_config is not None and run_config.get("internal_seed") is None and message.get("in_game"):
                     observed_seed = game_state(message).get("seed")
@@ -1724,6 +1764,7 @@ def main() -> int:
                     run_index += 1
                     run_id = f"{session_id}-run-{run_index:03d}"
                     step_id = 0
+                    run_terminal_recorded = False
                     visited_shop_rooms.clear()
                     run_config = {
                         "character": action.get("character", "IRONCLAD"),
@@ -1731,6 +1772,7 @@ def main() -> int:
                         "seed": action.get("seed"),
                         "seed_source": "requested" if action.get("seed") else "random",
                         "internal_seed": None,
+                        "mode": action.get("run_mode", "human"),
                     }
                     open_run_outputs()
                     write_event(

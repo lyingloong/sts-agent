@@ -235,6 +235,8 @@ human_override > human_confirm > model_auto + successful outcome
 - 同一局内更新 Qwen 权重；会破坏回放和数据分布；
 - 在 4GB 显存上同时驻留 combat/high-level 两个完整大模型。
 
+单种子自动探索是独立的后续实验路线：其采用固定策略批量 rollout 与组内相对回报，不与本节的人工纠正数据混为同一训练目标。它覆盖所有游戏操作、使用 `K=4` 轨迹组，并在 RTX 5050 可用后再实现；详见[单种子轨迹级 GRPO 方案](SINGLE_SEED_GRPO.md)。
+
 ## 7. 数据量与人工成本估计
 
 按一局约 100-300 个决策估算，实际数量随战斗长度和路线变化：

@@ -84,6 +84,21 @@ s WATCHER 20 ABC123      Watcher A20，固定种子
 
 角色名也接受 `THE_SILENT`。旧的 `s [seed]` 写法继续可用。角色、进阶和种子会写入 `run-events-*.jsonl`，轨迹中的每条动作也带 `run_config`。
 
+### 3.1 单种子自动求解
+
+在游戏已启动、controller 已完成模型预热且停留在主菜单时，另开一个终端运行：
+
+```powershell
+cd D:\Code\spire-mod\sts-agent
+python tools\single_seed_solver.py 4QTKQ7VBMFX47 --character IRONCLAD --ascension 0 --episodes 1
+```
+
+该工具通过与 `human_terminal.py` 相同的本机 TCP 接口连接 controller；每一步仅发送 `a` 接受模型 top-1 候选，因此动作仍经过 controller 的合法性校验和编译。`--episodes N` 会在同一游戏进程中反复尝试同一个种子；同一局内模型权重冻结，只有局间才应在外部 GPU 训练并切换 checkpoint。`--max-actions`（默认 1200）和 `--max-repeated-views`（默认 3）是 watchdog。
+
+模型未给出合法候选、状态重复或 watchdog 触发时，求解器会退出但不会发送游戏动作；controller 会保留当前界面，之后可启动 `human_terminal.py` 人工接管。每次运行还会写入 `data/rollouts/single-seed-*.jsonl` 的轻量 manifest；完整状态、动作、`source=model_auto` 和终局事件仍写在既有 `action-trace-*` 与 `run-events-*` 中。终局后求解器使用 controller 的安全返回动作回到主菜单，再开始下一次 episode。
+
+这是一条自动 rollout 管线，不会在 3050 上训练或自动改权重。3050 上 StS + 4-bit 推理显存余量很小，先以 `--episodes 1` 验证；批量 LoRA 更新应在 RTX 5050 上完成。固定 seed 的 K=4 全局动作 rollout、trajectory-GRPO 更新、评测和回滚方案见[单种子轨迹级 GRPO 方案](doc/SINGLE_SEED_GRPO.md)；该训练管线当前尚未实现。
+
 ## 终端动作
 
 ```text
@@ -115,6 +130,7 @@ data/trajectories/action-trace-<session>-run-<n>-<character>-A<ascension>-seed-<
                                                                # 单局状态-动作-结果轨迹
 data/trajectories/run-events-<session>-run-<n>-<character>-A<ascension>-seed-<seed>.jsonl
                                                                # 单局生命周期和种子事件
+data/rollouts/single-seed-<seed>-<timestamp>.jsonl             # 自动求解器的轻量运行 manifest
 ```
 
 原始消息按 controller session 保存；轨迹和 run-events 按单局保存。随机种子在第一条游戏状态中出现前，文件名暂用 `seed-random`，收到 `game_state.seed` 后还原出显示种子并自动改名。正式训练主要使用单局 `action-trace`；原始消息只用于排错和重新规范化，不能直接作为模型输入。中途退出的局应标记为调试数据，不进入正式 SFT 集。
@@ -132,6 +148,7 @@ CommunicationMod 偶尔会在事件房间尚未完成时短暂返回 `screen_typ
 - [实施计划与训练路线](doc/PLAN.md)
 - [通信协议与数据格式](doc/PROTOCOL.md)
 - [在线纠正式模仿学习方案](doc/ONLINE_DAGGER.md)
+- [单种子轨迹级 GRPO 方案（待 RTX 5050 后实施）](doc/SINGLE_SEED_GRPO.md)
 
 ## 验证
 

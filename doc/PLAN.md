@@ -36,6 +36,8 @@ Python-only controller 是当前 MVP。它避免了 CommunicationMod 占用 stdi
 7. **周期训练**：从原始轨迹导出 SFT、偏好、校准和按局 trajectory 数据；在局与局之间训练 LoRA，并通过固定种子回归后再切换模型版本。
 8. **自动运行**：在置信度路由验证后增加合法动作验证、超时、重试、fallback、watchdog 和固定种子回归测试。
 
+另有一条延后实施的单种子求解路线：固定一个 seed，以冻结策略完成 `K=4` 次全局动作 rollout，再依据组内相对回报做 trajectory-GRPO 风格的 LoRA 更新。它用于验证自动探索和更新闭环，允许对该 seed 过拟合；所有游戏操作均进入训练，不只训练战斗。该路线需要全合法动作 scoring、温度采样、旧策略 logprob、批次训练、adapter 热切换/重启和回滚，当前自动求解器只具备 rollout 采集。完整设计见[单种子轨迹级 GRPO 方案](SINGLE_SEED_GRPO.md)。
+
 少量 SFT 仍可作为纠正率过高时的补救，但不再作为当前主路线。训练数据必须区分人工覆盖、人工确认和自动动作：人工覆盖同时提供 SFT 正例及“人工动作优于模型首选”的偏好对；自动动作只在满足结果筛选时低权重使用。在线纠正可以覆盖状态分布偏移；胜负奖励和离线 RL 应等 Assist 策略稳定后再加入。无人值守运行必须加入闭环纠错和协议级 fallback。
 
 ## 模型路线
@@ -48,7 +50,7 @@ Qwen3-0.6B backbone
   `- high-level adapter
 ```
 
-高层先按 `screen_type` 做确定性路由，不做参数级 sparse MoE。训练采用 4bit QLoRA、micro-batch 1、gradient checkpointing、短上下文；训练和游戏推理串行执行。若本机只负责采集，训练可以迁移到 RTX 5050 机器。
+高层先按 `screen_type` 做确定性路由，不做参数级 sparse MoE。训练采用 4bit QLoRA、micro-batch 1、gradient checkpointing、短上下文；训练和游戏推理串行执行。RTX 3050 4GB 不应与游戏和推理并行训练；单种子 GRPO 训练器暂缓，待 RTX 5050 可用并确认显存后推进。
 
 建议数据规模：5-10 局 Shadow/人类局用于发现协议缺陷，5 局 Assist 用于验证纠正闭环，累计 20-40 局判断第一版策略是否有用，后续以模型 override 状态而不是局数决定 DAgger 采集量。每局动作数受路线和战斗长度影响，不应只按固定条数估算。详细字段和阶段见 [在线纠正式模仿学习方案](ONLINE_DAGGER.md)。
 
