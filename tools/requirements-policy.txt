@@ -1,0 +1,8 @@
+# Candidate Assist policy server. Install into the project .venv with uv.
+# Install torch separately from the PyTorch CUDA wheel index. Installing it
+# from a general PyPI mirror selects a CPU-only build on Windows.
+transformers>=4.51,<5
+accelerate>=1.0
+safetensors>=0.4
+huggingface_hub>=0.27
+bitsandbytes>=0.48

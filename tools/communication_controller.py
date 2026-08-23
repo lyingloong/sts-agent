@@ -12,7 +12,9 @@ import json
 import os
 import shlex
 import socket
+import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -35,6 +37,13 @@ PLAYER_CLASSES = {
 MAX_ASCENSION = 20
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -45,6 +54,56 @@ def short_id(value: Any) -> str:
 
 def is_slot(potion: dict[str, Any]) -> bool:
     return str(potion.get("id", "")).lower() == "potion slot"
+
+
+def potion_inventory_full(state: dict[str, Any]) -> bool:
+    """Return whether the three visible potion slots are all occupied."""
+    potions = state.get("potions")
+    if not isinstance(potions, list) or len(potions) < 3:
+        return False
+    return not any(isinstance(item, dict) and is_slot(item) for item in potions)
+
+
+def blocked_potion_reward_indices(message: dict[str, Any]) -> set[int]:
+    """Find reward/shop choices that would silently stall with full potions."""
+    state = game_state(message)
+    if not potion_inventory_full(state):
+        return set()
+    screen = str(state.get("screen_type") or "").upper()
+    choices = state.get("choice_list")
+    if not isinstance(choices, list):
+        return set()
+    screen_state = state.get("screen_state")
+    if not isinstance(screen_state, dict):
+        screen_state = {}
+
+    blocked: set[int] = set()
+    if screen == "COMBAT_REWARD":
+        rewards = screen_state.get("rewards")
+        if isinstance(rewards, list):
+            for index, reward in enumerate(rewards):
+                if isinstance(reward, dict) and str(reward.get("reward_type", "")).upper() == "POTION":
+                    blocked.add(index)
+        # Older CommunicationMod versions only expose choice_list.
+        blocked.update(
+            index
+            for index, label in enumerate(choices)
+            if str(label).strip().lower() in {"potion", "药水"}
+        )
+    elif screen == "SHOP_SCREEN":
+        potion_names = {
+            str(item.get("name"))
+            for item in screen_state.get("potions", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        blocked.update(index for index, label in enumerate(choices) if str(label) in potion_names)
+    return blocked
+
+
+def blocked_potion_choice_error(message: dict[str, Any], index: int) -> str | None:
+    if index in blocked_potion_reward_indices(message):
+        return "药水栏已满，不能拾取或购买药水；请改选其他奖励，或先丢弃一瓶药水。"
+    return None
 
 
 def command_set(message: dict[str, Any]) -> set[str]:
@@ -197,6 +256,61 @@ def is_map_room_transition(state: dict[str, Any]) -> bool:
     return state.get("screen_type") == "MAP" and state.get("room_phase") != "COMPLETE"
 
 
+def is_settings_overlay(state: dict[str, Any]) -> bool:
+    """Detect the pause/settings overlay that temporarily hides combat input."""
+    screen_name = str(state.get("screen_name") or "").upper()
+    return bool(state.get("is_screen_up")) and screen_name in {"SETTINGS", "PAUSE"}
+
+
+def shop_visit_key(message: dict[str, Any]) -> tuple[int, int] | None:
+    """Identify a shop by Act and floor for per-run re-entry guards."""
+    state = game_state(message)
+    try:
+        act = int(state.get("act"))
+        floor = int(state.get("floor"))
+    except (TypeError, ValueError):
+        return None
+    return act, floor
+
+
+def is_shop_room(state: dict[str, Any]) -> bool:
+    return str(state.get("screen_type") or "").upper() == "SHOP_ROOM"
+
+
+def shop_reentry_blocked(message: dict[str, Any], visited_shop_rooms: set[tuple[int, int]] | None) -> bool:
+    if not visited_shop_rooms or not is_shop_room(game_state(message)):
+        return False
+    key = shop_visit_key(message)
+    return key in visited_shop_rooms if key is not None else False
+
+
+def run_memory_summary(visited_shop_rooms: set[tuple[int, int]] | None) -> dict[str, Any]:
+    """Expose explicit environment constraints without replaying history."""
+    rooms = sorted(visited_shop_rooms or set())
+    return {"visited_shop_rooms": [{"act": act, "floor": floor} for act, floor in rooms]}
+
+
+def candidate_assist_allowed(message: dict[str, Any]) -> bool:
+    """Return whether this in-game screen should receive model candidates."""
+    configured = {
+        token.strip().upper()
+        for token in os.environ.get("STS_AGENT_ASSIST_SCREENS", "ALL").split(",")
+        if token.strip()
+    }
+    if not configured:
+        return False
+    if "ALL" in configured:
+        return bool(message.get("in_game"))
+    state = game_state(message)
+    return (
+        "COMBAT" in configured
+        and state.get("screen_type") == "NONE"
+        and state.get("room_phase") == "COMBAT"
+        and isinstance(state.get("combat_state"), dict)
+        and not is_settings_overlay(state)
+    )
+
+
 def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
     """Create the model-facing state without hidden draw order or RNG seed."""
     state = game_state(message)
@@ -257,6 +371,46 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
     if isinstance(combat, dict):
         result["combat"] = normalize_combat(combat)
     return result
+
+
+def policy_observation(
+    message: dict[str, Any],
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
+) -> dict[str, Any]:
+    """Route only the public context relevant to the active screen."""
+    normalized = normalize_state(message)
+    # Full route information belongs only to the actual map selection screen.
+    # A transient map overlay is normalized as TRANSITION and must not leak
+    # route detail into event/reward/combat decisions.
+    if normalized.get("screen_type") == "MAP":
+        normalized["run_memory"] = run_memory_summary(visited_shop_rooms)
+        return normalized
+
+    normalized.pop("map", None)
+    normalized["run_memory"] = run_memory_summary(visited_shop_rooms)
+    if normalized.get("screen_type") != "NONE" or normalized.get("room_phase") != "COMBAT":
+        return normalized
+
+    # Combat runs every turn, so keep this prompt compact even though map
+    # context has already been removed above.
+    return {
+        key: normalized.get(key)
+        for key in (
+            "screen_type",
+            "room_phase",
+            "action_phase",
+            "floor",
+            "act",
+            "class",
+            "ascension_level",
+            "current_hp",
+            "max_hp",
+            "gold",
+            "relics",
+            "potions",
+            "combat",
+        )
+    }
 
 
 def deck_summary(deck: Any) -> list[dict[str, Any]]:
@@ -359,11 +513,28 @@ def normalize_combat(combat: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def semantic_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
+def semantic_actions(
+    message: dict[str, Any],
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
+) -> list[dict[str, Any]]:
     """Build action candidates using stable semantic commands, not clicks."""
     commands = command_set(message)
     state = game_state(message)
     result: list[dict[str, Any]] = []
+    if is_settings_overlay(state):
+        # CommunicationMod exposes the overlay through the generic KEY
+        # command rather than RETURN/CANCEL. Do not expose underlying combat
+        # actions while the settings screen is on top of the game.
+        if "key" in commands:
+            result.append(
+                {
+                    "id": "KEY:CANCEL",
+                    "command": "KEY Cancel",
+                    "kind": "key",
+                    "label": "关闭设置界面",
+                }
+            )
+        return result
     combat = state.get("combat_state")
     if state.get("screen_type") == "NONE" and state.get("room_phase") == "COMBAT" and isinstance(combat, dict):
         hand = combat.get("hand", [])
@@ -385,6 +556,7 @@ def semantic_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
                                 "kind": "play",
                                 "card_index": index,
                                 "target": target,
+                                "label": f"出牌 {card.get('name', index)} -> 敌人 {target}",
                             }
                         )
                 else:
@@ -394,10 +566,11 @@ def semantic_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
                             "command": f"PLAY {index}",
                             "kind": "play",
                             "card_index": index,
+                            "label": f"出牌 {card.get('name', index)}",
                         }
                     )
         if "end" in commands:
-            result.append({"id": "END_TURN", "command": "END", "kind": "end_turn"})
+            result.append({"id": "END_TURN", "command": "END", "kind": "end_turn", "label": "结束回合"})
         if "potion" in commands:
             for index, potion in enumerate(state.get("potions", [])):
                 if not isinstance(potion, dict) or is_slot(potion):
@@ -409,10 +582,11 @@ def semantic_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
                                 {
                                     "id": f"POTION_USE:slot={index}:target={target}",
                                     "command": f"POTION USE {index} {target}",
-                                    "kind": "potion_use",
-                                    "slot": index,
-                                    "target": target,
-                                }
+                                "kind": "potion_use",
+                                "slot": index,
+                                "target": target,
+                                "label": f"使用药水 {potion.get('name', index)} -> 敌人 {target}",
+                            }
                             )
                     else:
                         result.append(
@@ -421,16 +595,18 @@ def semantic_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
                                 "command": f"POTION USE {index}",
                                 "kind": "potion_use",
                                 "slot": index,
+                                "label": f"使用药水 {potion.get('name', index)}",
                             }
                         )
                 if potion.get("can_discard", False):
                     result.append(
                         {
                             "id": f"POTION_DISCARD:slot={index}",
-                            "command": f"POTION DISCARD {index}",
-                            "kind": "potion_discard",
-                            "slot": index,
-                        }
+                        "command": f"POTION DISCARD {index}",
+                        "kind": "potion_discard",
+                        "slot": index,
+                        "label": f"丢弃药水 {potion.get('name', index)}",
+                    }
                     )
         return result
 
@@ -439,8 +615,11 @@ def semantic_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
         if "return" in commands:
             result.append({"id": "RETURN", "command": "RETURN", "kind": "return"})
         return result
-    if "choose" in commands and isinstance(choices, list):
+    if "choose" in commands and isinstance(choices, list) and not shop_reentry_blocked(message, visited_shop_rooms):
+        blocked_potions = blocked_potion_reward_indices(message)
         for index, label in enumerate(choices):
+            if index in blocked_potions:
+                continue
             result.append(
                 {
                     "id": f"CHOOSE:index={index}",
@@ -534,7 +713,75 @@ def parse_start_arguments(parts: list[str]) -> tuple[str, int, str | None, str |
     return character, ascension, seed, None
 
 
-def parse_human_input(text: str, message: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None, str | None]:
+def candidate_action_for_input(
+    parts: list[str],
+    message: dict[str, Any],
+    decision: dict[str, Any] | None,
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """Resolve explicit Candidate Assist shortcuts before game choices."""
+    if not decision:
+        return None, None, None
+    candidates = decision.get("model_candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None, None, None
+    actions = semantic_actions(message, visited_shop_rooms)
+    action_by_id = {str(action.get("id")): action for action in actions}
+    op = parts[0].lower()
+    candidate_index: int | None = None
+    if op in {"a", "accept"} and len(parts) == 1:
+        candidate_index = 1
+    elif op in {"pick", "candidate", "k"} and len(parts) == 2 and parts[1].isdigit():
+        candidate_index = int(parts[1])
+    if candidate_index is None:
+        return None, None, None
+    if not 1 <= candidate_index <= len(candidates):
+        return None, None, "候选序号超出范围；请输入 a 或 pick <候选序号>。"
+    item = candidates[candidate_index - 1]
+    candidate_id = str(item.get("action_id", "")) if isinstance(item, dict) else ""
+    action = action_by_id.get(candidate_id)
+    if action is None:
+        return None, None, "模型候选已过期，请输入 s 刷新状态。"
+    return action["command"], action, None
+
+
+def candidate_source_for_input(text: str, decision: dict[str, Any] | None) -> str:
+    if not decision:
+        return "human_only"
+    if not decision.get("model_candidates"):
+        return "human_after_model_fallback"
+    try:
+        parts = shlex.split(text.strip())
+    except ValueError:
+        return "human_override"
+    if parts and parts[0].lower() in {"a", "accept"}:
+        return "model_accept"
+    if parts and parts[0].lower() in {"pick", "candidate", "k"}:
+        return "human_choice"
+    return "human_override"
+
+
+def finalize_decision(
+    decision: dict[str, Any] | None,
+    action: dict[str, Any],
+    source: str,
+) -> dict[str, Any] | None:
+    if not decision:
+        return None
+    result = dict(decision)
+    executed = str(action.get("id", ""))
+    result["executed_action"] = executed
+    result["source"] = source
+    result["overridden"] = executed != str(decision.get("model_action", ""))
+    return result
+
+
+def parse_human_input(
+    text: str,
+    message: dict[str, Any],
+    decision: dict[str, Any] | None = None,
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
     """Return (game command, action metadata, error)."""
     stripped = text.strip()
     if not stripped:
@@ -546,12 +793,20 @@ def parse_human_input(text: str, message: dict[str, Any]) -> tuple[str | None, d
     if not parts:
         return None, None, "请输入动作。"
     op = parts[0].lower()
-    actions = semantic_actions(message)
+    actions = semantic_actions(message, visited_shop_rooms)
 
     if op in {"q", "quit", "exit"}:
         return "__QUIT__", None, None
     if op in {"h", "help"}:
         return "__HELP__", None, None
+    candidate_command, candidate_action, candidate_error = candidate_action_for_input(
+        parts,
+        message,
+        decision,
+        visited_shop_rooms,
+    )
+    if candidate_command is not None or candidate_error is not None:
+        return candidate_command, candidate_action, candidate_error
     if op == "state" or (op == "s" and message.get("in_game")):
         return "STATE", None, None
     if op in {"p", "play"}:
@@ -628,6 +883,11 @@ def parse_human_input(text: str, message: dict[str, Any]) -> tuple[str | None, d
             index = int(token)
         except ValueError:
             return None, None, "选项序号必须是整数。"
+        if shop_reentry_blocked(message, visited_shop_rooms):
+            return None, None, "该商店入口本层已访问，不能再次进入；请输入 c 继续离开。"
+        blocked_error = blocked_potion_choice_error(message, index)
+        if blocked_error:
+            return None, None, blocked_error
         command = f"CHOOSE {index}"
         action = action_for_command(actions, command)
         return (command, action, None) if action else (None, None, "该选项当前不可选择。")
@@ -637,8 +897,14 @@ def parse_human_input(text: str, message: dict[str, Any]) -> tuple[str | None, d
             if action:
                 return action["command"], action, None
         return None, None, "当前没有确认或继续动作。"
-    if op in {"x", "cancel", "return", "skip", "leave"}:
-        preferred = {"x": ("CANCEL", "RETURN", "SKIP", "LEAVE"), "skip": ("SKIP",), "leave": ("LEAVE",)}.get(op, (op.upper(),))
+    if op in {"x", "esc", "escape", "cancel", "return", "skip", "leave"}:
+        preferred = {
+            "x": ("CANCEL", "RETURN", "SKIP", "LEAVE", "KEY CANCEL"),
+            "esc": ("KEY CANCEL", "CANCEL", "RETURN", "SKIP", "LEAVE"),
+            "escape": ("KEY CANCEL", "CANCEL", "RETURN", "SKIP", "LEAVE"),
+            "skip": ("SKIP",),
+            "leave": ("LEAVE",),
+        }.get(op, (op.upper(),))
         for name in preferred:
             action = action_for_command(actions, name)
             if action:
@@ -662,7 +928,13 @@ def parse_human_input(text: str, message: dict[str, Any]) -> tuple[str | None, d
     return None, None, "未知输入。输入 h 查看帮助。"
 
 
-def format_view(message: dict[str, Any], run_id: str | None, error: str | None = None) -> str:
+def format_view(
+    message: dict[str, Any],
+    run_id: str | None,
+    error: str | None = None,
+    decision: dict[str, Any] | None = None,
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
+) -> str:
     state = game_state(message)
     lines: list[str] = ["STS AGENT", "=" * 78]
     if error:
@@ -691,9 +963,22 @@ def format_view(message: dict[str, Any], run_id: str | None, error: str | None =
         f"HP {state.get('current_hp', '?')}/{state.get('max_hp', '?')} "
         f"| Gold {state.get('gold', '?')} | Room {state.get('room_phase', '')}"
     )
+    if decision and decision.get("model_candidates"):
+        lines.append("模型候选（输入 a 接受第一项，或输入 pick 1/2/3 选择；也可直接手动输入动作）：")
+        for item in decision["model_candidates"]:
+            score = item.get("score")
+            score_text = f" score={score:.3f}" if isinstance(score, (int, float)) else ""
+            lines.append(f"  [{item.get('rank')}] {item.get('action_id')} {item.get('label', '')}{score_text}")
+    elif decision and decision.get("assist_status"):
+        reason = str(decision.get("assist_reason") or "未提供原因")
+        lines.append(f"模型状态：{decision['assist_status']}（{reason}）；当前为人工操作。")
     lines.append("-" * 78)
     combat = state.get("combat_state")
-    if screen == "NONE" and state.get("room_phase") == "COMBAT" and isinstance(combat, dict):
+    settings_overlay = is_settings_overlay(state)
+    if settings_overlay:
+        lines.append("界面覆盖层：设置（战斗仍在进行）")
+        lines.append("请先输入 x 关闭设置界面；关闭后会恢复出牌和结束回合动作。")
+    elif screen == "NONE" and state.get("room_phase") == "COMBAT" and isinstance(combat, dict):
         player = combat.get("player", {}) if isinstance(combat.get("player"), dict) else {}
         lines.append(f"战斗 | Turn {combat.get('turn', '?')} | Energy {player.get('energy', '?')} | Block {player.get('block', '?')}")
         lines.append("敌人")
@@ -796,8 +1081,14 @@ def format_view(message: dict[str, Any], run_id: str | None, error: str | None =
     choices = state.get("choice_list", [])
     if choices and not map_transition:
         lines.append("选项：" + " | ".join(f"{i}:{choice}" for i, choice in enumerate(choices)))
+        blocked_potions = blocked_potion_reward_indices(message)
+        if blocked_potions:
+            labels = ", ".join(str(choices[index]) for index in sorted(blocked_potions))
+            lines.append(f"不可选：{labels}（药水栏已满；请改选其他选项或先丢弃药水）")
+    if shop_reentry_blocked(message, visited_shop_rooms):
+        lines.append("商店入口已在本层访问；不能再次进入。请输入 c 继续离开商店房间。")
     lines.append("合法动作")
-    for action in semantic_actions(message):
+    for action in semantic_actions(message, visited_shop_rooms):
         label = action["id"]
         if action.get("label"):
             label += f" ({action['label']})"
@@ -862,6 +1153,246 @@ class TerminalBridge:
         self.server.close()
 
 
+class PolicyClient:
+    """Optional local policy subprocess used by Candidate Assist.
+
+    CommunicationMod and the terminal remain independent from Transformers.
+    A missing environment, model, or response timeout disables this client for
+    the current controller session and leaves human-only input available.
+    """
+
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = project_root
+        self.enabled = env_flag("STS_AGENT_ASSIST", True)
+        self.model = os.environ.get("STS_AGENT_MODEL", "Qwen/Qwen3-0.6B")
+        self.endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+        self.top_k = max(1, int(os.environ.get("STS_AGENT_TOP_K", "3")))
+        self.timeout = max(1.0, float(os.environ.get("STS_AGENT_POLICY_TIMEOUT", "8")))
+        self.start_timeout = max(10.0, float(os.environ.get("STS_AGENT_POLICY_START_TIMEOUT", "300")))
+        self.process: subprocess.Popen[str] | None = None
+        self.request_id = 0
+        self.disabled_reason: str | None = None
+
+    def _python_executable(self) -> str:
+        configured = os.environ.get("STS_AGENT_POLICY_PYTHON")
+        if configured:
+            return configured
+        if os.name == "nt":
+            candidate = self.project_root / ".venv" / "Scripts" / "python.exe"
+        else:
+            candidate = self.project_root / ".venv" / "bin" / "python"
+        return str(candidate) if candidate.exists() else sys.executable
+
+    @staticmethod
+    def _readline_with_timeout(stream: TextIO, timeout: float) -> str | None:
+        result: list[str | None] = [None]
+
+        def read() -> None:
+            try:
+                result[0] = stream.readline()
+            except (OSError, ValueError):
+                result[0] = None
+
+        thread = threading.Thread(target=read, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        return result[0] if not thread.is_alive() else None
+
+    def _disable(self, reason: str) -> None:
+        self.disabled_reason = reason
+        self.enabled = False
+        self.close()
+        print(f"candidate assist disabled: {reason}", file=sys.stderr, flush=True)
+
+    def _fallback_decision(self, status: str, reason: str) -> dict[str, Any]:
+        """Return an observable human-fallback state for the terminal/trace."""
+        return {
+            "mode": "candidate_assist",
+            "model_id": self.model,
+            "candidate_source": "policy_server",
+            "model_action": None,
+            "model_candidates": [],
+            "model_confidence": None,
+            "assist_status": status,
+            "assist_reason": reason,
+            "executed_action": None,
+            "source": None,
+            "overridden": None,
+        }
+
+    def status_decision(self) -> dict[str, Any]:
+        """Expose startup/readiness state even on screens without ranking."""
+        if self.enabled and self.process is not None and self.process.poll() is None:
+            return self._fallback_decision("就绪", f"{self.model} 已预热，本局每个游戏界面均会请求候选")
+        return self._fallback_decision("不可用", self.disabled_reason or "模型辅助已关闭")
+
+    def prewarm(self) -> dict[str, Any]:
+        """Load the local policy before CommunicationMod receives readiness."""
+        if not self.enabled:
+            return self.status_decision()
+        self._start()
+        return self.status_decision()
+
+    def _start(self) -> bool:
+        if not self.enabled:
+            return False
+        if self.process is not None and self.process.poll() is None:
+            return True
+        server = self.project_root / "tools" / "policy_server.py"
+        if not server.exists():
+            self._disable(f"missing {server}")
+            return False
+        command = [self._python_executable(), str(server), "--model", self.model, "--top-k", str(self.top_k)]
+        # Keep game-time startup deterministic. Downloading model weights is
+        # an explicit preparation step handled by download_qwen.py.
+        command.append("--local-files-only")
+        if env_flag("STS_AGENT_POLICY_MOCK", False):
+            command.append("--mock")
+        child_env = os.environ.copy()
+        child_env["HF_ENDPOINT"] = self.endpoint
+        # The policy protocol carries Chinese card and event text. Force the
+        # child interpreter to decode its JSONL pipe as UTF-8 on Windows.
+        child_env["PYTHONUTF8"] = "1"
+        try:
+            self.process = subprocess.Popen(
+                command,
+                cwd=str(self.project_root),
+                env=child_env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=sys.stderr,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+            )
+        except OSError as exc:
+            self._disable(f"cannot start policy server: {exc}")
+            return False
+        assert self.process.stdout is not None
+        line = self._readline_with_timeout(self.process.stdout, self.start_timeout)
+        if not line:
+            try:
+                exit_code = self.process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                exit_code = self.process.poll()
+            self._disable(f"policy server did not become ready (exit={exit_code})")
+            return False
+        try:
+            ready = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self._disable(f"invalid policy handshake: {exc}")
+            return False
+        if ready.get("type") != "ready":
+            self._disable(f"unexpected policy handshake: {ready}")
+            return False
+        print(
+            f"candidate assist ready: {ready.get('model_id', self.model)} endpoint={ready.get('endpoint', self.endpoint)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return True
+
+    def rank(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not legal_actions:
+            return None
+        if not self.enabled:
+            return self._fallback_decision("不可用", self.disabled_reason or "模型辅助已关闭")
+        if not self._start():
+            return self._fallback_decision("不可用", self.disabled_reason or "模型服务未启动")
+        assert self.process is not None and self.process.stdin is not None and self.process.stdout is not None
+        self.request_id += 1
+        # Qwen 0.6B often fails to copy long semantic IDs such as
+        # PLAY:card=2:target=1. Give the model short aliases and resolve them
+        # back to the canonical, currently legal action IDs here.
+        alias_to_action: dict[str, dict[str, Any]] = {}
+        model_actions: list[dict[str, Any]] = []
+        for index, action in enumerate(legal_actions, start=1):
+            alias = f"A{index}"
+            alias_to_action[alias] = action
+            model_actions.append({"id": alias, "label": str(action.get("label") or action.get("command") or alias)})
+        request = {
+            "type": "rank",
+            "request_id": self.request_id,
+            "observation": observation,
+            "legal_actions": model_actions,
+            "top_k": self.top_k,
+        }
+        try:
+            self.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
+        except (OSError, ValueError) as exc:
+            self._disable(f"policy request failed: {exc}")
+            return self._fallback_decision("不可用", self.disabled_reason or "模型请求失败")
+        line = self._readline_with_timeout(self.process.stdout, self.timeout)
+        if not line:
+            self._disable("policy response timeout or closed pipe")
+            return self._fallback_decision("超时", self.disabled_reason or "模型未在时限内返回")
+        try:
+            response = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self._disable(f"invalid policy response: {exc}")
+            return self._fallback_decision("不可用", self.disabled_reason or "模型返回格式无效")
+        if response.get("type") == "error":
+            self._disable(str(response.get("error", "policy error")))
+            return self._fallback_decision("不可用", self.disabled_reason or "模型服务报错")
+        if response.get("type") != "ranking":
+            self._disable(f"unexpected policy response: {response}")
+            return self._fallback_decision("不可用", self.disabled_reason or "模型服务返回未知消息")
+        candidates: list[dict[str, Any]] = []
+        for item in response.get("candidates", []):
+            if not isinstance(item, dict):
+                continue
+            alias = str(item.get("action_id", ""))
+            action = alias_to_action.get(alias)
+            if action is None:
+                continue
+            candidate_id = str(action.get("id", ""))
+            if not candidate_id or any(existing["action_id"] == candidate_id for existing in candidates):
+                continue
+            candidates.append(
+                {
+                    "rank": len(candidates) + 1,
+                    "action_id": candidate_id,
+                    "label": action.get("label") or action.get("command"),
+                    "score": item.get("score"),
+                    "log_score": item.get("log_score"),
+                }
+            )
+        if not candidates:
+            return self._fallback_decision("无候选", "模型没有返回可解析的动作；可以直接手动操作")
+        return {
+            "mode": "candidate_assist",
+            "model_id": response.get("model_id", self.model),
+            "candidate_source": "policy_server",
+            "model_action": candidates[0]["action_id"],
+            "model_candidates": candidates,
+            "model_confidence": candidates[0].get("score"),
+            "executed_action": None,
+            "source": None,
+            "overridden": None,
+        }
+
+    def close(self) -> None:
+        process = self.process
+        self.process = None
+        if process is None:
+            return
+        try:
+            if process.stdin is not None and process.poll() is None:
+                process.stdin.write(json.dumps({"type": "shutdown"}) + "\n")
+                process.stdin.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+
 def write_jsonl(handle: TextIO, value: dict[str, Any]) -> None:
     handle.write(json.dumps(value, ensure_ascii=False) + "\n")
     handle.flush()
@@ -879,6 +1410,9 @@ def help_text() -> str:
             "  c                        确认/继续",
             "  x                        取消/返回/跳过",
             "  s                        刷新状态；主菜单中开始游戏",
+            "  a                        接受模型第一候选（Candidate Assist）",
+            "  pick <序号>               选择显示的模型候选",
+            "  1 / 2 / 3                保留给事件、奖励或商店中的游戏选项",
             "  h                        显示帮助",
             "  q                        断开终端，controller 继续运行",
         )
@@ -933,20 +1467,35 @@ def run_output_paths(
     return trace_dir / f"action-trace-{stem}.jsonl", trace_dir / f"run-events-{stem}.jsonl"
 
 
-def ask_action(bridge: TerminalBridge, message: dict[str, Any], run_id: str | None, error: str | None = None) -> tuple[str, dict[str, Any]] | None:
+def ask_action(
+    bridge: TerminalBridge,
+    message: dict[str, Any],
+    run_id: str | None,
+    error: str | None = None,
+    policy: PolicyClient | None = None,
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
+    actions = semantic_actions(message, visited_shop_rooms)
+    if policy is None:
+        decision = None
+    elif candidate_assist_allowed(message):
+        decision = policy.rank(policy_observation(message, visited_shop_rooms), actions)
+    else:
+        decision = policy.status_decision()
     while True:
         bridge.send(
             {
                 "type": "view",
-                "text": format_view(message, run_id, error),
+                "text": format_view(message, run_id, error, decision, visited_shop_rooms),
                 "in_game": bool(message.get("in_game")),
+                "decision": decision,
             }
         )
         response = bridge.receive()
         if response is None:
             continue
         text = str(response.get("text", ""))
-        command, action, parse_error = parse_human_input(text, message)
+        command, action, parse_error = parse_human_input(text, message, decision, visited_shop_rooms)
         if command == "__QUIT__":
             bridge.send({"type": "shutdown", "message": "terminal disconnected; controller is still running"})
             # Keep the CommunicationMod process and TCP listener alive. The
@@ -962,8 +1511,9 @@ def ask_action(bridge: TerminalBridge, message: dict[str, Any], run_id: str | No
             continue
         if command == "STATE":
             print(command, flush=True)
-            return command, {"id": "STATE", "kind": "state_request", "command": command}
-        return command, action
+            return command, {"id": "STATE", "kind": "state_request", "command": command}, None
+        source = candidate_source_for_input(text, decision)
+        return command, action, finalize_decision(decision, action, source)
 
 
 def main() -> int:
@@ -976,6 +1526,7 @@ def main() -> int:
     raw_path = raw_dir / f"messages-{session_id}.jsonl"
 
     bridge = TerminalBridge(HOST, PORT)
+    policy = PolicyClient(project_root)
     pending: dict[str, Any] | None = None
     current_message: dict[str, Any] | None = None
     run_id: str | None = None
@@ -983,6 +1534,7 @@ def main() -> int:
     run_index = 0
     step_id = 0
     message_index = 0
+    visited_shop_rooms: set[tuple[int, int]] = set()
     trace_output: TextIO | None = None
     event_output: TextIO | None = None
     trace_path: Path | None = None
@@ -1027,6 +1579,17 @@ def main() -> int:
         if event_output is not None:
             write_jsonl(event_output, value)
 
+    def trace_state(message: dict[str, Any]) -> dict[str, Any]:
+        if not message.get("in_game"):
+            return {"in_game": False}
+        value = normalize_state(message)
+        value["run_memory"] = run_memory_summary(visited_shop_rooms)
+        return value
+
+    # The game must not expose a start action before the policy has finished
+    # loading. CommunicationMod waits for this stdout handshake.
+    policy.prewarm()
+
     # Required handshake. No diagnostics may go to stdout.
     print("ready", flush=True)
     print(f"controller session={session_id}", file=sys.stderr, flush=True)
@@ -1051,13 +1614,14 @@ def main() -> int:
                     if pending is not None:
                         write_trace(
                             {
-                                "schema_version": "0.1",
+                                "schema_version": "0.2" if pending.get("decision") else "0.1",
                                 "session_id": session_id,
                                 "run_id": pending.get("run_id"),
                                 "run_config": pending.get("run_config"),
                                 "step_id": pending.get("step_id"),
                                 "pre_state": pending.get("pre_state"),
                                 "legal_actions": pending.get("legal_actions", []),
+                                "decision": pending.get("decision"),
                                 "action": pending.get("action"),
                                 "command": pending.get("command"),
                                 "post_state": None,
@@ -1067,12 +1631,27 @@ def main() -> int:
                         )
                         pending = None
                     if current_message is not None:
-                        result = ask_action(bridge, current_message, run_id, str(message.get("error")))
+                        result = ask_action(
+                            bridge,
+                            current_message,
+                            run_id,
+                            str(message.get("error")),
+                            policy,
+                            visited_shop_rooms,
+                        )
                         if result is None:
                             return 0
-                        command, action = result
+                        command, action, decision = result
                         if command != "STATE":
-                            pending = make_pending(current_message, run_id, run_config, step_id, action)
+                            pending = make_pending(
+                                current_message,
+                                run_id,
+                                run_config,
+                                step_id,
+                                action,
+                                decision,
+                                visited_shop_rooms,
+                            )
                             step_id += 1
                         else:
                             pending = None
@@ -1081,10 +1660,24 @@ def main() -> int:
                 if not message.get("ready_for_command"):
                     continue
 
+                if run_config is not None and message.get("in_game") and str(game_state(message).get("screen_type")) == "SHOP_SCREEN":
+                    key = shop_visit_key(message)
+                    if key is not None and key not in visited_shop_rooms:
+                        visited_shop_rooms.add(key)
+                        write_event(
+                            {
+                                "event": "shop_entered",
+                                "run_id": run_id,
+                                "act": key[0],
+                                "floor": key[1],
+                                "at": now_iso(),
+                            }
+                        )
+
                 if pending is not None:
                     write_trace(
                         {
-                            "schema_version": "0.1",
+                            "schema_version": "0.2" if pending.get("decision") else "0.1",
                             "session_id": session_id,
                             "run_id": pending.get("run_id"),
                             "run_config": pending.get("run_config"),
@@ -1092,9 +1685,10 @@ def main() -> int:
                             "screen_type": pending.get("screen_type"),
                             "pre_state": pending.get("pre_state"),
                             "legal_actions": pending.get("legal_actions", []),
+                            "decision": pending.get("decision"),
                             "action": pending.get("action"),
                             "command": pending.get("command"),
-                            "post_state": normalize_state(message) if message.get("in_game") else {"in_game": False},
+                            "post_state": trace_state(message),
                             "accepted": True,
                             "stable_after_action": True,
                             "terminal": game_state(message).get("screen_type") in {"GAME_OVER", "VICTORY"},
@@ -1122,14 +1716,15 @@ def main() -> int:
                             },
                         )
                         rebind_run_outputs_after_seed()
-                result = ask_action(bridge, message, run_id)
+                result = ask_action(bridge, message, run_id, policy=policy, visited_shop_rooms=visited_shop_rooms)
                 if result is None:
                     return 0
-                command, action = result
+                command, action, decision = result
                 if action.get("kind") == "start_run":
                     run_index += 1
                     run_id = f"{session_id}-run-{run_index:03d}"
                     step_id = 0
+                    visited_shop_rooms.clear()
                     run_config = {
                         "character": action.get("character", "IRONCLAD"),
                         "ascension": action.get("ascension", 0),
@@ -1152,7 +1747,7 @@ def main() -> int:
                 elif command == "STATE":
                     pending = None
                 else:
-                    pending = make_pending(message, run_id, run_config, step_id, action)
+                    pending = make_pending(message, run_id, run_config, step_id, action, decision, visited_shop_rooms)
                     step_id += 1
                     print(command, flush=True)
     except KeyboardInterrupt:
@@ -1160,6 +1755,7 @@ def main() -> int:
         return 0
     finally:
         close_run_outputs()
+        policy.close()
         bridge.close()
     return 0
 
@@ -1170,15 +1766,19 @@ def make_pending(
     run_config: dict[str, Any] | None,
     step_id: int,
     action: dict[str, Any],
+    decision: dict[str, Any] | None = None,
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_state(message)
+    normalized["run_memory"] = run_memory_summary(visited_shop_rooms)
     return {
         "run_id": run_id,
         "run_config": run_config.copy() if run_config is not None else None,
         "step_id": step_id,
         "screen_type": normalized.get("screen_type"),
         "pre_state": normalized,
-        "legal_actions": semantic_actions(message),
+        "legal_actions": semantic_actions(message, visited_shop_rooms),
+        "decision": decision,
         "action": action,
         "command": action.get("command"),
     }

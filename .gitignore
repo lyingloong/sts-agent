@@ -35,6 +35,7 @@ outputs/
 
 # Local experiment/runtime files
 .cache/
+.uv-cache/
 tmp/
 logs/
 coverage.xml

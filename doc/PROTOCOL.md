@@ -61,6 +61,8 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 }
 ```
 
+在线纠正式采集时，轨迹可升级为 `schema_version: "0.2"` 并增加可选的 `decision` 字段。该字段同时保存 `model_action`、top-k `model_candidates`、`candidate_source`、`executed_action`、`source`（模型接受/人类覆盖/fallback）和 `overridden`，用于区分模型建议与人类最终标签。零样本 Qwen 第一版只生成给定 `legal_actions` 中的 action ID JSON 列表，controller 会再次过滤；后续的置信度路由会以可选 `action_scores` 和 `confidence` 字段保存受约束的全动作打分及自动/人工路由结果。完整字段、训练集导出和交互流程见[在线纠正式模仿学习方案](ONLINE_DAGGER.md)。旧的 `action` 字段继续保留，以兼容现有回放和清洗脚本。
+
 `pre_state`/`post_state` 是规范化状态，去除抽牌顺序、UUID 和其他不应作为玩家观察输入的字段。`messages-*.jsonl` 仍按 controller session 保存，只用于调试和重新清洗。随机种子未指定时，轨迹文件先使用 `seed-random`，收到内部 `game_state.seed` 后还原出显示种子并自动改名。
 
 `START` 的种子参数仍必须是字母数字。`game_state.seed` 的负号只是 Java 有符号 64 位内部表示；控制器不会把这个数值直接发送给 `START`，而是把它保存为 `internal_seed` 并解码成可输入的显示种子。
@@ -71,12 +73,16 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 - `combat.monsters[*].intent_damage`、`intent_hits`：从 CommunicationMod 的当前意图字段映射而来，用于表达敌人当前显示的攻击伤害和段数。
 - `combat.hand[*]`：保留 `damage`、`block`、`magic_number`、`description` 等字段（只有协议实际提供时才出现）。动态值不根据卡牌 ID 临时猜测；静态卡牌知识统一放在下方的 `effect` 字段。
 - `screen_type=TRANSITION`：CommunicationMod 返回地图界面但 `room_phase` 仍不是 `COMPLETE` 时的保护态。该状态不包含可训练的地图选择动作，只允许等待刷新或返回当前房间。
+- `screen_name=SETTINGS` 且 `is_screen_up=true`：表示设置/暂停覆盖层挡住了当前房间。此时 CommunicationMod 通常只暴露 `KEY`、`WAIT`、`STATE` 等通用命令，controller 将其显示为 `KEY:CANCEL`，终端输入 `x` 会发送 `KEY Cancel`；关闭覆盖层后才恢复战斗动作。
+- 药水栏已满时，controller 不会把 `COMBAT_REWARD` 中的 `POTION` 或商店中已识别的药水商品列为合法动作。CommunicationMod 对这类操作可能不返回错误或状态变化；终端会提示先选择其他奖励，或先丢弃一瓶药水。
+
+Candidate Assist 由 controller 在 CommunicationMod 启动握手前预热独立的 `tools/policy_server.py`。模型必须先通过 `tools/download_qwen.py` 从 Hugging Face 官方 `HF_ENDPOINT=https://huggingface.co` 预下载；脚本会在没有显式代理变量时读取 Windows 系统代理。游戏运行时 policy server 只从本地缓存加载，以免网络问题阻塞回合。默认对所有游戏内场景请求候选；可用 `STS_AGENT_ASSIST_SCREENS=COMBAT` 临时收窄。`MAP` 才发送完整公开 `map.nodes`、当前位置和可选节点；战斗、事件、商店、奖励、休息和地图过渡态都移除地图。controller 维护显式环境记忆 `run_memory.visited_shop_rooms`。首次观察到 `SHOP_SCREEN` 时按 `(Act, Floor)` 记录该商店；之后同层 `SHOP_ROOM` 从合法动作中移除 `CHOOSE shop`，只保留 `PROCEED` 等离开动作，人工输入也不能绕过。它把其余真实合法动作映射为本请求内短别名 `A1/A2/...`，policy server 返回至多三个别名，controller 再映射、校验并编译 CommunicationMod 命令。这避免小模型复制长的卡牌/目标 ID 时产生空候选。终端 `a` 接受首选，`pick <序号>` 选择其他候选；裸数字不被候选逻辑截获，保留给游戏界面自己的选项。模型无候选、超时或加载失败时，`decision` 会记录 `assist_status` 和 `assist_reason`，终端显示原因后退回人工操作。环境变量 `STS_AGENT_ASSIST=0` 可关闭，`STS_AGENT_POLICY_MOCK=1` 可在不加载模型时测试协议。
 
 当前已增加本地静态知识库 fallback：`combat.hand[*].effect` 包含卡牌的 `type/rarity/color/target/cost`、基础 `damage/block/magic_number/hit_count`、`exhaust/ethereal/innate/retain`、`tags/keywords`、基础/升级描述和完整 `upgrade` 字段，`effect.source` 标记为 `static_knowledge`。若协议提供运行时字段，则这些字段覆盖静态值，并标记为 `runtime_over_static`。静态知识库由 `tools/fetch_card_knowledge.py` 从 [spire-archive StS1 cards 数据](https://github.com/nkhoit/spire-archive/blob/main/data/sts1/cards.json)生成，数据文件不提交 Git。
 
 ## 数据使用规则
 
-- 只把完整结束且动作全部接受的 run 放入正式 SFT 集。
+- 只把动作已接受、状态稳定的 step 放入正式纠正式数据集；`executed_action` 是监督标签，`model_action` 用于统计错误和 DAgger 重采样。
 - 中途退出、错误响应、状态不稳定的 run 保留在 raw 目录，标记为调试数据。
 - train/validation/test 按 `run_id` 或 `seed` 切分，不能按动作随机切分。
 - 不把 raw JSON 直接喂给模型；先经过版本化 normalizer 和 action compiler。
