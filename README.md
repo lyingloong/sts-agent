@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 游戏：StS1 + ModTheSpire + BaseMod + CommunicationMod
-- 采集方式：`communication_controller.py` 作为 CommunicationMod 外部进程，`human_terminal.py` 通过本机 TCP 提供输入
+- 采集方式：`communication_controller.py` 作为 CommunicationMod 外部进程；可选纯终端或双窗口透明 Overlay 通过本机 TCP 提供输入
 - 当前不需要额外编写 Java Mod；原生鼠标动作记录仍是后续工作
 - 状态输入使用 CommunicationMod 的结构化 JSON，并在轨迹中移除抽牌顺序、UUID 和随机种子等隐藏信息
 - 地图决策保留当前 Act 的完整公开地图图结构，而不是只有下一层节点
@@ -23,18 +23,34 @@
 ```properties
 command=D\:/miniconda3/python.exe D\:/Code/spire-mod/sts-agent/tools/communication_controller.py
 runAtGameStart=true
+maxInitializationTimeout=300
 ```
 
-路径按本机 Python 和项目目录修改。重启 ModTheSpire 后，CommunicationMod 会自动启动 controller。controller 会先启动并预热本地 policy model，完成后才向游戏返回 `ready`；因此游戏主菜单和终端开局输入会等待模型加载完成。
+路径按本机 Python 和项目目录修改。`maxInitializationTimeout` 单位是秒；默认的 10 秒不足以完成 Qwen 预热，会导致 CommunicationMod 终止 controller、终端报 `WinError 10061`。重启 ModTheSpire 后，CommunicationMod 会自动启动 controller。controller 会先启动并预热本地 policy model，完成后才向游戏返回 `ready`；因此游戏主菜单和终端开局输入会等待模型加载完成。
 
-### 2. 启动终端客户端
+### 2. 启动控制客户端
 
 ```powershell
 cd D:\Code\spire-mod\sts-agent
-python tools\human_terminal.py
+python tools\overlay_terminal.py
 ```
 
-终端客户端支持 `--no-clear` 保留历史输出、`--no-color` 禁用 ANSI 颜色；游戏中可用 `s` 或 `r` 请求刷新，`h`/`help` 在本地显示帮助，不会发送游戏动作。可在模型预热期间启动它；连接后会等待 controller 发送首个视图。不要单独从终端启动 `communication_controller.py`，它只能由 CommunicationMod 管理。
+Overlay 会创建两个相互独立的半透明窗口：`CURRENT STATE` 显示当前状态和合法动作；`MODEL / ACTION` 显示模型置信度、候选按钮和动作输入。默认移除了 Windows 白色标题栏，使用深色自定义标题条拖动窗口，右下角热区缩放；关闭任意一个会断开 Overlay，但 controller 和游戏继续运行。状态窗口没有滚动条。布局会保存到本机 `data/runtime/overlay-layout.json`。不要同时运行 `human_terminal.py`，controller 同时只接受一个客户端。
+
+透明度、首次启动位置和置顶行为位于 [config/agent.json](config/agent.json) 的 `overlay` 字段：
+
+```json
+{
+  "overlay": {
+    "always_on_top": true,
+    "frameless": true,
+    "status": {"geometry": "540x680+24+84", "opacity": 0.96, "divider_columns": 36},
+    "control": {"geometry": "500x440+580+84", "opacity": 0.97}
+  }
+}
+```
+
+`divider_columns` 控制状态窗中分隔线的最大字符数，默认 36，适合窄窗。`frameless=false` 可恢复 Windows 原生标题栏；临时不置顶可运行 `python tools\overlay_terminal.py --no-topmost`。Overlay 已启用 Windows Per-Monitor DPI 感知，优先采用 `Microsoft YaHei UI`，再回退到 `Noto Sans SC`，避免系统位图缩放导致文字发虚。由于整窗半透明会削弱文字边缘，默认透明度提高到 0.96/0.97；不建议用描边，Tk 的 `Text` 控件不支持可靠描边且会降低可读性。快捷栏只有结束回合、继续和返回；帮助保留为输入框中的 `h`/`help`。保留纯文本工作流时仍可使用 `python tools\human_terminal.py`；它支持 `--no-clear`、`--no-color` 和同一套动作语义。两种客户端均可在模型预热期间启动，并会等待 controller 发送首个视图。不要单独从终端启动 `communication_controller.py`，它只能由 CommunicationMod 管理。
 
 ### 2.1 启用 Candidate Assist
 
@@ -46,21 +62,34 @@ $env:UV_CACHE_DIR = "$PWD\.uv-cache"  # 缓存与 .venv 同盘，避免 Windows 
 $env:UV_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 uv pip install --python .venv\Scripts\python.exe -r tools\requirements-policy.txt
 uv pip install --python .venv\Scripts\python.exe --upgrade "https://mirrors.aliyun.com/pytorch-wheels/cu128/torch-2.7.0%2Bcu128-cp312-cp312-win_amd64.whl"
-$env:HF_ENDPOINT = "https://huggingface.co"
-$env:STS_AGENT_MODEL = "Qwen/Qwen3-0.6B"
-$env:STS_AGENT_ASSIST = "1"
 ```
 
-通用 Python 包走清华镜像；GPU 版 Torch 走阿里云同步的 PyTorch CUDA 12.8 wheel 精确 URL，否则 Windows 上通常会得到 CPU 版。当前 NVIDIA 驱动支持 CUDA 13.0，可以向后兼容运行 CUDA 12.8 wheel。模型下载是显式准备步骤，避免镜像波动阻塞游戏：
+通用 Python 包走清华镜像；GPU 版 Torch 走阿里云同步的 PyTorch CUDA 12.8 wheel 精确 URL，否则 Windows 上通常会得到 CPU 版。当前 NVIDIA 驱动支持 CUDA 13.0，可以向后兼容运行 CUDA 12.8 wheel。模型、端口、超时和辅助模式统一由 [config/agent.json](config/agent.json) 管理；游戏与终端会读取同一份文件。模型下载是显式准备步骤，避免镜像波动阻塞游戏：
 
 ```powershell
-$env:HF_ENDPOINT = "https://huggingface.co"
-.venv\Scripts\python.exe tools\download_qwen.py --model Qwen/Qwen3-0.6B
+.venv\Scripts\python.exe tools\download_qwen.py
 ```
 
-脚本默认使用 Hugging Face 官方站点；在 Windows 上若没有显式设置代理变量，会自动读取系统代理，因此可使用 Clash Verge 的 `127.0.0.1:7897`。下载完成后，controller 会在 CommunicationMod 的启动握手之前预热独立的 `policy_server.py`，并且只从本地缓存加载。本机实测 Qwen3-0.6B 4-bit 进程约额外占用 `1.3 GiB` 显存；若游戏本身接近 `2.5 GiB`，4GB 3050 的余量不足 `0.3 GiB`，可能在较长观测或其他 GPU 程序运行时 OOM。请关闭不必要的 GPU 应用；若不稳定，改用外部 GPU，而不是同时加载更小或更多本地模型。模型未预下载或加载失败时，controller 会完成握手并在终端显示原因，退回人工输入。可用 `STS_AGENT_ASSIST=0` 关闭，或用 `STS_AGENT_POLICY_MOCK=1` 测试候选交互而不下载模型。
+脚本默认使用配置中的 Hugging Face 官方站点；在 Windows 上若没有显式设置代理变量，会自动读取系统代理，因此可使用 Clash Verge 的 `127.0.0.1:7897`。下载完成后，controller 会在 CommunicationMod 的启动握手之前预热独立的 `policy_server.py`，并且只从本地缓存加载。本机实测 Qwen3-0.6B 4-bit 进程约额外占用 `1.3 GiB` 显存；若游戏本身接近 `2.5 GiB`，4GB 3050 的余量不足 `0.3 GiB`，可能在较长观测或其他 GPU 程序运行时 OOM。请关闭不必要的 GPU 应用；若不稳定，改用外部 GPU，而不是同时加载更小或更多本地模型。模型未预下载或加载失败时，controller 会完成握手并在终端显示原因，退回人工输入。把 `policy.enabled` 设为 `false` 可关闭模型；把 `policy.mock` 设为 `true` 可在不加载模型时测试协议。
 
-Candidate Assist 默认参与所有游戏内场景。地图选择时模型收到完整公开地图；战斗、事件、商店、奖励、休息和地图过渡态不会收到地图详情。controller 会显式记录本局已访问的商店 `(Act, Floor)`：首次进入后，同层商店房间不再提供 `shop` 选项，模型与人工输入都只能 `c` 继续离开，避免进店-离店循环。该约束也写入模型的 `run_memory`，但真正的限制由 controller 的合法动作表执行。模型侧使用短动作别名（`A1/A2/...`），controller 才将其还原为带手牌和目标的真实合法命令，因此双敌人战斗不会因目标 ID 过长而丢失候选。候选界面中，`a` 接受首选，`pick 1` 至 `pick 3` 选择候选；裸数字始终保留给事件、奖励和商店的游戏选项。原有 `p/e/u/d/m/c/x` 等输入仍然可以覆盖模型建议。模型无候选、超时或加载失败时，终端会显示“模型状态”和原因，并退回人工操作。设置 `$env:STS_AGENT_ASSIST_SCREENS = "COMBAT"` 可临时收窄到战斗。
+Candidate Assist 默认参与所有游戏内场景。地图选择时模型收到完整公开地图；战斗、事件、商店、奖励、休息和地图过渡态不会收到地图详情。controller 会显式记录本局已访问的商店 `(Act, Floor)`：首次进入后，同层商店房间不再提供 `shop` 选项，模型与人工输入都只能 `c` 继续离开，避免进店-离店循环。该约束也写入模型的 `run_memory`，但真正的限制由 controller 的合法动作表执行。模型侧使用短动作别名（`A1/A2/...`），controller 才将其还原为带手牌和目标的真实合法命令，因此双敌人战斗不会因目标 ID 过长而丢失候选。候选界面中，`a` 接受首选，`pick 1` 至 `pick 3` 选择候选；裸数字始终保留给事件、奖励和商店的游戏选项。原有 `p/e/u/d/m/c/x` 等输入仍然可以覆盖模型建议。模型无候选、超时或加载失败时，终端会显示“模型状态”和原因，并退回人工操作。将 `policy.screens` 改为 `["COMBAT"]` 可收窄到战斗。
+
+### 2.2 启用置信度自动执行
+
+提交的配置默认启用置信度自动执行。policy server 会对**当前全部合法动作**的短别名计算条件 log probability，并只在这组动作内归一化。首选满足 `p1 >= min_probability`（默认 `0.85`）即自动执行；其余情况显示 top-3 概率并等待人工确认。将 `policy.confidence_auto.enabled` 设为 `false` 可回到完全人工确认。`p1-p2` 的最小阈值已移除：在同一合法动作集合的归一化分布中，`p1 >= 0.85` 已意味着 `p2 <= 0.15`。轨迹仍记录 margin 和熵，供之后的校准分析使用。自动动作始终经过 controller 的合法动作检查，并记录 `source=model_auto` 与完整 `action_scores`。
+
+```json
+{
+  "policy": {
+    "confidence_auto": {
+      "enabled": true,
+      "min_probability": 0.85
+    }
+  }
+}
+```
+
+编辑完整的 [config/agent.json](config/agent.json) 时保留未展示的字段；配置键会严格校验，拼写错误会让 controller 在启动阶段给出错误而不是悄悄使用默认值。修改后完全重启游戏。零样本 Qwen 的原始概率尚未校准，建议先使用默认阈值并检查“模型置信度”与人工接受率，再按 `screen_type` 数据调整。若 CommunicationMod 返回动作错误，controller 不会自动重试该状态，会转为人工确认，避免重复提交。
 
 首次使用或卡牌知识库缺失时执行一次：
 
@@ -68,7 +97,7 @@ Candidate Assist 默认参与所有游戏内场景。地图选择时模型收到
 python tools\fetch_card_knowledge.py
 ```
 
-该命令将本地 StS1 卡牌快照写入 `data/knowledge/`；目录已被 Git 忽略。知识库来自按游戏 JAR 解析的第三方数据，更新游戏版本后应重新下载并检查差异。
+该命令将 StS1 的卡牌、遗物和药水快照写入 `data/knowledge/`；目录已被 Git 忽略。卡牌在战斗、卡牌奖励和商店中会附带静态效果；遗物和药水在背包、商店、Boss 奖励，以及 CommunicationMod 已明确给出具体物品的奖励/事件选项中附带 `effect`（描述、稀有度/品质、目标等）。只含 `reward_type` 的随机奖励不会根据知识库猜出未公开内容，进入具体选择界面后才补全。知识库来自按游戏 JAR 解析的第三方数据，更新游戏版本后应重新下载并检查差异。
 
 ### 3. 开始游戏
 
@@ -125,7 +154,7 @@ data/trajectories/run-events-<session>-run-<n>-<character>-A<ascension>-seed-<se
 
 CommunicationMod 偶尔会在事件房间尚未完成时短暂返回 `screen_type=MAP`、`room_phase=EVENT`。controller 将其标记为 `screen_type=TRANSITION`，不会暴露地图节点选择；终端此时只允许 `x` 返回或 `s` 刷新，避免提前进入下一个问号房间导致事件重复显示。
 
-卡牌信息采用两层来源：如果 CommunicationMod 返回当前卡牌的 `damage`、`block`、`magic_number` 或描述，使用 `effect.source=runtime_over_static`；否则使用 `effect.source=static_knowledge`。静态 `effect` 包含卡牌类型、稀有度、颜色、目标、费用、基础数值、关键字、标签和完整升级字段。静态值不包含力量、易伤、遗物等实时修正，模型仍应读取当前战斗状态。
+物品信息采用两层来源：如果 CommunicationMod 返回当前卡牌的 `damage`、`block`、`magic_number` 或描述，使用 `effect.source=runtime_over_static`；否则使用 `effect.source=static_knowledge`。静态卡牌 `effect` 包含类型、稀有度、颜色、目标、费用、基础数值、关键字、标签和完整升级字段；静态遗物包含描述、tier 和颜色，静态药水包含描述、rarity、目标与投掷属性。静态值不包含力量、易伤、遗物计数等实时修正，模型仍应读取当前战斗状态和物品外层的 `counter`/可用状态。
 
 ## 文档
 
@@ -136,8 +165,10 @@ CommunicationMod 偶尔会在事件房间尚未完成时短暂返回 `screen_typ
 ## 验证
 
 ```powershell
-python -m py_compile tools\communication_controller.py tools\human_terminal.py
+python -m py_compile tools\communication_controller.py tools\human_terminal.py tools\overlay_terminal.py
+python -m unittest discover -s tests -v
 python tools\human_terminal.py --help
+python tools\overlay_terminal.py --help
 ```
 
 完整游戏测试需要启动 ModTheSpire；代码测试不会替代实际协议测试。

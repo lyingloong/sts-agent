@@ -9,6 +9,7 @@ for the CommunicationMod protocol.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import socket
@@ -21,11 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
+from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
+from item_knowledge import potion_effect, relic_effect
 
-
-HOST = os.environ.get("STS_AGENT_HOST", "127.0.0.1")
-PORT = int(os.environ.get("STS_AGENT_PORT", "8765"))
 
 PLAYER_CLASSES = {
     "IRONCLAD": "IRONCLAD",
@@ -37,11 +37,52 @@ PLAYER_CLASSES = {
 MAX_ASCENSION = 20
 
 
-def env_flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+def normalize_action_logprobs(items: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Normalize raw action log probabilities over the current legal set."""
+    parsed: list[dict[str, Any]] = []
+    for item in items:
+        try:
+            value = float(item.get("logprob"))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        parsed.append(dict(item) | {"logprob": value})
+    if not parsed:
+        return None
+    maximum = max(item["logprob"] for item in parsed)
+    weights = [math.exp(item["logprob"] - maximum) for item in parsed]
+    total = sum(weights)
+    if not math.isfinite(total) or total <= 0:
+        return None
+    result = [item | {"probability": weight / total} for item, weight in zip(parsed, weights)]
+    return sorted(result, key=lambda item: float(item["probability"]), reverse=True)
+
+
+def confidence_summary(
+    action_scores: list[dict[str, Any]],
+    min_probability: float,
+) -> dict[str, Any]:
+    """Return reproducible routing statistics for an already sorted policy."""
+    top_probability = float(action_scores[0]["probability"])
+    second_probability = float(action_scores[1]["probability"]) if len(action_scores) > 1 else 0.0
+    margin = top_probability - second_probability
+    entropy = -sum(
+        float(item["probability"]) * math.log(float(item["probability"]))
+        for item in action_scores
+        if float(item["probability"]) > 0
+    )
+    # Scores are softmax-normalized over the legal action set, so once p1
+    # reaches the configured threshold, a separate p1-p2 floor is redundant.
+    route = "auto_execute" if top_probability >= min_probability else "human_confirm"
+    return {
+        "top_probability": top_probability,
+        "second_probability": second_probability,
+        "margin": margin,
+        "entropy": entropy,
+        "min_probability": min_probability,
+        "route": route,
+    }
 
 
 def now_iso() -> str:
@@ -204,13 +245,25 @@ def card_effect_summary(card: dict[str, Any]) -> str:
 
 
 def visible_potion(potion: dict[str, Any]) -> dict[str, Any]:
-    keys = ("name", "id", "can_use", "can_discard", "requires_target")
-    return {key: potion.get(key) for key in keys if key in potion}
+    keys = ("name", "id", "description", "can_use", "can_discard", "requires_target")
+    result = {key: potion.get(key) for key in keys if key in potion}
+    effect = potion_effect(potion)
+    if effect is not None:
+        if potion.get("description") is not None:
+            effect = dict(effect) | {"source": "runtime_over_static", "description": potion["description"]}
+        result["effect"] = effect
+    return result
 
 
 def visible_relic(relic: dict[str, Any]) -> dict[str, Any]:
-    keys = ("name", "id", "counter")
-    return {key: relic.get(key) for key in keys if key in relic}
+    keys = ("name", "id", "description", "counter")
+    result = {key: relic.get(key) for key in keys if key in relic}
+    effect = relic_effect(relic)
+    if effect is not None:
+        if relic.get("description") is not None:
+            effect = dict(effect) | {"source": "runtime_over_static", "description": relic["description"]}
+        result["effect"] = effect
+    return result
 
 
 def powers_summary(powers: Any) -> list[dict[str, Any]]:
@@ -290,13 +343,9 @@ def run_memory_summary(visited_shop_rooms: set[tuple[int, int]] | None) -> dict[
     return {"visited_shop_rooms": [{"act": act, "floor": floor} for act, floor in rooms]}
 
 
-def candidate_assist_allowed(message: dict[str, Any]) -> bool:
+def candidate_assist_allowed(message: dict[str, Any], screens: tuple[str, ...] = ("ALL",)) -> bool:
     """Return whether this in-game screen should receive model candidates."""
-    configured = {
-        token.strip().upper()
-        for token in os.environ.get("STS_AGENT_ASSIST_SCREENS", "ALL").split(",")
-        if token.strip()
-    }
+    configured = {token.strip().upper() for token in screens if token.strip()}
     if not configured:
         return False
     if "ALL" in configured:
@@ -427,6 +476,75 @@ def deck_summary(deck: Any) -> list[dict[str, Any]]:
     ]
 
 
+PUBLIC_ITEM_SCALAR_FIELDS = {
+    "reward_type",
+    "name",
+    "id",
+    "price",
+    "gold",
+    "amount",
+    "text",
+    "label",
+    "description",
+    "option",
+    "disabled",
+    "available",
+    "type",
+    "rarity",
+    "tier",
+    "color",
+    "counter",
+}
+
+
+def _public_scalars(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if (key in PUBLIC_ITEM_SCALAR_FIELDS or key.startswith("requires_"))
+        and (isinstance(item, (str, int, float, bool)) or item is None)
+    }
+
+
+def _enrich_public_item_fields(value: dict[str, Any]) -> dict[str, Any]:
+    """Normalize only entities CommunicationMod explicitly exposes."""
+    result = _public_scalars(value)
+    for key, normalizer in (("card", visible_card), ("relic", visible_relic), ("potion", visible_potion)):
+        item = value.get(key)
+        if isinstance(item, dict):
+            result[key] = normalizer(item)
+    for key, normalizer in (("cards", visible_card), ("relics", visible_relic), ("potions", visible_potion)):
+        items = value.get(key)
+        if isinstance(items, list):
+            result[key] = [normalizer(item) for item in items if isinstance(item, dict)]
+    return result
+
+
+def normalize_reward(value: Any) -> Any:
+    """Keep publicly revealed reward contents while excluding internal objects."""
+    if not isinstance(value, dict):
+        return value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+    result = _enrich_public_item_fields(value)
+    reward_type = str(value.get("reward_type", "")).upper()
+    # Some protocol versions put the entity fields directly on a reward rather
+    # than under ``relic``/``potion``. This still only uses already visible ID
+    # or name fields; a bare {"reward_type": "RELIC"} stays bare.
+    if reward_type == "RELIC" and (value.get("id") or value.get("name")):
+        result["relic"] = visible_relic(value)
+    elif reward_type == "POTION" and (value.get("id") or value.get("name")):
+        result["potion"] = visible_potion(value)
+    elif reward_type == "CARD" and (value.get("id") or value.get("name")):
+        result["card"] = visible_card(value)
+    return result
+
+
+def normalize_event_option(value: Any) -> Any:
+    """Preserve option wording and enrich only directly attached item objects."""
+    if not isinstance(value, dict):
+        return value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+    return _enrich_public_item_fields(value)
+
+
 def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if screen_type in {"CARD_REWARD", "GRID"}:
@@ -442,9 +560,9 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
         result["event_id"] = value.get("event_id")
         result["event_name"] = value.get("event_name")
         result["body_text"] = value.get("body_text")
-        result["options"] = value.get("options", [])
+        result["options"] = [normalize_event_option(item) for item in value.get("options", [])]
     elif screen_type == "COMBAT_REWARD":
-        result["rewards"] = value.get("rewards", [])
+        result["rewards"] = [normalize_reward(item) for item in value.get("rewards", [])]
     elif screen_type == "REST":
         result["rest_options"] = value.get("rest_options", [])
         result["has_rested"] = value.get("has_rested")
@@ -963,11 +1081,20 @@ def format_view(
         f"HP {state.get('current_hp', '?')}/{state.get('max_hp', '?')} "
         f"| Gold {state.get('gold', '?')} | Room {state.get('room_phase', '')}"
     )
+    confidence = decision.get("confidence") if isinstance(decision, dict) else None
+    if isinstance(confidence, dict):
+        route = "将自动执行" if confidence.get("route") == "auto_execute" else "等待人工确认"
+        lines.append(
+            "模型置信度："
+            f"p1={float(confidence.get('top_probability', 0.0)):.1%} "
+            f"margin={float(confidence.get('margin', 0.0)):.1%} "
+            f"entropy={float(confidence.get('entropy', 0.0)):.3f}；{route}"
+        )
     if decision and decision.get("model_candidates"):
         lines.append("模型候选（输入 a 接受第一项，或输入 pick 1/2/3 选择；也可直接手动输入动作）：")
         for item in decision["model_candidates"]:
             score = item.get("score")
-            score_text = f" score={score:.3f}" if isinstance(score, (int, float)) else ""
+            score_text = f" p={score:.1%}" if isinstance(score, (int, float)) else ""
             lines.append(f"  [{item.get('rank')}] {item.get('action_id')} {item.get('label', '')}{score_text}")
     elif decision and decision.get("assist_status"):
         reason = str(decision.get("assist_reason") or "未提供原因")
@@ -1100,6 +1227,8 @@ def format_view(
 
 class TerminalBridge:
     def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((host, port))
@@ -1111,7 +1240,7 @@ class TerminalBridge:
     def accept(self) -> None:
         if self.connection is not None:
             return
-        print(f"waiting for terminal client on {HOST}:{PORT}", file=sys.stderr, flush=True)
+        print(f"waiting for terminal client on {self.host}:{self.port}", file=sys.stderr, flush=True)
         connection, address = self.server.accept()
         self.connection = connection
         self.reader = connection.makefile("r", encoding="utf-8", newline="\n")
@@ -1157,26 +1286,33 @@ class PolicyClient:
     """Optional local policy subprocess used by Candidate Assist.
 
     CommunicationMod and the terminal remain independent from Transformers.
-    A missing environment, model, or response timeout disables this client for
+    A missing model, invalid configuration, or response timeout disables this client for
     the current controller session and leaves human-only input available.
     """
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(self, project_root: Path, config: dict[str, Any]) -> None:
         self.project_root = project_root
-        self.enabled = env_flag("STS_AGENT_ASSIST", True)
-        self.model = os.environ.get("STS_AGENT_MODEL", "Qwen/Qwen3-0.6B")
-        self.endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-        self.top_k = max(1, int(os.environ.get("STS_AGENT_TOP_K", "3")))
-        self.timeout = max(1.0, float(os.environ.get("STS_AGENT_POLICY_TIMEOUT", "8")))
-        self.start_timeout = max(10.0, float(os.environ.get("STS_AGENT_POLICY_START_TIMEOUT", "300")))
+        policy_config = config["policy"]
+        confidence_config = policy_config["confidence_auto"]
+        self.enabled = policy_config["enabled"]
+        self.model = policy_config["model"]
+        self.endpoint = policy_config["endpoint"]
+        self.top_k = policy_config["top_k"]
+        self.screens = tuple(item.strip().upper() for item in policy_config["screens"])
+        self.confidence_auto = confidence_config["enabled"]
+        self.auto_min_probability = confidence_config["min_probability"]
+        self.timeout = float(policy_config["timeout_seconds"])
+        self.start_timeout = float(policy_config["start_timeout_seconds"])
+        self.python = policy_config["python"]
+        self.mock = policy_config["mock"]
+        self.debug = policy_config["debug"]
         self.process: subprocess.Popen[str] | None = None
         self.request_id = 0
         self.disabled_reason: str | None = None
 
     def _python_executable(self) -> str:
-        configured = os.environ.get("STS_AGENT_POLICY_PYTHON")
-        if configured:
-            return configured
+        if self.python != "auto":
+            return self.python
         if os.name == "nt":
             candidate = self.project_root / ".venv" / "Scripts" / "python.exe"
         else:
@@ -1207,7 +1343,7 @@ class PolicyClient:
     def _fallback_decision(self, status: str, reason: str) -> dict[str, Any]:
         """Return an observable human-fallback state for the terminal/trace."""
         return {
-            "mode": "candidate_assist",
+            "mode": "confidence_auto" if self.confidence_auto else "candidate_assist",
             "model_id": self.model,
             "candidate_source": "policy_server",
             "model_action": None,
@@ -1223,7 +1359,12 @@ class PolicyClient:
     def status_decision(self) -> dict[str, Any]:
         """Expose startup/readiness state even on screens without ranking."""
         if self.enabled and self.process is not None and self.process.poll() is None:
-            return self._fallback_decision("就绪", f"{self.model} 已预热，本局每个游戏界面均会请求候选")
+            mode = (
+                f"置信度自动执行已启用（p1>={self.auto_min_probability:.0%}）"
+                if self.confidence_auto
+                else "本局每个游戏界面均会请求候选"
+            )
+            return self._fallback_decision("就绪", f"{self.model} 已预热，{mode}")
         return self._fallback_decision("不可用", self.disabled_reason or "模型辅助已关闭")
 
     def prewarm(self) -> dict[str, Any]:
@@ -1242,12 +1383,23 @@ class PolicyClient:
         if not server.exists():
             self._disable(f"missing {server}")
             return False
-        command = [self._python_executable(), str(server), "--model", self.model, "--top-k", str(self.top_k)]
+        command = [
+            self._python_executable(),
+            str(server),
+            "--model",
+            self.model,
+            "--endpoint",
+            self.endpoint,
+            "--top-k",
+            str(self.top_k),
+        ]
         # Keep game-time startup deterministic. Downloading model weights is
         # an explicit preparation step handled by download_qwen.py.
         command.append("--local-files-only")
-        if env_flag("STS_AGENT_POLICY_MOCK", False):
+        if self.mock:
             command.append("--mock")
+        if self.debug:
+            command.append("--debug")
         child_env = os.environ.copy()
         child_env["HF_ENDPOINT"] = self.endpoint
         # The policy protocol carries Chinese card and event text. Force the
@@ -1311,7 +1463,7 @@ class PolicyClient:
             alias_to_action[alias] = action
             model_actions.append({"id": alias, "label": str(action.get("label") or action.get("command") or alias)})
         request = {
-            "type": "rank",
+            "type": "score" if self.confidence_auto else "rank",
             "request_id": self.request_id,
             "observation": observation,
             "legal_actions": model_actions,
@@ -1335,9 +1487,19 @@ class PolicyClient:
         if response.get("type") == "error":
             self._disable(str(response.get("error", "policy error")))
             return self._fallback_decision("不可用", self.disabled_reason or "模型服务报错")
-        if response.get("type") != "ranking":
+        expected_type = "scoring" if self.confidence_auto else "ranking"
+        if response.get("type") != expected_type:
             self._disable(f"unexpected policy response: {response}")
             return self._fallback_decision("不可用", self.disabled_reason or "模型服务返回未知消息")
+        if self.confidence_auto:
+            return self._scoring_decision(response, alias_to_action)
+        return self._ranking_decision(response, alias_to_action)
+
+    def _ranking_decision(
+        self,
+        response: dict[str, Any],
+        alias_to_action: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
         candidates: list[dict[str, Any]] = []
         for item in response.get("candidates", []):
             if not isinstance(item, dict):
@@ -1367,6 +1529,65 @@ class PolicyClient:
             "model_action": candidates[0]["action_id"],
             "model_candidates": candidates,
             "model_confidence": candidates[0].get("score"),
+            "executed_action": None,
+            "source": None,
+            "overridden": None,
+        }
+
+    def _scoring_decision(
+        self,
+        response: dict[str, Any],
+        alias_to_action: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        raw_scores = response.get("action_scores")
+        if not isinstance(raw_scores, list):
+            return self._fallback_decision("分数无效", "模型没有返回全体合法动作的分数")
+        by_alias: dict[str, dict[str, Any]] = {}
+        for item in raw_scores:
+            if not isinstance(item, dict):
+                return self._fallback_decision("分数无效", "模型动作分数格式无效")
+            alias = str(item.get("action_id", ""))
+            if alias not in alias_to_action or alias in by_alias:
+                return self._fallback_decision("分数无效", "模型动作分数包含未知或重复别名")
+            by_alias[alias] = item
+        if set(by_alias) != set(alias_to_action):
+            return self._fallback_decision("分数不完整", "模型未对每个合法动作评分；已退回人工确认")
+        normalized = normalize_action_logprobs(list(by_alias.values()))
+        if normalized is None:
+            return self._fallback_decision("分数无效", "模型动作分数不是有限数值")
+        action_scores: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+        for rank, item in enumerate(normalized, start=1):
+            alias = str(item["action_id"])
+            action = alias_to_action[alias]
+            canonical_id = str(action.get("id", ""))
+            score = {
+                "alias": alias,
+                "action_id": canonical_id,
+                "logprob": item["logprob"],
+                "probability": item["probability"],
+            }
+            action_scores.append(score)
+            if rank <= self.top_k:
+                candidates.append(
+                    {
+                        "rank": rank,
+                        "action_id": canonical_id,
+                        "label": action.get("label") or action.get("command"),
+                        "score": item["probability"],
+                        "log_score": item["logprob"],
+                    }
+                )
+        confidence = confidence_summary(action_scores, self.auto_min_probability)
+        return {
+            "mode": "confidence_auto",
+            "model_id": response.get("model_id", self.model),
+            "candidate_source": "policy_server_scoring",
+            "model_action": candidates[0]["action_id"],
+            "model_candidates": candidates,
+            "action_scores": action_scores,
+            "model_confidence": confidence["top_probability"],
+            "confidence": confidence,
             "executed_action": None,
             "source": None,
             "overridden": None,
@@ -1467,6 +1688,23 @@ def run_output_paths(
     return trace_dir / f"action-trace-{stem}.jsonl", trace_dir / f"run-events-{stem}.jsonl"
 
 
+def auto_action_for_decision(
+    decision: dict[str, Any] | None,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Resolve only a controller-approved high-confidence model action."""
+    if not isinstance(decision, dict):
+        return None
+    confidence = decision.get("confidence")
+    if not isinstance(confidence, dict) or confidence.get("route") != "auto_execute":
+        return None
+    action_id = str(decision.get("model_action", ""))
+    for action in actions:
+        if str(action.get("id", "")) == action_id:
+            return action
+    return None
+
+
 def ask_action(
     bridge: TerminalBridge,
     message: dict[str, Any],
@@ -1478,10 +1716,25 @@ def ask_action(
     actions = semantic_actions(message, visited_shop_rooms)
     if policy is None:
         decision = None
-    elif candidate_assist_allowed(message):
+    elif candidate_assist_allowed(message, policy.screens):
         decision = policy.rank(policy_observation(message, visited_shop_rooms), actions)
     else:
         decision = policy.status_decision()
+    # Error responses are a hard human handoff. Repeating an otherwise
+    # high-confidence action after the protocol rejects it can create a tight
+    # automatic loop and should never be treated as a new policy decision.
+    automatic = None if error else auto_action_for_decision(decision, actions)
+    if automatic is not None:
+        automatic_decision = finalize_decision(decision, automatic, "model_auto")
+        confidence = automatic_decision.get("confidence", {}) if automatic_decision else {}
+        print(
+            f"confidence auto: {automatic.get('id')} "
+            f"p={float(confidence.get('top_probability', 0.0)):.3f} "
+            f"margin={float(confidence.get('margin', 0.0)):.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return str(automatic["command"]), automatic, automatic_decision
     while True:
         bridge.send(
             {
@@ -1519,14 +1772,19 @@ def ask_action(
 def main() -> int:
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     project_root = Path(__file__).resolve().parents[1]
+    try:
+        config = load_agent_config(project_root)
+    except ConfigError as exc:
+        print(f"invalid agent configuration: {exc}", file=sys.stderr, flush=True)
+        return 2
     raw_dir = project_root / "data" / "raw" / "communication_controller"
     trace_dir = project_root / "data" / "trajectories"
     raw_dir.mkdir(parents=True, exist_ok=True)
     trace_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"messages-{session_id}.jsonl"
 
-    bridge = TerminalBridge(HOST, PORT)
-    policy = PolicyClient(project_root)
+    bridge = TerminalBridge(config["server"]["host"], config["server"]["port"])
+    policy = PolicyClient(project_root, config)
     pending: dict[str, Any] | None = None
     current_message: dict[str, Any] | None = None
     run_id: str | None = None

@@ -6,9 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
-
-DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-DEFAULT_ENDPOINT = "https://huggingface.co"
+from agent_config import ConfigError, load_agent_config
 
 
 def configure_windows_system_proxy() -> str | None:
@@ -49,9 +47,13 @@ def configure_windows_system_proxy() -> str | None:
 
 
 def parse_args() -> argparse.Namespace:
+    try:
+        policy = load_agent_config()["policy"]
+    except ConfigError as exc:
+        raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="从 Hugging Face 官方预下载 Candidate Assist 使用的 Qwen 模型")
-    parser.add_argument("--model", default=os.environ.get("STS_AGENT_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--endpoint", default=os.environ.get("HF_ENDPOINT", DEFAULT_ENDPOINT))
+    parser.add_argument("--model", default=policy["model"])
+    parser.add_argument("--endpoint", default=policy["endpoint"])
     parser.add_argument("--force", action="store_true", help="重新检查并下载缺失/更新文件")
     return parser.parse_args()
 

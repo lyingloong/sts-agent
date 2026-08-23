@@ -17,9 +17,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-
-DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-DEFAULT_ENDPOINT = "https://huggingface.co"
+from agent_config import ConfigError, load_agent_config
 
 
 def configure_jsonl_stdio() -> None:
@@ -52,10 +50,21 @@ def action_label(action: dict[str, Any]) -> str:
     return str(kind or command or "")
 
 
-def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]], top_k: int) -> str:
+def action_prompt_lines(observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> list[str]:
     # Route selection is infrequent, and needs the entire visible graph. Other
     # screens stay within the tighter recurring-turn prompt budget.
     observation_limit = 12000 if observation.get("screen_type") == "MAP" else 7000
+    lines = [
+        "Observation:",
+        compact_json(observation, limit=observation_limit),
+        "Legal actions:",
+    ]
+    for action in legal_actions:
+        lines.append(f"- {action_id(action)} | {action_label(action)}")
+    return lines
+
+
+def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]], top_k: int) -> str:
     lines = [
         "You are a Slay the Spire action ranker.",
         "Rank only the supplied legal action IDs. The IDs are short tokens such as A1 and A2; copy them exactly.",
@@ -63,14 +72,24 @@ def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]
         f"Return exactly one JSON object with at most {top_k} action IDs in descending preference.",
         'Required format: {"ranked_action_ids":["ACTION_ID_1","ACTION_ID_2"]}',
         "Do not include prose, markdown, commands, or action IDs outside the supplied list.",
-        "Observation:",
-        compact_json(observation, limit=observation_limit),
-        "Legal actions:",
     ]
-    for action in legal_actions:
-        lines.append(f"- {action_id(action)} | {action_label(action)}")
+    lines.extend(action_prompt_lines(observation, legal_actions))
     lines.append("JSON:")
     return "\n".join(lines)
+
+
+def build_scoring_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> str:
+    """Build a prompt whose next completion is exactly one action alias."""
+    lines = [
+        "You are a Slay the Spire action selector.",
+        "Choose exactly one supplied legal action ID that maximizes survival and long-term win chance.",
+        "Output only that exact action ID, followed by a newline. Do not output JSON, prose, or a command.",
+    ]
+    lines.extend(action_prompt_lines(observation, legal_actions))
+    # Keep the continuation on the next line so aliases such as A1 and A10
+    # are scored with an explicit newline boundary rather than prefix matching.
+    lines.append("Selected action ID:")
+    return "\n".join(lines) + "\n"
 
 
 def ranked_ids_from_output(text: str, legal_actions: list[dict[str, Any]], top_k: int) -> list[str]:
@@ -136,12 +155,23 @@ class MockRanker:
             )
         return result
 
+    def score(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return deterministic but non-uniform values for protocol tests."""
+        ordered = self.rank(observation, legal_actions, len(legal_actions))
+        # These are unnormalized log weights. The controller applies the only
+        # normalization that matters: over the current legal action set.
+        return [
+            {
+                "action_id": item["action_id"],
+                "label": item["label"],
+                "logprob": -2.0 * rank,
+            }
+            for rank, item in enumerate(ordered)
+        ]
+
 
 class QwenRanker:
     def __init__(self, model_name: str, load_in_4bit: bool, local_files_only: bool) -> None:
-        # Set this before from_pretrained so any explicit download uses the
-        # configured Hugging Face endpoint.
-        os.environ.setdefault("HF_ENDPOINT", DEFAULT_ENDPOINT)
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -256,10 +286,82 @@ class QwenRanker:
             )
         return result
 
+    def _chat_prefix(self, user_prompt: str) -> str:
+        try:
+            return self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": user_prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": user_prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+    def score(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Score every exact legal alias with one shared prompt forward pass.
+
+        Scores are the log probability of ``A<n>`` followed by a newline. The
+        newline is important: it prevents A1 from being treated as a prefix of
+        A10. The controller later normalizes these scores only over legal
+        actions, which is the desired masked policy distribution.
+        """
+        if not legal_actions:
+            return []
+        tokenizer = self.tokenizer
+        prefix = self._chat_prefix(build_scoring_prompt(observation, legal_actions))
+        prefix_ids = tokenizer(prefix, add_special_tokens=False, return_tensors="pt")["input_ids"]
+        prefix_ids = prefix_ids.to(self.model_device)
+        prefix_length = prefix_ids.shape[1]
+
+        continuation_ids: dict[str, list[int]] = {}
+        for action in legal_actions:
+            alias = action_id(action)
+            combined_ids = tokenizer(prefix + alias + "\n", add_special_tokens=False)["input_ids"]
+            prefix_as_list = prefix_ids[0].tolist()
+            if combined_ids[:prefix_length] != prefix_as_list:
+                raise RuntimeError("tokenizer changed the scoring prompt boundary")
+            suffix = combined_ids[prefix_length:]
+            if not suffix:
+                raise RuntimeError(f"empty token continuation for action {alias}")
+            continuation_ids[alias] = suffix
+
+        with self.torch.inference_mode():
+            prefix_output = self.model(input_ids=prefix_ids, use_cache=True)
+            first_logprobs = self.torch.log_softmax(prefix_output.logits[0, -1].float(), dim=-1)
+            result: list[dict[str, Any]] = []
+            for action in legal_actions:
+                alias = action_id(action)
+                suffix = continuation_ids[alias]
+                logprob = float(first_logprobs[suffix[0]].item())
+                if len(suffix) > 1:
+                    continuation = self.torch.tensor([suffix[:-1]], device=self.model_device)
+                    continuation_output = self.model(
+                        input_ids=continuation,
+                        past_key_values=prefix_output.past_key_values,
+                        use_cache=False,
+                    )
+                    next_logprobs = self.torch.log_softmax(continuation_output.logits[0].float(), dim=-1)
+                    for position, token_id in enumerate(suffix[1:]):
+                        logprob += float(next_logprobs[position, token_id].item())
+                result.append(
+                    {
+                        "action_id": alias,
+                        "label": action_label(action),
+                        "logprob": logprob,
+                    }
+                )
+        return result
+
 
 def serve(args: argparse.Namespace) -> int:
     configure_jsonl_stdio()
-    os.environ.setdefault("HF_ENDPOINT", args.endpoint)
+    # Hugging Face libraries read this process-local setting. The user-facing
+    # source of truth remains config/agent.json or an explicit CLI override.
+    os.environ["HF_ENDPOINT"] = args.endpoint
     ranker: MockRanker | QwenRanker
     if args.mock:
         ranker = MockRanker()
@@ -270,13 +372,13 @@ def serve(args: argparse.Namespace) -> int:
             model_id = args.model
         except Exception as exc:
             print(f"policy server failed to load {args.model}: {exc}", file=sys.stderr, flush=True)
-            if os.environ.get("STS_AGENT_POLICY_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}:
+            if args.debug:
                 traceback.print_exc(file=sys.stderr)
             return 2
 
     print(
         json.dumps(
-            {"type": "ready", "model_id": model_id, "endpoint": os.environ.get("HF_ENDPOINT")},
+            {"type": "ready", "model_id": model_id, "endpoint": args.endpoint},
             ensure_ascii=False,
         ),
         flush=True,
@@ -289,27 +391,31 @@ def serve(args: argparse.Namespace) -> int:
             request = json.loads(line)
             if request.get("type") == "shutdown":
                 break
-            if request.get("type") != "rank":
-                raise ValueError("expected request type rank")
+            request_type = request.get("type")
+            if request_type not in {"rank", "score"}:
+                raise ValueError("expected request type rank or score")
             observation = request.get("observation")
             actions = request.get("legal_actions")
             if not isinstance(observation, dict) or not isinstance(actions, list):
                 raise ValueError("observation and legal_actions are required")
             legal_actions = [item for item in actions if isinstance(item, dict) and action_id(item)]
             top_k = max(1, min(int(request.get("top_k", args.top_k)), len(legal_actions) or 1))
-            candidates = ranker.rank(observation, legal_actions, top_k)
-            print(
-                json.dumps(
-                    {
-                        "type": "ranking",
-                        "request_id": request.get("request_id"),
-                        "model_id": model_id,
-                        "candidates": candidates,
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
+            if request_type == "rank":
+                candidates = ranker.rank(observation, legal_actions, top_k)
+                response = {
+                    "type": "ranking",
+                    "request_id": request.get("request_id"),
+                    "model_id": model_id,
+                    "candidates": candidates,
+                }
+            else:
+                response = {
+                    "type": "scoring",
+                    "request_id": request.get("request_id"),
+                    "model_id": model_id,
+                    "action_scores": ranker.score(observation, legal_actions),
+                }
+            print(json.dumps(response, ensure_ascii=False), flush=True)
         except Exception as exc:
             print(
                 json.dumps(
@@ -318,16 +424,20 @@ def serve(args: argparse.Namespace) -> int:
                 ),
                 flush=True,
             )
-            if os.environ.get("STS_AGENT_POLICY_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}:
+            if args.debug:
                 traceback.print_exc(file=sys.stderr)
     return 0
 
 
 def parse_args() -> argparse.Namespace:
+    try:
+        policy = load_agent_config()["policy"]
+    except ConfigError as exc:
+        raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="Qwen ranker for StS Candidate Assist")
-    parser.add_argument("--model", default=os.environ.get("STS_AGENT_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--endpoint", default=os.environ.get("HF_ENDPOINT", DEFAULT_ENDPOINT))
-    parser.add_argument("--top-k", type=int, default=int(os.environ.get("STS_AGENT_TOP_K", "3")))
+    parser.add_argument("--model", default=policy["model"])
+    parser.add_argument("--endpoint", default=policy["endpoint"])
+    parser.add_argument("--top-k", type=int, default=policy["top_k"])
     parser.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--local-files-only",
@@ -335,7 +445,8 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="默认只从本地 Hugging Face 缓存加载；请先运行 download_qwen.py",
     )
-    parser.add_argument("--mock", action="store_true", help="不加载模型，用于测试协议和终端交互")
+    parser.add_argument("--mock", action=argparse.BooleanOptionalAction, default=policy["mock"], help="不加载模型，用于测试协议和终端交互")
+    parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=policy["debug"], help="将模型服务异常完整写入 stderr")
     return parser.parse_args()
 
 

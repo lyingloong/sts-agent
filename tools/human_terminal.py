@@ -8,6 +8,8 @@ import os
 import socket
 import sys
 
+from agent_config import ConfigError, load_agent_config
+
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -97,9 +99,14 @@ def read_action(view_text: str, clear: bool, use_color: bool, in_game: bool) -> 
 
 
 def main() -> int:
+    try:
+        config = load_agent_config()
+    except ConfigError as exc:
+        print(f"配置文件错误：{exc}", file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(description="Terminal UI for the StS CommunicationMod controller")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=config["server"]["host"])
+    parser.add_argument("--port", type=int, default=config["server"]["port"])
     parser.add_argument("--no-clear", action="store_true", help="不要在刷新时清空终端")
     parser.add_argument("--no-color", action="store_true", help="禁用终端颜色")
     args = parser.parse_args()

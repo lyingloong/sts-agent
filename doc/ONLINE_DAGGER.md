@@ -51,9 +51,9 @@ StS1 每局包含数百个动作，胜负奖励非常稀疏，且一旦早期路
 
 这仍属于在线纠正式模仿学习：人类选择的候选可以直接作为正标签；人类没有选择的候选提供相对偏好约束。人类仍可以输入候选列表之外的动作，以覆盖模型遗漏。
 
-### 3.3 置信度路由 Assist（计划，不在当前版本实现）
+### 3.3 置信度路由 Assist（实验性实现）
 
-Candidate Assist 收集到足够的“模型首选是否被人类接受”记录后，升级为单首选动作的选择性自动化。controller 仍提供完整合法动作集合，policy server 不自由生成长的 CommunicationMod 命令，而是在这个有限集合上给每个动作打分：
+Candidate Assist 收集到足够的“模型首选是否被人类接受”记录后，可升级为单首选动作的选择性自动化。controller 仍提供完整合法动作集合，policy server 不自由生成长的 CommunicationMod 命令，而是在这个有限集合上给每个动作打分：
 
 ```text
 observation + legal_actions
@@ -66,9 +66,9 @@ high confidence -> auto execute
 low confidence  -> human confirm or override
 ```
 
-动作在本请求内继续使用 `A1/A2/...` 短别名，controller 保存其到规范 `action_id` 的映射。实现动作概率时，不能只读取模型碰巧生成出的一个 ID 的 token probability；应使用受约束解码或对每个合法别名做 teacher-forced scoring，并只在完整合法 ID 的集合内归一化。这样得到的是当前动作集上的相对分布，能正确处理多敌人目标等分支，也不会把长命令的格式概率误当策略偏好。
+动作在本请求内继续使用 `A1/A2/...` 短别名，controller 保存其到规范 `action_id` 的映射。当前实验实现对每个合法别名计算精确 `A<n>\\n` 续写的 teacher-forced `logprob`，并只在完整合法 ID 的集合内 softmax；换行避免 `A1` 与 `A10` 发生前缀混淆。这样得到的是当前动作集上的相对分布，能正确处理多敌人目标等分支，也不会把长命令的格式概率误当策略偏好。
 
-初始阈值只作为安全闸门，不作为真实正确率解释。例如可以从 `p1 >= 0.85` 且 `p1 - p2 >= 0.35` 开始，并对商店、奖励、休息和高风险战斗采用更严格阈值。阈值必须按真实交互数据校准：在 `(p1, margin, entropy, screen_type)` 分桶中统计模型首选被人类接受的比例，选择能达到目标接受率（建议至少 97%）的阈值。没有足够校准样本前，默认回退到人工确认。
+初始阈值只作为安全闸门，不作为真实正确率解释。`config/agent.json` 中的 `policy.confidence_auto.enabled=true` 启用自动执行，规则为 `p1 >= min_probability`（默认 `0.85`）；不开启时保持原有 Candidate Assist。删除了 `p1-p2` 下限，因为在同一合法动作集合归一化后，`p1 >= 0.85` 已隐含 `p2 <= 0.15`。阈值必须按真实交互数据校准：在 `(p1, margin, entropy, screen_type)` 分桶中统计模型首选被人类接受的比例，选择能达到目标接受率（建议至少 97%）的 `p1` 阈值。没有足够校准样本前，默认回退到人工确认。
 
 自动化的边界：
 
@@ -106,7 +106,7 @@ human_terminal.py（显示建议，接收确认或纠正）
 
 建议新增独立的 `policy_server.py` 或同等功能的模型进程，不把 Transformers 推理循环塞进 CommunicationMod controller。这样模型卡顿时可以超时并回退人工，controller 仍保持协议安全。
 
-当前动作输出采用受约束的候选 ID 排序，而不是让模型自由生成 CommunicationMod 命令。未来的置信度路由会将 `candidates` 扩展为全体合法动作的受约束分数，仍由 controller 编译命令：
+默认动作输出采用受约束的候选 ID 排序，而不是让模型自由生成 CommunicationMod 命令。启用置信度自动执行时，`candidates` 会扩展为全体合法动作的受约束分数，仍由 controller 编译命令：
 
 ```json
 {
@@ -128,7 +128,7 @@ human_terminal.py（显示建议，接收确认或纠正）
 
 ## 5. 轨迹格式、数据集与奖励
 
-当前 `action-trace` 可以继续使用，增加一个可选的 `decision` 字段即可兼容旧数据。置信度路由实施后，新增字段也必须是可选的，兼容历史 Candidate Assist 轨迹：
+当前 `action-trace` 可以继续使用，增加一个可选的 `decision` 字段即可兼容旧数据。置信度自动执行会写入新增字段；它们仍保持可选，兼容历史 Candidate Assist 轨迹：
 
 ```json
 {
@@ -289,9 +289,9 @@ human_override > human_confirm > model_auto + successful outcome
 3. 用固定种子比较旧模型、新模型和纯人工上限；
 4. 只有 override 率和非法动作率改善后才扩大自动化范围。
 
-### P3：置信度半自动与评测（待 P2 数据验证后）
+### P3：置信度半自动与评测（实验性实现，待校准）
 
-1. 实现受约束全动作 scoring，并保存 `action_scores`、p1、margin、entropy 和阈值版本；
+1. 已实现受约束全动作 scoring，并保存 `action_scores`、p1、margin、entropy 和阈值；
 2. 先在人工确认下收集校准集，再让达到目标接受率的低风险动作自动执行；
 3. 增加 watchdog、超时、状态重复检测和回退动作；
 4. 统计按角色/A0-A20/Act/房间类型拆分，避免总平均掩盖战斗崩溃；
@@ -299,6 +299,6 @@ human_override > human_confirm > model_auto + successful outcome
 
 ## 10. 当前决策
 
-当前不需要重新收集大量纯人类 SFT。现阶段继续用 `Shadow -> Candidate Assist -> DAgger` 验证候选覆盖和交互闭环；置信度路由、自动执行和数据集导出均是后续工作，需先积累模型首选与人类最终动作的配对记录。若零样本 Qwen 的候选 `recall@3` 过低，再补充少量人类冷启动数据，而不是直接进入在线 RL。
+当前不需要重新收集大量纯人类 SFT。现阶段继续用 `Shadow -> Candidate Assist -> DAgger` 验证候选覆盖和交互闭环；置信度路由已作为显式开关实现，但自动执行仍需积累模型首选与人类最终动作的配对记录后校准。若零样本 Qwen 的候选 `recall@3` 过低，再补充少量人类冷启动数据，而不是直接进入在线 RL。
 
 参考： [DAgger](https://arxiv.org/abs/1011.0686)、[TAMER](https://www.cs.utexas.edu/~pstone/Papers/bib2html/b2hd-ICDL08-knox.html)、[PEBBLE](https://arxiv.org/abs/2106.05091)。
