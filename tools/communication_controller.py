@@ -27,6 +27,9 @@ from card_knowledge import card_effect
 from item_knowledge import potion_effect, relic_effect
 
 
+ACTION_HISTORY_LIMIT = 6
+
+
 PLAYER_CLASSES = {
     "IRONCLAD": "IRONCLAD",
     "SILENT": "THE_SILENT",
@@ -343,6 +346,38 @@ def run_memory_summary(visited_shop_rooms: set[tuple[int, int]] | None) -> dict[
     return {"visited_shop_rooms": [{"act": act, "floor": floor} for act, floor in rooms]}
 
 
+def recent_action_summary(history: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Keep a small, stable action context for the next model decision."""
+    if not isinstance(history, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in history[-ACTION_HISTORY_LIMIT:]:
+        if not isinstance(item, dict):
+            continue
+        compact: dict[str, Any] = {}
+        for key in ("step_id", "screen_before", "action_kind", "action_id", "action", "screen_after"):
+            value = item.get(key)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                compact[key] = value
+        if compact:
+            result.append(compact)
+    return result
+
+
+def accepted_action_history_item(pending: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
+    """Convert one stable controller acknowledgement into compact model context."""
+    action = pending.get("action") if isinstance(pending.get("action"), dict) else {}
+    state = game_state(message)
+    return {
+        "step_id": pending.get("step_id"),
+        "screen_before": pending.get("screen_type"),
+        "action_kind": action.get("kind"),
+        "action_id": action.get("id"),
+        "action": action.get("label") or action.get("command"),
+        "screen_after": state.get("screen_type"),
+    }
+
+
 def candidate_assist_allowed(message: dict[str, Any], screens: tuple[str, ...] = ("ALL",)) -> bool:
     """Return whether this in-game screen should receive model candidates."""
     configured = {token.strip().upper() for token in screens if token.strip()}
@@ -425,9 +460,11 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
 def policy_observation(
     message: dict[str, Any],
     visited_shop_rooms: set[tuple[int, int]] | None = None,
+    action_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Route only the public context relevant to the active screen."""
     normalized = normalize_state(message)
+    normalized["recent_actions"] = recent_action_summary(action_history)
     # Full route information belongs only to the actual map selection screen.
     # A transient map overlay is normalized as TRANSITION and must not leak
     # route detail into event/reward/combat decisions.
@@ -458,6 +495,7 @@ def policy_observation(
             "relics",
             "potions",
             "combat",
+            "recent_actions",
         )
     }
 
@@ -473,6 +511,27 @@ def deck_summary(deck: Any) -> list[dict[str, Any]]:
     return [
         {"id": card_id, "upgrades": upgrades, "count": count}
         for (card_id, upgrades), count in sorted(counts.items())
+    ]
+
+
+def overlay_deck_summary(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Group the currently visible deck for the compact state overlay."""
+    deck = game_state(message).get("deck")
+    counts: Counter[tuple[str, int]] = Counter()
+    if not isinstance(deck, list):
+        return []
+    for card in deck:
+        if not isinstance(card, dict):
+            continue
+        name = str(card.get("name") or card.get("id") or "未知卡牌")
+        try:
+            upgrades = int(card.get("upgrades", 0) or 0)
+        except (TypeError, ValueError):
+            upgrades = 0
+        counts[(name, upgrades)] += 1
+    return [
+        {"name": name, "upgrades": upgrades, "count": count}
+        for (name, upgrades), count in sorted(counts.items(), key=lambda item: (item[0][0], item[0][1]))
     ]
 
 
@@ -550,6 +609,21 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
     if screen_type in {"CARD_REWARD", "GRID"}:
         cards = value.get("cards", [])
         result["cards"] = [visible_card(card) for card in cards if isinstance(card, dict)]
+        if screen_type == "GRID":
+            mode_fields = (
+                ("for_purge", "PURGE", "选择 1 张牌移除"),
+                ("for_transform", "TRANSFORM", "选择 1 张牌进行变化"),
+                ("for_upgrade", "UPGRADE", "选择 1 张牌升级"),
+            )
+            for flag, mode, instruction in mode_fields:
+                if value.get(flag):
+                    result["selection_mode"] = mode
+                    result["selection_instruction"] = instruction
+                    break
+            else:
+                if value.get("any_number"):
+                    result["selection_mode"] = "SELECT"
+                    result["selection_instruction"] = "选择符合当前界面要求的牌"
         for key in ("selected_cards", "num_cards", "for_transform", "for_upgrade", "for_purge", "any_number", "confirm_up", "skip_available"):
             if key in value:
                 if key == "selected_cards":
@@ -1046,12 +1120,120 @@ def parse_human_input(
     return None, None, "未知输入。输入 h 查看帮助。"
 
 
+def overlay_input_hint(action: dict[str, Any]) -> str:
+    """Return the shortest human-terminal command that resolves to this action."""
+    kind = str(action.get("kind", ""))
+    if kind == "play":
+        command = f"p {action.get('card_index')}"
+        return f"{command} {action['target']}" if isinstance(action.get("target"), int) else command
+    if kind == "potion_use":
+        command = f"u {action.get('slot')}"
+        return f"{command} {action['target']}" if isinstance(action.get("target"), int) else command
+    if kind == "potion_discard":
+        return f"d {action.get('slot')}"
+    if kind == "choose" and isinstance(action.get("index"), int):
+        return str(action["index"])
+    if kind == "end_turn":
+        return "e"
+    if kind == "confirm":
+        return "c"
+    if kind in {"cancel", "return", "skip", "leave", "key"}:
+        return "x"
+    return str(action.get("command") or "")
+
+
+def overlay_action_row(message: dict[str, Any], action: dict[str, Any]) -> dict[str, str]:
+    """Build the four compact columns shown by the Overlay action table."""
+    state = game_state(message)
+    kind = str(action.get("kind", ""))
+    selection = ""
+    target = ""
+
+    if kind == "play":
+        combat = state.get("combat_state") if isinstance(state.get("combat_state"), dict) else {}
+        hand = combat.get("hand", [])
+        card_index = action.get("card_index")
+        if isinstance(hand, list) and isinstance(card_index, int) and 0 < card_index <= len(hand):
+            card = hand[card_index - 1]
+            if isinstance(card, dict):
+                selection = str(card.get("name") or f"手牌 {card_index}")
+        if not selection:
+            selection = f"手牌 {card_index}" if card_index is not None else ""
+        action_type = "出牌"
+    elif kind in {"potion_use", "potion_discard"}:
+        potions = state.get("potions", [])
+        slot = action.get("slot")
+        if isinstance(potions, list) and isinstance(slot, int) and 0 <= slot < len(potions):
+            potion = potions[slot]
+            if isinstance(potion, dict):
+                selection = str(potion.get("name") or f"药水 {slot}")
+        if not selection:
+            selection = f"药水 {slot}" if slot is not None else ""
+        action_type = "使用药水" if kind == "potion_use" else "丢弃药水"
+    elif kind == "choose":
+        action_type = "选择"
+        selection = str(action.get("label") or "")
+    else:
+        action_type = {
+            "end_turn": "结束回合",
+            "confirm": "确认/继续",
+            "return": "返回",
+            "cancel": "取消",
+            "skip": "跳过",
+            "leave": "离开",
+            "key": "按键",
+        }.get(kind, str(action.get("label") or action.get("id") or "动作"))
+        if kind == "key":
+            selection = str(action.get("label") or "")
+
+    target_index = action.get("target")
+    if isinstance(target_index, int):
+        target = f"敌人 {target_index}"
+    return {
+        "type": action_type,
+        "selection": selection,
+        "target": target,
+        "command": overlay_input_hint(action),
+    }
+
+
+def overlay_view_data(
+    message: dict[str, Any],
+    run_id: str | None,
+    actions: list[dict[str, Any]],
+    action_history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return only the state information useful beside the game window."""
+    if not message.get("in_game"):
+        return {"summary": "状态：主菜单", "legal_actions": []}
+
+    state = game_state(message)
+    map_transition = is_map_room_transition(state)
+    screen = str(state.get("screen_type", ""))
+    display_screen = "TRANSITION" if map_transition else screen
+    summary = "\n".join(
+        (
+            f"RUN {run_id or '-'} | {state.get('class', '?')} A{state.get('ascension_level', '?')} "
+            f"| Act {state.get('act', '?')} Floor {state.get('floor', '?')} | {display_screen}",
+            f"HP {state.get('current_hp', '?')}/{state.get('max_hp', '?')} "
+            f"| Gold {state.get('gold', '?')} | Room {state.get('room_phase', '')}",
+        )
+    )
+    return {
+        "summary": summary,
+        "deck": overlay_deck_summary(message),
+        "recent_actions": recent_action_summary(action_history),
+        "legal_actions": [overlay_action_row(message, action) for action in actions],
+    }
+
+
 def format_view(
     message: dict[str, Any],
     run_id: str | None,
     error: str | None = None,
     decision: dict[str, Any] | None = None,
     visited_shop_rooms: set[tuple[int, int]] | None = None,
+    actions: list[dict[str, Any]] | None = None,
 ) -> str:
     state = game_state(message)
     lines: list[str] = ["STS AGENT", "=" * 78]
@@ -1215,7 +1397,7 @@ def format_view(
     if shop_reentry_blocked(message, visited_shop_rooms):
         lines.append("商店入口已在本层访问；不能再次进入。请输入 c 继续离开商店房间。")
     lines.append("合法动作")
-    for action in semantic_actions(message, visited_shop_rooms):
+    for action in actions if actions is not None else semantic_actions(message, visited_shop_rooms):
         label = action["id"]
         if action.get("label"):
             label += f" ({action['label']})"
@@ -1712,12 +1894,13 @@ def ask_action(
     error: str | None = None,
     policy: PolicyClient | None = None,
     visited_shop_rooms: set[tuple[int, int]] | None = None,
+    action_history: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
     actions = semantic_actions(message, visited_shop_rooms)
     if policy is None:
         decision = None
     elif candidate_assist_allowed(message, policy.screens):
-        decision = policy.rank(policy_observation(message, visited_shop_rooms), actions)
+        decision = policy.rank(policy_observation(message, visited_shop_rooms, action_history), actions)
     else:
         decision = policy.status_decision()
     # Error responses are a hard human handoff. Repeating an otherwise
@@ -1739,9 +1922,10 @@ def ask_action(
         bridge.send(
             {
                 "type": "view",
-                "text": format_view(message, run_id, error, decision, visited_shop_rooms),
+                "text": format_view(message, run_id, error, decision, visited_shop_rooms, actions),
                 "in_game": bool(message.get("in_game")),
                 "decision": decision,
+                "overlay": overlay_view_data(message, run_id, actions, action_history),
             }
         )
         response = bridge.receive()
@@ -1793,6 +1977,7 @@ def main() -> int:
     step_id = 0
     message_index = 0
     visited_shop_rooms: set[tuple[int, int]] = set()
+    action_history: list[dict[str, Any]] = []
     trace_output: TextIO | None = None
     event_output: TextIO | None = None
     trace_path: Path | None = None
@@ -1842,6 +2027,7 @@ def main() -> int:
             return {"in_game": False}
         value = normalize_state(message)
         value["run_memory"] = run_memory_summary(visited_shop_rooms)
+        value["recent_actions"] = recent_action_summary(action_history)
         return value
 
     # The game must not expose a start action before the policy has finished
@@ -1896,6 +2082,7 @@ def main() -> int:
                             str(message.get("error")),
                             policy,
                             visited_shop_rooms,
+                            action_history,
                         )
                         if result is None:
                             return 0
@@ -1909,6 +2096,7 @@ def main() -> int:
                                 action,
                                 decision,
                                 visited_shop_rooms,
+                                action_history,
                             )
                             step_id += 1
                         else:
@@ -1933,6 +2121,8 @@ def main() -> int:
                         )
 
                 if pending is not None:
+                    action_history.append(accepted_action_history_item(pending, message))
+                    del action_history[:-ACTION_HISTORY_LIMIT]
                     write_trace(
                         {
                             "schema_version": "0.2" if pending.get("decision") else "0.1",
@@ -1955,6 +2145,10 @@ def main() -> int:
                     pending = None
 
                 current_message = message
+                if not message.get("in_game"):
+                    # A main-menu observation starts a fresh run context; do
+                    # not leak the previous run's action history into it.
+                    action_history.clear()
                 if run_config is not None and run_config.get("internal_seed") is None and message.get("in_game"):
                     observed_seed = game_state(message).get("seed")
                     if observed_seed is not None:
@@ -1974,7 +2168,14 @@ def main() -> int:
                             },
                         )
                         rebind_run_outputs_after_seed()
-                result = ask_action(bridge, message, run_id, policy=policy, visited_shop_rooms=visited_shop_rooms)
+                result = ask_action(
+                    bridge,
+                    message,
+                    run_id,
+                    policy=policy,
+                    visited_shop_rooms=visited_shop_rooms,
+                    action_history=action_history,
+                )
                 if result is None:
                     return 0
                 command, action, decision = result
@@ -1983,6 +2184,7 @@ def main() -> int:
                     run_id = f"{session_id}-run-{run_index:03d}"
                     step_id = 0
                     visited_shop_rooms.clear()
+                    action_history.clear()
                     run_config = {
                         "character": action.get("character", "IRONCLAD"),
                         "ascension": action.get("ascension", 0),
@@ -2005,7 +2207,16 @@ def main() -> int:
                 elif command == "STATE":
                     pending = None
                 else:
-                    pending = make_pending(message, run_id, run_config, step_id, action, decision, visited_shop_rooms)
+                    pending = make_pending(
+                        message,
+                        run_id,
+                        run_config,
+                        step_id,
+                        action,
+                        decision,
+                        visited_shop_rooms,
+                        action_history,
+                    )
                     step_id += 1
                     print(command, flush=True)
     except KeyboardInterrupt:
@@ -2026,9 +2237,11 @@ def make_pending(
     action: dict[str, Any],
     decision: dict[str, Any] | None = None,
     visited_shop_rooms: set[tuple[int, int]] | None = None,
+    action_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_state(message)
     normalized["run_memory"] = run_memory_summary(visited_shop_rooms)
+    normalized["recent_actions"] = recent_action_summary(action_history)
     return {
         "run_id": run_id,
         "run_config": run_config.copy() if run_config is not None else None,

@@ -57,6 +57,7 @@ def action_prompt_lines(observation: dict[str, Any], legal_actions: list[dict[st
     lines = [
         "Observation:",
         compact_json(observation, limit=observation_limit),
+        "Recent accepted actions are context only; the current screen and legal actions are authoritative.",
         "Legal actions:",
     ]
     for action in legal_actions:

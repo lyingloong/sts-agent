@@ -80,7 +80,7 @@ def enable_windows_dpi_awareness() -> None:
 
 
 def state_text_only(text: str, divider_columns: int = 36) -> str:
-    """Keep status and legal actions out of the model/action window."""
+    """Fallback for controllers that do not yet send structured Overlay data."""
     result: list[str] = []
     skipping_candidates = False
     for line in text.splitlines():
@@ -99,39 +99,84 @@ def state_text_only(text: str, divider_columns: int = 36) -> str:
     return "\n".join(result).strip()
 
 
-def model_feedback(decision: Any) -> str:
-    if not isinstance(decision, dict):
-        return "模型反馈\n等待当前状态。"
-    lines = ["模型反馈"]
-    status = decision.get("assist_status")
-    reason = decision.get("assist_reason")
-    if status:
-        lines.append(f"状态：{status}")
-    if reason:
-        lines.append(str(reason))
-    confidence = decision.get("confidence")
-    if isinstance(confidence, dict):
-        route = "自动执行" if confidence.get("route") == "auto_execute" else "等待人工确认"
-        lines.append(
-            f"p1 {format_probability(confidence.get('top_probability'))}  "
-            f"margin {format_probability(confidence.get('margin'))}  "
-            f"entropy {confidence.get('entropy', '-')}"
-        )
-        lines.append(f"路由：{route}")
-    candidates = decision.get("model_candidates")
-    if isinstance(candidates, list) and candidates:
-        lines.append("候选动作：")
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
+def table_cell(value: Any) -> str:
+    """Keep one legal action inside one unbordered table row."""
+    return " ".join(str(value or "").split())
+
+
+def history_line(item: dict[str, Any]) -> str:
+    """Render one compact accepted-action history entry for the state window."""
+    action = table_cell(item.get("action") or item.get("action_id") or "未知动作")
+    step = item.get("step_id")
+    return f"#{step} {action}" if step is not None else action
+
+
+def state_panel_text(overlay: Any, divider_columns: int = 36) -> str:
+    """Render the small state summary and the three-column legal-action table."""
+    if not isinstance(overlay, dict):
+        return state_text_only(str(overlay or ""), divider_columns)
+    summary = str(overlay.get("summary") or "等待当前状态。").strip()
+    deck = overlay.get("deck")
+    history = overlay.get("recent_actions")
+    actions = overlay.get("legal_actions")
+    lines = [summary]
+    if isinstance(deck, list):
+        lines.extend(("", "当前牌组"))
+        deck_labels: list[str] = []
+        for card in deck:
+            if not isinstance(card, dict):
                 continue
-            rank = candidate.get("rank", "?")
-            label = candidate.get("label") or candidate.get("action_id") or "未知动作"
-            score = candidate.get("score")
-            score_text = f"  p={format_probability(score)}" if isinstance(score, (int, float)) else ""
-            lines.append(f"[{rank}] {label}{score_text}")
-    elif not status:
-        lines.append("当前没有可显示的模型候选。")
+            name = table_cell(card.get("name") or "未知卡牌")
+            try:
+                upgrades = int(card.get("upgrades", 0) or 0)
+            except (TypeError, ValueError):
+                upgrades = 0
+            try:
+                count = int(card.get("count", 0) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if upgrades > 0:
+                name += f"+{upgrades}"
+            deck_labels.append(f"{name}*{count}")
+        lines.append("  ".join(deck_labels) if deck_labels else "暂无牌组信息")
+    if isinstance(history, list):
+        lines.extend(("", "最近动作"))
+        history_lines = [history_line(item) for item in history if isinstance(item, dict)]
+        lines.append("\n".join(history_lines) if history_lines else "暂无历史动作")
+    lines.extend(("", "合法动作"))
+    if not isinstance(actions, list) or not actions:
+        lines.append("当前没有可执行动作。")
+        return "\n".join(lines)
+    lines.append("动作类型\t选择\t目标\t动作指令")
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        lines.append(
+            "\t".join(
+                (
+                    table_cell(action.get("type")),
+                    table_cell(action.get("selection")),
+                    table_cell(action.get("target")),
+                    table_cell(action.get("command")),
+                )
+            )
+        )
     return "\n".join(lines)
+
+
+def candidate_button_text(candidate: dict[str, Any], index: int) -> str:
+    """Keep each model suggestion in its button, without a duplicate text view."""
+    label = table_cell(candidate.get("label") or candidate.get("action_id") or f"候选 {index}")
+    score = candidate.get("score")
+    score_text = f"  p={format_probability(score)}" if isinstance(score, (int, float)) else ""
+    prefix = "接受一" if index == 1 else f"选择{index}"
+    return f"{prefix}: {label}{score_text}"
+
+
+def status_tab_stops(width: int) -> tuple[int, int, int]:
+    """Return tab stops that split the status table into four equal columns."""
+    usable_width = max(width - 20, 240)
+    return usable_width // 4, usable_width // 2, usable_width * 3 // 4
 
 
 class OverlayTerminal:
@@ -147,11 +192,14 @@ class OverlayTerminal:
         self.closing = False
         self.pending_view = False
         self._save_after: str | None = None
+        self._topmost_after: str | None = None
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
         self.control = tk.Toplevel(self.root)
         self.control.title("StS Agent - Model & Action")
+        self.connection_state = tk.StringVar()
+        self.control_connection = tk.StringVar()
         self.ui_font = self._choose_font("Microsoft YaHei UI", "Noto Sans SC", "Microsoft YaHei", "Segoe UI")
         self.data_font = self._choose_font("Microsoft YaHei UI", "Noto Sans SC", "Microsoft YaHei", "Cascadia Mono")
         self._drag_origin: dict[str, tuple[int, int]] = {}
@@ -164,8 +212,12 @@ class OverlayTerminal:
         self.control.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._schedule_layout_save, add="+")
         self.control.bind("<Configure>", self._schedule_layout_save, add="+")
+        self.root.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
+        self.control.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
         self._set_controls_enabled(False)
         self._set_connection("正在连接 controller...", WARNING)
+        if self.always_on_top:
+            self.root.after(200, self._keep_topmost)
         self.root.after(50, self.connect)
 
     def _load_layout(self) -> dict[str, str]:
@@ -192,6 +244,36 @@ class OverlayTerminal:
             window.overrideredirect(True)
         window.attributes("-alpha", float(window_config["opacity"]))
         window.attributes("-topmost", self.always_on_top)
+
+    def _raise_topmost_windows(self) -> None:
+        """Use the native Windows topmost band without activating either Overlay."""
+        if not self.always_on_top or self.closing:
+            return
+        for window in (self.root, self.control):
+            try:
+                window.attributes("-topmost", True)
+                if sys.platform == "win32":
+                    ctypes.windll.user32.SetWindowPos(
+                        window.winfo_id(),
+                        -1,  # HWND_TOPMOST
+                        0,
+                        0,
+                        0,
+                        0,
+                        0x0001 | 0x0002 | 0x0010,  # no size, move, or activation
+                    )
+            except (AttributeError, OSError, tk.TclError):
+                continue
+
+    def _keep_topmost(self) -> None:
+        self._topmost_after = None
+        self._raise_topmost_windows()
+        if not self.closing and self.always_on_top:
+            self._topmost_after = self.root.after(1200, self._keep_topmost)
+
+    def _schedule_topmost_refresh(self, _event: tk.Event[tk.Misc]) -> None:
+        if self.always_on_top and not self.closing:
+            self.root.after_idle(self._raise_topmost_windows)
 
     def _choose_font(self, *preferred: str) -> str:
         available = {name.casefold(): name for name in tkfont.families(self.root)}
@@ -271,21 +353,12 @@ class OverlayTerminal:
         outer.grid(sticky="nsew")
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(2, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
         outer.grid_columnconfigure(0, weight=1)
 
         self._title_bar(outer, self.root, "CURRENT STATE").grid(row=0, column=0, sticky="ew", pady=(0, 7))
-        self.connection_state = tk.StringVar()
-        tk.Label(
-            outer,
-            textvariable=self.connection_state,
-            foreground=MUTED,
-            background=BACKGROUND,
-            font=(self.ui_font, 9),
-        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
-
-        text_frame = tk.Frame(outer, background=PANEL, highlightbackground="#4c5053", highlightthickness=1)
-        text_frame.grid(row=2, column=0, sticky="nsew")
+        text_frame = tk.Frame(outer, background=FIELD)
+        text_frame.grid(row=1, column=0, sticky="nsew")
         text_frame.grid_rowconfigure(0, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
         self.status_text = tk.Text(
@@ -302,8 +375,10 @@ class OverlayTerminal:
             font=(self.data_font, 10),
         )
         self.status_text.grid(row=0, column=0, sticky="nsew")
+        self._configure_status_tags()
+        self.status_text.bind("<Configure>", self._update_status_tabs, add="+")
         footer = tk.Frame(outer, background=BACKGROUND, height=16)
-        footer.grid(row=3, column=0, sticky="ew")
+        footer.grid(row=2, column=0, sticky="ew")
         footer.grid_columnconfigure(0, weight=1)
         self._resize_grip(footer, self.root).grid(row=0, column=1, sticky="se")
 
@@ -312,14 +387,13 @@ class OverlayTerminal:
         outer.grid(sticky="nsew")
         self.control.grid_rowconfigure(0, weight=1)
         self.control.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(2, weight=1)
+        outer.grid_rowconfigure(5, weight=1)
         outer.grid_columnconfigure(0, weight=1)
 
         title_bar = self._title_bar(outer, self.control, "MODEL / ACTION")
         title_bar.grid(row=0, column=0, sticky="ew", pady=(0, 7))
         self.reconnect_button = self._button(title_bar, "重连", self.connect, compact=True)
         self.reconnect_button.grid(row=0, column=1, sticky="e", padx=(0, 4))
-        self.control_connection = tk.StringVar()
         tk.Label(
             outer,
             textvariable=self.control_connection,
@@ -328,34 +402,14 @@ class OverlayTerminal:
             font=(self.ui_font, 9),
         ).grid(row=1, column=0, sticky="w", pady=(0, 8))
 
-        feedback_frame = tk.Frame(outer, background=PANEL, highlightbackground="#4c5053", highlightthickness=1)
-        feedback_frame.grid(row=2, column=0, sticky="nsew")
-        feedback_frame.grid_rowconfigure(0, weight=1)
-        feedback_frame.grid_columnconfigure(0, weight=1)
-        self.feedback_text = tk.Text(
-            feedback_frame,
-            wrap="word",
-            height=10,
-            state="disabled",
-            background=FIELD,
-            foreground=TEXT,
-            relief="flat",
-            borderwidth=0,
-            padx=10,
-            pady=8,
-            font=(self.ui_font, 10),
-        )
-        self.feedback_text.grid(row=0, column=0, sticky="nsew")
-
         self.candidate_frame = tk.Frame(outer, background=BACKGROUND)
-        self.candidate_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.candidate_frame.grid(row=2, column=0, sticky="ew")
         self.candidate_frame.grid_columnconfigure(0, weight=1)
-        self.candidate_frame.grid_columnconfigure(1, weight=1)
         self.candidate_buttons: list[tk.Button] = []
         self.quick_buttons: list[tk.Button] = []
 
         action_frame = tk.Frame(outer, background=BACKGROUND)
-        action_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        action_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         action_frame.grid_columnconfigure(0, weight=1)
         self.action_entry = tk.Entry(
             action_frame,
@@ -373,14 +427,14 @@ class OverlayTerminal:
         self.send_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")
 
         quick = tk.Frame(outer, background=BACKGROUND)
-        quick.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        quick.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         for index, (label, action) in enumerate((("结束回合", "e"), ("继续", "c"), ("返回", "x"))):
             quick.grid_columnconfigure(index, weight=1)
             button = self._button(quick, label, lambda value=action: self.submit_action(value), compact=True)
             button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
             self.quick_buttons.append(button)
         resize_bar = tk.Frame(outer, background=BACKGROUND, height=16)
-        resize_bar.grid(row=6, column=0, sticky="ew")
+        resize_bar.grid(row=5, column=0, sticky="nsew")
         resize_bar.grid_columnconfigure(0, weight=1)
         self._resize_grip(resize_bar, self.control).grid(row=0, column=1, sticky="se")
 
@@ -407,6 +461,105 @@ class OverlayTerminal:
         widget.delete("1.0", "end")
         widget.insert("1.0", text)
         widget.configure(state="disabled")
+
+    def _configure_status_tags(self) -> None:
+        self.status_text.tag_configure("summary_run", foreground=ACCENT, font=(self.ui_font, 10, "bold"))
+        self.status_text.tag_configure("summary_stats", foreground=TEXT, font=(self.data_font, 10, "bold"))
+        self.status_text.tag_configure(
+            "section_heading",
+            foreground=ACCENT,
+            font=(self.ui_font, 11, "bold"),
+            spacing1=12,
+            spacing3=3,
+        )
+        self.status_text.tag_configure(
+            "table_header",
+            foreground=MUTED,
+            font=(self.ui_font, 9, "bold"),
+            spacing3=3,
+        )
+        self.status_text.tag_configure("action_type", foreground=WARNING, font=(self.ui_font, 10, "bold"))
+        self.status_text.tag_configure("action_selection", foreground=TEXT, font=(self.data_font, 10))
+        self.status_text.tag_configure("action_target", foreground=MUTED, font=(self.data_font, 10))
+        self.status_text.tag_configure("action_command", foreground=ACCENT, font=(self.data_font, 10, "bold"))
+        self.status_text.tag_configure("deck_heading", foreground=ACCENT, font=(self.ui_font, 10, "bold"), spacing1=10, spacing3=2)
+        self.status_text.tag_configure("deck_cards", foreground=TEXT, font=(self.data_font, 10))
+        self.status_text.tag_configure("history_heading", foreground=ACCENT, font=(self.ui_font, 10, "bold"), spacing1=10, spacing3=2)
+        self.status_text.tag_configure("history_text", foreground=MUTED, font=(self.data_font, 9))
+        self.status_text.tag_configure("empty_actions", foreground=MUTED, font=(self.ui_font, 9))
+
+    def _set_status_panel(self, overlay: Any) -> None:
+        if not isinstance(overlay, dict):
+            self._set_text(
+                self.status_text,
+                state_text_only(str(overlay or ""), self.config["overlay"]["status"]["divider_columns"]),
+            )
+            return
+
+        summary = str(overlay.get("summary") or "等待当前状态。").strip()
+        deck = overlay.get("deck")
+        history = overlay.get("recent_actions")
+        actions = overlay.get("legal_actions")
+        self.status_text.configure(state="normal")
+        self.status_text.delete("1.0", "end")
+        summary_lines = summary.splitlines() or [summary]
+        for index, line in enumerate(summary_lines):
+            if index:
+                self.status_text.insert("end", "\n")
+            self.status_text.insert("end", line, "summary_run" if index == 0 else "summary_stats")
+
+        if isinstance(deck, list):
+            self.status_text.insert("end", "\n\n当前牌组", "deck_heading")
+            deck_labels: list[str] = []
+            for card in deck:
+                if not isinstance(card, dict):
+                    continue
+                name = table_cell(card.get("name") or "未知卡牌")
+                try:
+                    upgrades = int(card.get("upgrades", 0) or 0)
+                except (TypeError, ValueError):
+                    upgrades = 0
+                try:
+                    count = int(card.get("count", 0) or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                if upgrades > 0:
+                    name += f"+{upgrades}"
+                deck_labels.append(f"{name}*{count}")
+            self.status_text.insert("end", "\n" + ("  ".join(deck_labels) if deck_labels else "暂无牌组信息"), "deck_cards")
+
+        if isinstance(history, list):
+            self.status_text.insert("end", "\n\n最近动作", "history_heading")
+            history_lines = [history_line(item) for item in history if isinstance(item, dict)]
+            self.status_text.insert(
+                "end",
+                "\n" + ("\n".join(history_lines) if history_lines else "暂无历史动作"),
+                "history_text",
+            )
+
+        self.status_text.insert("end", "\n\n合法动作", "section_heading")
+        if not isinstance(actions, list) or not actions:
+            self.status_text.insert("end", "\n当前没有可执行动作。", "empty_actions")
+            self.status_text.configure(state="disabled")
+            return
+
+        self.status_text.insert("end", "\n动作类型\t选择\t目标\t动作指令", "table_header")
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            self.status_text.insert("end", "\n")
+            self.status_text.insert("end", table_cell(action.get("type")), "action_type")
+            self.status_text.insert("end", "\t")
+            self.status_text.insert("end", table_cell(action.get("selection")), "action_selection")
+            self.status_text.insert("end", "\t")
+            self.status_text.insert("end", table_cell(action.get("target")), "action_target")
+            self.status_text.insert("end", "\t")
+            self.status_text.insert("end", table_cell(action.get("command")), "action_command")
+        self.status_text.configure(state="disabled")
+
+    def _update_status_tabs(self, event: tk.Event[tk.Misc]) -> None:
+        """Keep the three legal-action columns evenly spaced while resizing."""
+        self.status_text.configure(tabs=status_tab_stops(event.width))
 
     def _set_connection(self, message: str, color: str = MUTED) -> None:
         self.connection_state.set(message)
@@ -443,23 +596,27 @@ class OverlayTerminal:
             return
         self.pending_view = True
         self._set_connection("等待操作", WARNING)
-        self._set_text(
-            self.status_text,
-            state_text_only(str(packet.get("text", "")), self.config["overlay"]["status"]["divider_columns"]),
-        )
+        overlay = packet.get("overlay")
+        if isinstance(overlay, dict):
+            self._set_status_panel(overlay)
+        else:
+            self._set_text(
+                self.status_text,
+                state_text_only(
+                    str(packet.get("text", "")), self.config["overlay"]["status"]["divider_columns"]
+                ),
+            )
         decision = packet.get("decision")
-        self._set_text(self.feedback_text, model_feedback(decision))
         self._clear_candidate_actions()
         candidates = decision.get("model_candidates", []) if isinstance(decision, dict) else []
         if isinstance(candidates, list):
             for index, candidate in enumerate(candidates, start=1):
                 if not isinstance(candidate, dict):
                     continue
-                action_id = str(candidate.get("action_id") or candidate.get("label") or f"候选 {index}")
-                label = f"接受 {index}: {action_id}"
+                label = candidate_button_text(candidate, index)
                 command = "a" if index == 1 else f"pick {index}"
                 button = self._button(self.candidate_frame, label, lambda value=command: self.submit_action(value), compact=True)
-                button.grid(row=(index - 1) // 2, column=(index - 1) % 2, sticky="ew", padx=((index - 1) % 2 * 5, 0), pady=(0, 5))
+                button.grid(row=index - 1, column=0, sticky="ew", pady=(0, 5))
                 self.candidate_buttons.append(button)
         self._set_controls_enabled(True)
         self.action_entry.focus_set()
@@ -593,6 +750,14 @@ class OverlayTerminal:
         if self.closing:
             return
         self.closing = True
+        for callback in (self._save_after, self._topmost_after):
+            if callback is not None:
+                try:
+                    self.root.after_cancel(callback)
+                except tk.TclError:
+                    pass
+        self._save_after = None
+        self._topmost_after = None
         self._save_layout()
         self.actions.put("q")
         try:

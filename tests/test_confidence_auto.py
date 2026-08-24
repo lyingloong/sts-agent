@@ -41,6 +41,33 @@ def event_message() -> dict:
     }
 
 
+def combat_message() -> dict:
+    return {
+        "in_game": True,
+        "available_commands": ["play", "end"],
+        "game_state": {
+            "screen_type": "NONE",
+            "room_phase": "COMBAT",
+            "class": "IRONCLAD",
+            "ascension_level": 0,
+            "act": 1,
+            "floor": 2,
+            "current_hp": 75,
+            "max_hp": 88,
+            "gold": 117,
+            "deck": [
+                {"name": "Strike", "id": "Strike_R", "upgrades": 0},
+                {"name": "Strike", "id": "Strike_R", "upgrades": 0},
+                {"name": "Bash", "id": "Bash", "upgrades": 1},
+            ],
+            "combat_state": {
+                "hand": [{"name": "Strike", "is_playable": True, "has_target": True}],
+                "monsters": [{"name": "Louse", "is_gone": False}],
+            },
+        },
+    }
+
+
 class ConfidenceAutoTests(unittest.TestCase):
     def test_normalizes_only_current_legal_actions(self) -> None:
         scores = controller.normalize_action_logprobs(
@@ -116,6 +143,86 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(decision["confidence"]["route"], "auto_execute")
         self.assertEqual(len(decision["action_scores"]), 2)
         self.assertAlmostEqual(sum(item["probability"] for item in decision["action_scores"]), 1.0)
+
+    def test_overlay_view_contains_only_summary_and_action_table_fields(self) -> None:
+        message = combat_message()
+        payload = controller.overlay_view_data(message, "run-1", controller.semantic_actions(message))
+        self.assertEqual(
+            payload["summary"],
+            "RUN run-1 | IRONCLAD A0 | Act 1 Floor 2 | NONE\nHP 75/88 | Gold 117 | Room COMBAT",
+        )
+        self.assertEqual(
+            payload["deck"],
+            [
+                {"name": "Bash", "upgrades": 1, "count": 1},
+                {"name": "Strike", "upgrades": 0, "count": 2},
+            ],
+        )
+        self.assertEqual(payload["recent_actions"], [])
+        self.assertEqual(
+            payload["legal_actions"],
+            [
+                {"type": "出牌", "selection": "Strike", "target": "敌人 0", "command": "p 1 0"},
+                {"type": "结束回合", "selection": "", "target": "", "command": "e"},
+            ],
+        )
+
+    def test_overlay_input_hints_are_directly_accepted_by_terminal(self) -> None:
+        message = event_message()
+        choice = controller.semantic_actions(message)[1]
+        self.assertEqual(controller.overlay_input_hint(choice), "1")
+        self.assertEqual(controller.overlay_input_hint({"kind": "confirm", "command": "PROCEED"}), "c")
+        self.assertEqual(controller.overlay_input_hint({"kind": "return", "command": "RETURN"}), "x")
+
+    def test_grid_normalization_exposes_selection_purpose(self) -> None:
+        message = {
+            "in_game": True,
+            "game_state": {
+                "screen_type": "GRID",
+                "screen_state": {
+                    "cards": [{"id": "Strike_R", "name": "Strike"}],
+                    "for_purge": True,
+                    "num_cards": 1,
+                },
+            },
+        }
+        screen_state = controller.normalize_state(message)["screen_state"]
+        self.assertEqual(screen_state["selection_mode"], "PURGE")
+        self.assertEqual(screen_state["selection_instruction"], "选择 1 张牌移除")
+
+    def test_recent_action_summary_is_bounded_and_keeps_semantics(self) -> None:
+        history = [
+            {
+                "step_id": index,
+                "screen_before": "EVENT",
+                "action_kind": "choose",
+                "action_id": f"CHOOSE:index={index}",
+                "action": "净化",
+                "screen_after": "GRID",
+            }
+            for index in range(8)
+        ]
+        summary = controller.recent_action_summary(history)
+        self.assertEqual(len(summary), 6)
+        self.assertEqual(summary[0]["step_id"], 2)
+        self.assertEqual(summary[-1]["action"], "净化")
+
+    def test_policy_observation_carries_recent_actions(self) -> None:
+        observation = controller.policy_observation(
+            event_message(),
+            action_history=[
+                {
+                    "step_id": 4,
+                    "screen_before": "EVENT",
+                    "action_kind": "choose",
+                    "action_id": "CHOOSE:index=1",
+                    "action": "净化",
+                    "screen_after": "GRID",
+                }
+            ],
+        )
+        self.assertEqual(observation["recent_actions"][0]["screen_after"], "GRID")
+        self.assertEqual(observation["recent_actions"][0]["action"], "净化")
 
 
 if __name__ == "__main__":

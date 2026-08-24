@@ -29,21 +29,46 @@ class OverlayFormattingTests(unittest.TestCase):
         rendered = overlay_terminal.state_text_only("=" * 78 + "\nstate\n" + "-" * 78, divider_columns=36)
         self.assertEqual(rendered.splitlines(), ["=" * 36, "state", "-" * 36])
 
-    def test_model_panel_keeps_confidence_and_candidates(self) -> None:
-        rendered = overlay_terminal.model_feedback(
+    def test_state_panel_renders_compact_summary_and_action_columns(self) -> None:
+        rendered = overlay_terminal.state_panel_text(
             {
-                "confidence": {
-                    "top_probability": 0.9,
-                    "margin": 0.8,
-                    "entropy": 0.3,
-                    "route": "human_confirm",
-                },
-                "model_candidates": [{"rank": 1, "action_id": "CHOOSE:index=0", "score": 0.9}],
+                "summary": "RUN test | IRONCLAD A0 | Act 1 Floor 2 | NONE\nHP 75/88 | Gold 117 | Room COMBAT",
+                "deck": [
+                    {"name": "打击", "upgrades": 0, "count": 5},
+                    {"name": "痛击", "upgrades": 1, "count": 1},
+                ],
+                "recent_actions": [
+                    {"step_id": 12, "action": "净化"},
+                    {"step_id": 13, "action": "选择 打击"},
+                ],
+                "legal_actions": [
+                    {"type": "出牌", "selection": "双重打击", "target": "敌人 0", "command": "p 1 0"},
+                    {"type": "结束回合", "selection": "", "target": "", "command": "e"},
+                ],
             }
         )
-        self.assertIn("90.0%", rendered)
-        self.assertIn("CHOOSE:index=0", rendered)
-        self.assertIn("等待人工确认", rendered)
+        self.assertIn("RUN test", rendered)
+        self.assertIn("当前牌组", rendered)
+        self.assertIn("打击*5  痛击+1*1", rendered)
+        self.assertIn("最近动作", rendered)
+        self.assertIn("#12 净化\n#13 选择 打击", rendered)
+        self.assertIn("动作类型\t选择\t目标\t动作指令", rendered)
+        self.assertIn("出牌\t双重打击\t敌人 0\tp 1 0", rendered)
+        self.assertIn("结束回合\t\t\te", rendered)
+
+    def test_candidate_button_contains_label_and_probability_once(self) -> None:
+        rendered = overlay_terminal.candidate_button_text(
+            {"label": "结束回合", "score": 0.381},
+            1,
+        )
+        self.assertEqual(rendered, "接受一: 结束回合  p=38.1%")
+
+    def test_history_line_falls_back_to_action_id(self) -> None:
+        self.assertEqual(overlay_terminal.history_line({"step_id": 2, "action_id": "END_TURN"}), "#2 END_TURN")
+
+    def test_status_table_columns_are_evenly_spaced(self) -> None:
+        self.assertEqual(overlay_terminal.status_tab_stops(560), (135, 270, 405))
+        self.assertEqual(overlay_terminal.status_tab_stops(200), (60, 120, 180))
 
 
 if __name__ == "__main__":

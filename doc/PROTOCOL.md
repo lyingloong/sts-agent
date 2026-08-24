@@ -72,6 +72,8 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 - `map.nodes`：当前 Act 已公开的完整地图节点及其 `x/y/symbol/children/parents` 关系；`map.current_node` 和 `map.next_nodes` 仍保留作快捷字段。
 - `combat.monsters[*].intent_damage`、`intent_hits`：从 CommunicationMod 的当前意图字段映射而来，用于表达敌人当前显示的攻击伤害和段数。
 - `combat.hand[*]`：保留 `damage`、`block`、`magic_number`、`description` 等字段（只有协议实际提供时才出现）。动态值不根据卡牌 ID 临时猜测；静态卡牌知识统一放在下方的 `effect` 字段。
+- `recent_actions`：模型观察和轨迹状态中保留当前局最近 6 个已被 CommunicationMod 确认且状态稳定的动作，包含执行前后界面、动作类型、规范 `action_id` 和简短语义。协议错误或尚未确认的动作不会进入历史；新局从空历史开始。
+- `screen_type=GRID`：若当前是事件/营火等触发的选牌界面，`screen_state.selection_mode` 和 `selection_instruction` 会明确表示 `PURGE`（移除）、`TRANSFORM`（变化）或 `UPGRADE`（升级）等目的。`for_purge` 等原始布尔字段仍保留作兼容。
 - `screen_type=TRANSITION`：CommunicationMod 返回地图界面但 `room_phase` 仍不是 `COMPLETE` 时的保护态。该状态不包含可训练的地图选择动作，只允许等待刷新或返回当前房间。
 - `screen_name=SETTINGS` 且 `is_screen_up=true`：表示设置/暂停覆盖层挡住了当前房间。此时 CommunicationMod 通常只暴露 `KEY`、`WAIT`、`STATE` 等通用命令，controller 将其显示为 `KEY:CANCEL`，终端输入 `x` 会发送 `KEY Cancel`；关闭覆盖层后才恢复战斗动作。
 - 药水栏已满时，controller 不会把 `COMBAT_REWARD` 中的 `POTION` 或商店中已识别的药水商品列为合法动作。CommunicationMod 对这类操作可能不返回错误或状态变化；终端会提示先选择其他奖励，或先丢弃一瓶药水。
