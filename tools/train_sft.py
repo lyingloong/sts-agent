@@ -265,6 +265,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True, help="new output directory for the LoRA adapter and run manifest")
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B", help="Hub ID or local base-model directory")
     parser.add_argument("--model-revision", default="main", help="recorded Hugging Face revision when --model is a Hub ID")
+    parser.add_argument(
+        "--initial-adapter",
+        type=Path,
+        help="completed LoRA adapter to continue from; starts a new run with fresh optimizer state",
+    )
     parser.add_argument("--max-length", type=int, default=4096, help="drop samples above this full prompt length; never truncate them")
     parser.add_argument(
         "--validation-runs",
@@ -297,6 +302,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(f"manifest does not exist: {args.manifest}")
     if args.output.exists() and any(args.output.iterdir()) and args.resume_from_checkpoint is None:
         raise ValueError(f"output directory is non-empty: {args.output}; choose a new run name or pass --resume-from-checkpoint")
+    if args.initial_adapter is not None:
+        if not args.initial_adapter.is_dir():
+            raise ValueError(f"initial_adapter does not exist: {args.initial_adapter}")
+        if not (args.initial_adapter / "adapter_config.json").is_file():
+            raise ValueError(f"initial_adapter is not a completed PEFT adapter: {args.initial_adapter}")
+    if args.initial_adapter is not None and args.resume_from_checkpoint is not None:
+        raise ValueError("initial_adapter and resume_from_checkpoint are mutually exclusive")
     if args.max_length < 128:
         raise ValueError("max_length must be at least 128")
     if args.epochs <= 0 or args.learning_rate <= 0:
@@ -372,7 +384,7 @@ def train(args: argparse.Namespace) -> int:
     configure_nccl_for_consumer_rtx()
     try:
         import torch
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments, set_seed
     except ImportError as exc:
         raise RuntimeError("install tools/requirements-train.txt and a CUDA PyTorch build before training") from exc
@@ -412,15 +424,18 @@ def train(args: argparse.Namespace) -> int:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     elif hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, lora_config)
+    if args.initial_adapter is not None:
+        model = PeftModel.from_pretrained(model, str(args.initial_adapter), is_trainable=True)
+    else:
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     resolved_model_revision = getattr(model.config, "_commit_hash", None)
     resolved_tokenizer_revision = tokenizer.init_kwargs.get("_commit_hash") if isinstance(tokenizer.init_kwargs, dict) else None
@@ -446,6 +461,7 @@ def train(args: argparse.Namespace) -> int:
             "load_in_4bit": args.load_in_4bit,
             "bf16": bf16,
         },
+        "initial_adapter": str(args.initial_adapter) if args.initial_adapter is not None else None,
         "arguments": serializable_args(args),
         "split": {
             "train_runs": len({str(sample["run_id"]) for sample in train_samples}),

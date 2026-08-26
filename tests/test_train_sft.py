@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -44,6 +45,69 @@ class TrainSftTests(unittest.TestCase):
         built = train_sft.training_arguments(FakeTrainingArguments, args, bf16=True, has_evaluation=False)
         self.assertTrue(built.kwargs["group_by_length"])
         self.assertEqual(built.kwargs["eval_strategy"], "no")
+
+    def test_initial_adapter_is_parsed_and_must_be_a_completed_adapter(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "train_sft.py",
+                "--dataset",
+                "dataset.jsonl",
+                "--output",
+                "output",
+                "--initial-adapter",
+                "previous-adapter",
+            ],
+        ):
+            args = train_sft.parse_args()
+        self.assertEqual(args.initial_adapter, Path("previous-adapter"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset.jsonl"
+            dataset.write_text("", encoding="utf-8")
+            output = root / "output"
+            adapter = root / "adapter"
+            adapter.mkdir()
+            args.dataset = dataset
+            args.output = output
+            args.initial_adapter = adapter
+            with self.assertRaisesRegex(ValueError, "not a completed PEFT adapter"):
+                train_sft.validate_args(args)
+            (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+            train_sft.validate_args(args)
+
+    def test_initial_adapter_cannot_be_combined_with_checkpoint_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset.jsonl"
+            dataset.write_text("", encoding="utf-8")
+            adapter = root / "adapter"
+            adapter.mkdir()
+            (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+            args = train_sft.argparse.Namespace(
+                dataset=dataset,
+                manifest=None,
+                output=root / "output",
+                initial_adapter=adapter,
+                resume_from_checkpoint=root / "checkpoint-1",
+                max_length=4096,
+                epochs=1.0,
+                learning_rate=1e-4,
+                validation_runs=0,
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                gradient_accumulation_steps=8,
+                lora_r=16,
+                lora_alpha=32,
+                logging_steps=10,
+                save_total_limit=3,
+                dataloader_workers=2,
+                lora_dropout=0.05,
+            )
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                train_sft.validate_args(args)
 
     def test_non_map_trace_observation_drops_map_like_live_inference(self) -> None:
         routed = train_sft.route_trace_observation(

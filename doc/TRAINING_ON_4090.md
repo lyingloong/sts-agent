@@ -172,6 +172,29 @@ CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
 
 `run_manifest.json` 至少记录：源码 commit、训练 bundle 名和 sha256、基础模型 ID 与 revision、tokenizer revision、训练参数、随机种子、代码版本和启动时间。只将这一目录同步回本机；基础模型和 optimizer state 留在训练机。
 
+### 从完成的 LoRA 继续 SFT
+
+已完成的 adapter 目录只包含 LoRA 权重，不包含 Trainer 的 optimizer 或学习率调度状态。以它为起点继续训练时，使用新的输出目录和 --initial-adapter；这会加载已有 LoRA 参数、重新创建 optimizer 和 scheduler，不能与 --resume-from-checkpoint 混用。
+
+例如 sft-v0-r001 已完成 3 个 epoch，目标为累计 10 个 epoch 时，再训练 7 个 epoch，并将学习率降至 2e-5：
+
+~~~bash
+CUDA_VISIBLE_DEVICES=1 \
+NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+.venv/bin/python tools/train_sft.py \
+  --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
+  --model /data/wanghao/sts-agent/models/base/Qwen3-0.6B \
+  --initial-adapter outputs/sft/qwen3-0.6b/sft-v0-r001 \
+  --output outputs/sft/qwen3-0.6b/sft-v0-r002-e10 \
+  --validation-runs 0 \
+  --epochs 7 \
+  --learning-rate 2e-5 \
+  --per-device-train-batch-size 1 \
+  --per-device-eval-batch-size 1 \
+  --gradient-accumulation-steps 8
+~~~
+
 ```bash
 rsync -aP --checksum <user>@<host>:/data/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001/ \
   outputs/sft/qwen3-0.6b/sft-v0-r001/
