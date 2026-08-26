@@ -13,6 +13,7 @@ import copy
 import hashlib
 import inspect
 import json
+import os
 import random
 import subprocess
 import sys
@@ -24,6 +25,18 @@ from typing import Any, Iterable
 
 import communication_controller
 import policy_server
+
+
+def configure_nccl_for_consumer_rtx() -> None:
+    """Make Accelerate usable on consumer RTX 40-series multi-GPU hosts.
+
+    Accelerate checks the physical GPU topology even when a caller exposes one
+    device through CUDA_VISIBLE_DEVICES. RTX 4090 hosts need these NCCL paths
+    disabled unless the launcher has already supplied an explicit choice.
+    """
+
+    os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+    os.environ.setdefault("NCCL_IB_DISABLE", "1")
 
 
 def sha256_file(path: Path) -> str:
@@ -177,6 +190,10 @@ def encode_sample(tokenizer: Any, sample: dict[str, Any], max_length: int) -> tu
 
 def split_by_run(samples: list[dict[str, Any]], validation_runs: int, seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     run_ids = sorted({str(sample.get("run_id") or "") for sample in samples if sample.get("run_id")})
+    if not run_ids:
+        raise ValueError("at least one complete run is required")
+    if validation_runs == 0:
+        return samples, [], []
     if len(run_ids) < 2:
         raise ValueError("at least two complete runs are required for a per-run train/validation split")
     if not 1 <= validation_runs < len(run_ids):
@@ -249,7 +266,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B", help="Hub ID or local base-model directory")
     parser.add_argument("--model-revision", default="main", help="recorded Hugging Face revision when --model is a Hub ID")
     parser.add_argument("--max-length", type=int, default=4096, help="drop samples above this full prompt length; never truncate them")
-    parser.add_argument("--validation-runs", type=int, default=3, help="number of whole runs held out for validation")
+    parser.add_argument(
+        "--validation-runs",
+        type=int,
+        default=3,
+        help="number of whole runs held out for validation; set 0 to train on every run",
+    )
     parser.add_argument("--seed", type=int, default=20260826)
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
@@ -260,7 +282,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--logging-steps", type=int, default=10)
-    parser.add_argument("--save-total-limit", type=int, default=2)
+    parser.add_argument("--save-total-limit", type=int, default=3)
     parser.add_argument("--dataloader-workers", type=int, default=2)
     parser.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume-from-checkpoint", type=Path)
@@ -279,6 +301,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("max_length must be at least 128")
     if args.epochs <= 0 or args.learning_rate <= 0:
         raise ValueError("epochs and learning_rate must be positive")
+    if args.validation_runs < 0:
+        raise ValueError("validation_runs must be zero or positive")
     for name in (
         "per_device_train_batch_size",
         "per_device_eval_batch_size",
@@ -295,7 +319,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("lora_dropout must be in [0, 1)")
 
 
-def training_arguments(training_args_cls: Any, args: argparse.Namespace, bf16: bool) -> Any:
+def training_arguments(training_args_cls: Any, args: argparse.Namespace, bf16: bool, has_evaluation: bool) -> Any:
     kwargs: dict[str, Any] = {
         "output_dir": str(args.output),
         "run_name": args.output.name,
@@ -321,9 +345,9 @@ def training_arguments(training_args_cls: Any, args: argparse.Namespace, bf16: b
     }
     signature = inspect.signature(training_args_cls).parameters
     if "eval_strategy" in signature:
-        kwargs["eval_strategy"] = "epoch"
+        kwargs["eval_strategy"] = "epoch" if has_evaluation else "no"
     else:
-        kwargs["evaluation_strategy"] = "epoch"
+        kwargs["evaluation_strategy"] = "epoch" if has_evaluation else "no"
     if "gradient_checkpointing_kwargs" in signature:
         kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
     return training_args_cls(**kwargs)
@@ -344,6 +368,7 @@ def train(args: argparse.Namespace) -> int:
             raise ValueError("max_train_samples must be positive")
         train_samples = train_samples[: args.max_train_samples]
 
+    configure_nccl_for_consumer_rtx()
     try:
         import torch
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -362,7 +387,10 @@ def train(args: argparse.Namespace) -> int:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset, train_encode_stats = encode_split(tokenizer, train_samples, args.max_length)
-    eval_dataset, eval_encode_stats = encode_split(tokenizer, eval_samples, args.max_length)
+    eval_dataset: EncodedDataset | None = None
+    eval_encode_stats: Counter[str] = Counter()
+    if eval_samples:
+        eval_dataset, eval_encode_stats = encode_split(tokenizer, eval_samples, args.max_length)
 
     model_kwargs: dict[str, Any] = {
         "revision": args.model_revision,
@@ -424,7 +452,7 @@ def train(args: argparse.Namespace) -> int:
             "raw_train_samples": len(train_samples),
             "raw_validation_samples": len(eval_samples),
             "encoded_train_samples": len(train_dataset),
-            "encoded_validation_samples": len(eval_dataset),
+            "encoded_validation_samples": len(eval_dataset) if eval_dataset is not None else 0,
             "train_encoding": dict(train_encode_stats),
             "validation_encoding": dict(eval_encode_stats),
         },
@@ -433,14 +461,15 @@ def train(args: argparse.Namespace) -> int:
 
     trainer = Trainer(
         model=model,
-        args=training_arguments(TrainingArguments, args, bf16),
+        args=training_arguments(TrainingArguments, args, bf16, has_evaluation=eval_dataset is not None),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=ResponseOnlyCollator(tokenizer.pad_token_id),
     )
     train_result = trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
     metrics = dict(train_result.metrics)
-    metrics.update(trainer.evaluate())
+    if eval_dataset is not None:
+        metrics.update(trainer.evaluate())
     trainer.save_model(str(args.output))
     tokenizer.save_pretrained(args.output / "tokenizer")
     (args.output / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

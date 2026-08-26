@@ -152,13 +152,20 @@ CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
 CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
   --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
   --output outputs/sft/qwen3-0.6b/sft-v0-r001 \
-  --epochs 1 \
+  --validation-runs 0 \
+  --epochs 3 \
+  --learning-rate 1e-4 \
+  --lora-r 8 \
+  --lora-alpha 16 \
   --max-length 4096 \
   --per-device-train-batch-size 4 \
-  --gradient-accumulation-steps 2
+  --gradient-accumulation-steps 2 \
+  --save-total-limit 3
 ```
 
-默认将 3 个完整 run 留作 validation；切分固定于 `--seed`，绝不随机按动作切分。模型使用 4-bit NF4 QLoRA、rank 16、BF16（4090 支持时）和 gradient checkpointing。超过 `--max-length` 的样本会被记录并整条跳过，而不是截断导致合法动作表不完整。首轮只跑 1 epoch，依据 `metrics.json`、`run_manifest.json` 和未见种子实际游戏评测决定是否继续，不直接增加 epoch。
+`--validation-runs 0` 会让全部 30 局进入训练，并关闭仅有训练损失的内部验证。训练器仍会在每个 epoch 保存 checkpoint；应以固定未见种子的实际游戏结果选择 checkpoint，不能按训练 loss 选择。当前 30 局已展开为 6,417 个逐步决策标签，首轮建议跑 3 epoch、rank 8、学习率 `1e-4`，而不是直接跑 10 epoch。模型使用 4-bit NF4 QLoRA、BF16（4090 支持时）和 gradient checkpointing。超过 `--max-length` 的样本会被记录并整条跳过，而不是截断导致合法动作表不完整。
+
+只有在首轮实机评测确认仍欠拟合时，才做 10 epoch 对照：将学习率降至 `5e-5`，设置 `--save-total-limit 10`，并比较第 1、3、5、10 个 epoch 的固定种子结果。不要只因训练 loss 继续下降就采用后面的 checkpoint。
 
 若希望用本地下载好的基座，可增加 `--model /data/wanghao/sts-agent/models/base/Qwen3-0.6B`；训练器会先校验相邻 bundle `manifest.json` 中的 JSONL SHA-256。输出目录必须是新的；断点继续才传入 `--resume-from-checkpoint <checkpoint-path>`。
 

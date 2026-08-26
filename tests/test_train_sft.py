@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
@@ -12,6 +13,20 @@ import train_sft  # noqa: E402
 
 
 class TrainSftTests(unittest.TestCase):
+    def test_nccl_defaults_are_set_without_overriding_explicit_values(self) -> None:
+        with patch.dict(train_sft.os.environ, {}, clear=True):
+            train_sft.configure_nccl_for_consumer_rtx()
+            self.assertEqual(train_sft.os.environ["NCCL_P2P_DISABLE"], "1")
+            self.assertEqual(train_sft.os.environ["NCCL_IB_DISABLE"], "1")
+        with patch.dict(
+            train_sft.os.environ,
+            {"NCCL_P2P_DISABLE": "0", "NCCL_IB_DISABLE": "0"},
+            clear=True,
+        ):
+            train_sft.configure_nccl_for_consumer_rtx()
+            self.assertEqual(train_sft.os.environ["NCCL_P2P_DISABLE"], "0")
+            self.assertEqual(train_sft.os.environ["NCCL_IB_DISABLE"], "0")
+
     def test_non_map_trace_observation_drops_map_like_live_inference(self) -> None:
         routed = train_sft.route_trace_observation(
             {
@@ -52,6 +67,17 @@ class TrainSftTests(unittest.TestCase):
         self.assertEqual({item["run_id"] for item in validation}, set(validation_ids))
         self.assertTrue({item["run_id"] for item in train}.isdisjoint(set(validation_ids)))
         self.assertEqual(validation_ids, train_sft.split_by_run(samples, validation_runs=1, seed=3)[2])
+
+    def test_zero_validation_runs_keeps_every_sample_for_training(self) -> None:
+        samples = [
+            {"run_id": f"run-{run}", "sample_id": f"run-{run}:{step}"}
+            for run in range(2)
+            for step in range(2)
+        ]
+        train, validation, validation_ids = train_sft.split_by_run(samples, validation_runs=0, seed=3)
+        self.assertEqual(train, samples)
+        self.assertEqual(validation, [])
+        self.assertEqual(validation_ids, [])
 
     def test_sample_validation_rejects_target_outside_legal_aliases(self) -> None:
         sample = {
