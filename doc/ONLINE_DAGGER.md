@@ -1,6 +1,8 @@
 # 在线纠正式模仿学习方案
 
-更新时间：2026-08-23
+> 状态：设计参考。当前已实现 Candidate Assist、置信度自动执行和远程教师采集；SFT trainer、偏好导出与 DAgger 训练闭环尚未实现。当前执行顺序以 [PLAN.md](PLAN.md) 和 [TEACHER_SFT_GRPO.md](TEACHER_SFT_GRPO.md) 为准。
+
+更新时间：2026-08-26
 
 ## 1. 目标与边界
 
@@ -261,7 +263,7 @@ human_override > human_confirm > model_auto + successful outcome
 推荐分工：
 
 - 本机 3050：游戏、controller、policy server、4-bit 推理、轨迹写盘；
-- 外部 RTX 5050：定期 LoRA/QLoRA 训练、验证和模型导出；
+- 外部 8x RTX 4090：LoRA/QLoRA 训练、并行评测和模型导出；当前小模型 SFT 先用单卡，避免无效 DDP；
 - 两台机器：按局同步 `action-trace` 和版本化 observation/action schema，不同步 raw 全量日志，除非排错。
 
 每轮训练只替换一个 adapter；切换前用固定种子回归，失败则保留旧版本。模型文件、训练缓存和数据目录继续由 `.gitignore` 排除。
@@ -299,6 +301,6 @@ human_override > human_confirm > model_auto + successful outcome
 
 ## 10. 当前决策
 
-当前不需要重新收集大量纯人类 SFT。现阶段继续用 `Shadow -> Candidate Assist -> DAgger` 验证候选覆盖和交互闭环；置信度路由已作为显式开关实现，但自动执行仍需积累模型首选与人类最终动作的配对记录后校准。若零样本 Qwen 的候选 `recall@3` 过低，再补充少量人类冷启动数据，而不是直接进入在线 RL。
+当前先用 30 局教师数据训练并评测 `sft_base_v0`，随后按模型失败状态补充人类纠正、深层路线和其他角色。置信度路由已作为显式开关实现，但自动执行仍需积累模型首选与人类最终动作的配对记录后校准。只有 SFT 基线、固定种子评测和真实游戏 rollout 稳定后，才进入 DAgger 或 GRPO；详见 [TRAINING_ON_4090.md](TRAINING_ON_4090.md)。
 
 参考： [DAgger](https://arxiv.org/abs/1011.0686)、[TAMER](https://www.cs.utexas.edu/~pstone/Papers/bib2html/b2hd-ICDL08-knox.html)、[PEBBLE](https://arxiv.org/abs/2106.05091)。

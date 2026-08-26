@@ -1,0 +1,9 @@
+# Training-machine dependencies. Install CUDA PyTorch separately first; see
+# doc/TRAINING_ON_4090.md for the Linux setup and the matching wheel index.
+transformers>=4.51,<5
+accelerate>=1.0
+peft>=0.15
+trl>=0.16
+datasets>=3.0
+safetensors>=0.4
+bitsandbytes>=0.48

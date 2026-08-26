@@ -32,6 +32,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "min_probability": 0.85,
         },
     },
+    "teacher": {
+        "enabled": False,
+        "base_url": "https://api.llm.ustc.edu.cn/v1",
+        "model": "deepseek-v4-pro",
+        "api_key_file": "deepseek_api.txt",
+        "timeout_seconds": 90.0,
+        "max_retries": 1,
+        "temperature": 0.0,
+        "max_tokens": 512,
+        "max_input_chars": 32000,
+        "thinking": True,
+        "json_mode": True,
+        "streaming": True,
+        "screens": ["ALL"],
+    },
     "overlay": {
         "always_on_top": True,
         "frameless": True,
@@ -102,6 +117,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("schema_version must be 1")
     server = config["server"]
     policy = config["policy"]
+    teacher = config["teacher"]
     confidence = policy["confidence_auto"]
     overlay = config["overlay"]
 
@@ -131,6 +147,39 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError(f"policy.screens contains unsupported values: {', '.join(sorted(unknown_screens))}")
     _require_bool(confidence["enabled"], "policy.confidence_auto.enabled")
     _require_number(confidence["min_probability"], "policy.confidence_auto.min_probability", 0.0, 1.0)
+
+    _require_bool(teacher["enabled"], "teacher.enabled")
+    _require_string(teacher["base_url"], "teacher.base_url")
+    if not str(teacher["base_url"]).startswith(("https://", "http://")):
+        raise ConfigError("teacher.base_url must start with http:// or https://")
+    _require_string(teacher["model"], "teacher.model")
+    _require_string(teacher["api_key_file"], "teacher.api_key_file")
+    key_path = Path(str(teacher["api_key_file"]))
+    if key_path.is_absolute() or ".." in key_path.parts:
+        raise ConfigError("teacher.api_key_file must be a project-relative path")
+    _require_number(teacher["timeout_seconds"], "teacher.timeout_seconds", 1.0)
+    retries = teacher["max_retries"]
+    if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 5:
+        raise ConfigError("teacher.max_retries must be an integer from 0 to 5")
+    _require_number(teacher["temperature"], "teacher.temperature", 0.0, 2.0)
+    max_tokens = teacher["max_tokens"]
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 32 <= max_tokens <= 8192:
+        raise ConfigError("teacher.max_tokens must be an integer from 32 to 8192")
+    max_input_chars = teacher["max_input_chars"]
+    if isinstance(max_input_chars, bool) or not isinstance(max_input_chars, int) or not 0 <= max_input_chars <= 262144:
+        raise ConfigError("teacher.max_input_chars must be an integer from 0 to 262144")
+    _require_bool(teacher["thinking"], "teacher.thinking")
+    _require_bool(teacher["json_mode"], "teacher.json_mode")
+    _require_bool(teacher["streaming"], "teacher.streaming")
+    teacher_screens = teacher["screens"]
+    if not isinstance(teacher_screens, list) or not teacher_screens or not all(isinstance(item, str) for item in teacher_screens):
+        raise ConfigError("teacher.screens must be a non-empty list of strings")
+    unknown_teacher_screens = {item.strip().upper() for item in teacher_screens} - {"ALL", "COMBAT"}
+    if unknown_teacher_screens:
+        raise ConfigError(f"teacher.screens contains unsupported values: {', '.join(sorted(unknown_teacher_screens))}")
+    if teacher["enabled"] and policy["enabled"]:
+        raise ConfigError("teacher.enabled and policy.enabled cannot both be true; disable local policy for teacher collection")
+
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")
     for name in ("status", "control"):

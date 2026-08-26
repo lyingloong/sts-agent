@@ -13,6 +13,8 @@ import communication_controller as controller  # noqa: E402
 
 class NoBridge:
     def send(self, packet):
+        if packet.get("auto_execute"):
+            return
         raise AssertionError(f"automatic decision unexpectedly requested terminal input: {packet}")
 
 
@@ -21,12 +23,28 @@ class FakePolicy:
         self.decision = decision
         self.screens = ("ALL",)
 
-    def rank(self, observation, legal_actions):
-        del observation, legal_actions
+    def rank(self, observation, legal_actions, on_update=None):
+        del observation, legal_actions, on_update
         return self.decision
 
     def status_decision(self):
         return self.decision
+
+
+class FakeTeacher:
+    screens = ("ALL",)
+    model = "teacher-test"
+
+    def rank(self, observation, legal_actions, on_update=None):
+        del observation, legal_actions, on_update
+        return {
+            "mode": "teacher_collection",
+            "model_id": "teacher-test",
+            "candidate_source": "remote_teacher",
+            "model_action": "CHOOSE:index=1",
+            "model_candidates": [{"action_id": "CHOOSE:index=1", "rank": 1}],
+            "teacher": {"model_id": "teacher-test", "prompt_version": "test-v1", "latency_ms": 12},
+        }
 
 
 def event_message() -> dict:
@@ -68,7 +86,50 @@ def combat_message() -> dict:
     }
 
 
+def combat_reward_message() -> dict:
+    return {
+        "in_game": True,
+        "available_commands": ["choose", "proceed"],
+        "game_state": {
+            "screen_type": "COMBAT_REWARD",
+            "room_phase": "COMPLETE",
+            "act": 1,
+            "floor": 3,
+            "choice_list": ["gold", "card"],
+            "screen_state": {
+                "rewards": [
+                    {"reward_type": "GOLD", "gold": 11},
+                    {"reward_type": "CARD"},
+                ]
+            },
+        },
+    }
+
+
 class ConfidenceAutoTests(unittest.TestCase):
+    def test_detects_smoke_bomb_from_pending_pre_action_inventory(self) -> None:
+        message = combat_message()
+        message["available_commands"] = ["potion"]
+        message["game_state"]["potions"] = [{"id": "SmokeBomb", "name": "烟雾弹", "can_use": True}]
+        action = {
+            "id": "POTION_USE:slot=0:target=0",
+            "kind": "potion_use",
+            "command": "POTION 0 0",
+            "slot": 0,
+        }
+        pending = controller.make_pending(message, "run-1", None, 0, action)
+
+        self.assertTrue(controller.is_smoke_bomb_potion_use(pending))
+
+    def test_does_not_mistake_other_potions_for_smoke_bomb(self) -> None:
+        message = combat_message()
+        message["available_commands"] = ["potion"]
+        message["game_state"]["potions"] = [{"id": "AttackPotion", "name": "攻击药水", "can_use": True}]
+        action = {"id": "POTION_USE:slot=0:target=0", "kind": "potion_use", "command": "POTION 0 0", "slot": 0}
+        pending = controller.make_pending(message, "run-1", None, 0, action)
+
+        self.assertFalse(controller.is_smoke_bomb_potion_use(pending))
+
     def test_normalizes_only_current_legal_actions(self) -> None:
         scores = controller.normalize_action_logprobs(
             [
@@ -119,6 +180,50 @@ class ConfidenceAutoTests(unittest.TestCase):
         assert final is not None
         self.assertEqual(final["source"], "model_auto")
         self.assertFalse(final["overridden"])
+
+    def test_teacher_action_skips_terminal_and_marks_teacher_source(self) -> None:
+        command, action, final = controller.ask_action(NoBridge(), event_message(), "run-1", teacher=FakeTeacher())
+        self.assertEqual(command, "CHOOSE 1")
+        self.assertEqual(action["id"], "CHOOSE:index=1")
+        assert final is not None
+        self.assertEqual(final["source"], "teacher_auto")
+        self.assertFalse(final["overridden"])
+        self.assertEqual(final["teacher"]["prompt_version"], "test-v1")
+
+    def test_teacher_action_must_remain_legal(self) -> None:
+        action = controller.teacher_action_for_decision(
+            {"mode": "teacher_collection", "model_action": "CHOOSE:index=99", "model_candidates": [{}]},
+            controller.semantic_actions(event_message()),
+        )
+        self.assertIsNone(action)
+
+    def test_teacher_thinking_is_stripped_from_durable_trace_decision(self) -> None:
+        decision = {
+            "mode": "teacher_collection",
+            "teacher": {"thinking": "private reasoning", "output": '{"action_id":"A1"}', "latency_ms": 2},
+        }
+        durable = controller.trace_decision(decision)
+        assert durable is not None
+        self.assertNotIn("thinking", durable["teacher"])
+        self.assertNotIn("output", durable["teacher"])
+        self.assertEqual(durable["teacher"]["latency_ms"], 2)
+
+    def test_skipped_combat_card_reward_cannot_reopen_the_same_offer(self) -> None:
+        message = combat_reward_message()
+        declined: set[tuple[int, int]] = set()
+        remembered = controller.remember_declined_combat_card_reward(
+            {"screen_type": "CARD_REWARD", "action": {"id": "SKIP", "kind": "skip"}},
+            message,
+            declined,
+        )
+        self.assertTrue(remembered)
+        self.assertEqual(declined, {(1, 3)})
+        action_ids = [item["id"] for item in controller.semantic_actions(message, declined_card_reward_keys=declined)]
+        self.assertEqual(action_ids, ["CHOOSE:index=0", "PROCEED"])
+        self.assertEqual(
+            controller.run_memory_summary(set(), declined),
+            {"visited_shop_rooms": [], "declined_card_rewards": [{"act": 1, "floor": 3}]},
+        )
 
     def test_scoring_decision_records_all_aliases_and_confidence(self) -> None:
         policy = controller.PolicyClient.__new__(controller.PolicyClient)
@@ -223,6 +328,111 @@ class ConfidenceAutoTests(unittest.TestCase):
         )
         self.assertEqual(observation["recent_actions"][0]["screen_after"], "GRID")
         self.assertEqual(observation["recent_actions"][0]["action"], "净化")
+
+    def test_event_observation_keeps_event_specific_transition_history(self) -> None:
+        message = event_message()
+        message["game_state"]["choice_list"] = ["Bash", "Dropkick", "card2"]
+        message["game_state"]["screen_state"] = {
+            "event_id": "Match and Keep!",
+            "event_name": "对对碰！",
+            "body_text": "",
+            "options": [],
+        }
+        history = [
+            {
+                "step_id": 12,
+                "screen_before": "EVENT",
+                "action_kind": "choose",
+                "action_id": "CHOOSE:index=0",
+                "action": "card0",
+                "screen_after": "EVENT",
+                "event_before": {
+                    "event_id": "Match and Keep!",
+                    "event_name": "对对碰！",
+                    "body_text": "十二张牌，搭对就拿走。",
+                    "choices": ["card0", "card1", "card2"],
+                    "options": [],
+                },
+                "event_after": {
+                    "event_id": "Match and Keep!",
+                    "event_name": "对对碰！",
+                    "body_text": "",
+                    "choices": ["Bash", "card1", "card2"],
+                    "options": [],
+                },
+            }
+        ]
+        observation = controller.policy_observation(message, action_history=history)
+        self.assertEqual(observation["event_history"][0]["action"], "card0")
+        self.assertEqual(observation["event_history"][0]["before"]["body_text"], "十二张牌，搭对就拿走。")
+        self.assertEqual(observation["event_history"][0]["after"]["choices"][0], "Bash")
+
+    def test_combat_generated_card_choice_carries_potion_source(self) -> None:
+        pre_message = combat_message()
+        pre_message["game_state"]["potions"] = [
+            {
+                "id": "AttackPotion",
+                "name": "攻击药水",
+                "description": "Choose 1 of 3 random Attack cards to add to your hand, it costs 0 this turn.",
+            }
+        ]
+        action = {
+            "id": "POTION_USE:slot=0",
+            "command": "POTION USE 0",
+            "kind": "potion_use",
+            "label": "使用药水 攻击药水",
+        }
+        pending = controller.make_pending(pre_message, None, None, 1, action)
+        post_message = {
+            "in_game": True,
+            "available_commands": ["choose", "skip"],
+            "game_state": {
+                "screen_type": "CARD_REWARD",
+                "room_phase": "COMBAT",
+                "choice_list": ["Anger", "Skip"],
+                "screen_state": {"cards": [{"id": "Anger", "name": "Anger"}], "skip_available": True},
+            },
+        }
+        history = [controller.accepted_action_history_item(pending, post_message)]
+        observation = controller.policy_observation(post_message, action_history=history)
+        context = observation["selection_context"]
+        self.assertEqual(context["kind"], "COMBAT_GENERATED_CARD_CHOICE")
+        self.assertEqual(context["source"]["source_type"], "POTION")
+        self.assertEqual(context["source"]["id"], "AttackPotion")
+
+    def test_combat_generated_card_choice_carries_played_card_source(self) -> None:
+        pre_message = combat_message()
+        pre_message["game_state"]["combat_state"]["hand"] = [
+            {
+                "id": "Discovery",
+                "name": "发现",
+                "type": "SKILL",
+                "cost": 1,
+                "is_playable": True,
+                "description": "Choose 1 of 3 random cards to add into your hand. It costs 0 this turn.",
+            }
+        ]
+        action = {
+            "id": "PLAY:card=1",
+            "command": "PLAY 1",
+            "kind": "play",
+            "label": "出牌 发现",
+        }
+        pending = controller.make_pending(pre_message, None, None, 1, action)
+        post_message = {
+            "in_game": True,
+            "available_commands": ["choose", "skip"],
+            "game_state": {
+                "screen_type": "CARD_REWARD",
+                "room_phase": "COMBAT",
+                "choice_list": ["Apotheosis", "Skip"],
+                "screen_state": {"cards": [{"id": "Apotheosis", "name": "Apotheosis"}], "skip_available": True},
+            },
+        }
+        history = [controller.accepted_action_history_item(pending, post_message)]
+        observation = controller.policy_observation(post_message, action_history=history)
+        self.assertEqual(observation["selection_context"]["source"]["source_type"], "CARD")
+        self.assertEqual(observation["selection_context"]["source"]["name"], "发现")
 
 
 if __name__ == "__main__":

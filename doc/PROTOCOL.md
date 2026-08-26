@@ -71,7 +71,8 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 
 - `map.nodes`：当前 Act 已公开的完整地图节点及其 `x/y/symbol/children/parents` 关系；`map.current_node` 和 `map.next_nodes` 仍保留作快捷字段。
 - `combat.monsters[*].intent_damage`、`intent_hits`：从 CommunicationMod 的当前意图字段映射而来，用于表达敌人当前显示的攻击伤害和段数。
-- `combat.hand[*]`：保留 `damage`、`block`、`magic_number`、`description` 等字段（只有协议实际提供时才出现）。动态值不根据卡牌 ID 临时猜测；静态卡牌知识统一放在下方的 `effect` 字段。
+- `combat.player.powers`、`combat.monsters[*].powers`：保留 CommunicationMod 当前的 `id/name/amount/type`，并补充静态 `description`。description 优先来自 `sts1_powers.json`；缺失时才查询 `sts1_card_powers.json`，不使用关键词库。
+- `combat.hand[*]`：使用扁平卡牌 schema：`id/name/type/cost/description/upgrades/is_playable`。运行时非空字段优先；静态知识只补缺失字段，不再输出嵌套 `effect`。当前 CommunicationMod 版本未稳定提供实时 `damage/block/magic_number`，因此不把它们纳入训练 schema。
 - `recent_actions`：模型观察和轨迹状态中保留当前局最近 6 个已被 CommunicationMod 确认且状态稳定的动作，包含执行前后界面、动作类型、规范 `action_id` 和简短语义。协议错误或尚未确认的动作不会进入历史；新局从空历史开始。
 - `screen_type=GRID`：若当前是事件/营火等触发的选牌界面，`screen_state.selection_mode` 和 `selection_instruction` 会明确表示 `PURGE`（移除）、`TRANSFORM`（变化）或 `UPGRADE`（升级）等目的。`for_purge` 等原始布尔字段仍保留作兼容。
 - `screen_type=TRANSITION`：CommunicationMod 返回地图界面但 `room_phase` 仍不是 `COMPLETE` 时的保护态。该状态不包含可训练的地图选择动作，只允许等待刷新或返回当前房间。
@@ -82,7 +83,7 @@ Candidate Assist 由 controller 在 CommunicationMod 启动握手前预热独立
 
 设置 `policy.confidence_auto.enabled=true` 后，controller 不再请求生成式 top-k 排序，而请求 policy server 为每个当前合法别名计算精确续写 `A<n>\\n` 的条件 `logprob`。controller 仅在这一个合法集合内 softmax，完整 `action_scores` 按规范 action ID 写入 trace；`confidence` 保存首选/次选概率、margin、entropy、`min_probability` 和路由结果。默认 `min_probability=0.85`；首选满足 `p1 >= min_probability` 即执行 `source=model_auto`。margin 与 entropy 用于校准记录，不作为第二道门槛。评分缺项、格式异常、超时或上一动作返回协议错误时，自动执行被禁用并回退人工，不能绕过 controller 的合法动作表。
 
-当前已增加本地静态知识库 fallback：`combat.hand[*].effect`、卡牌奖励和商店卡牌包含卡牌的 `type/rarity/color/target/cost`、基础 `damage/block/magic_number/hit_count`、`exhaust/ethereal/innate/retain`、`tags/keywords`、基础/升级描述和完整 `upgrade` 字段；背包、商店与 Boss 奖励中已公开的 `relics[*].effect` 包含描述、tier 和颜色；对应的 `potions[*].effect` 包含描述、rarity、目标和投掷属性。`effect.source` 标记为 `static_knowledge`。若协议提供运行时卡牌字段，则这些字段覆盖静态值，并标记为 `runtime_over_static`。对事件选项与普通奖励，controller 只补全 CommunicationMod 已附带具体物品 `id/name` 的实体；裸 `reward_type` 不会泄漏尚未公开的随机奖励。静态知识库由 `tools/fetch_card_knowledge.py` 从 [spire-archive StS1 数据](https://github.com/nkhoit/spire-archive)生成，数据文件不提交 Git。
+当前已增加本地静态知识库 fallback：卡牌统一为 `id/name/type/cost/description/upgrades/is_playable`，药水统一为 `id/name/description/target/can_use`，遗物统一为 `id/name/description`，并只在 `counter >= 0` 时附加遗物计数。运行时非空字段覆盖静态值；静态知识只用于补全缺失字段，不再进入嵌套 `effect`。商店商品保留额外的 `price`。对事件选项与普通奖励，controller 只补全 CommunicationMod 已附带具体物品 `id/name` 的实体；裸 `reward_type` 不会泄漏尚未公开的随机奖励。战斗卡牌奖励被跳过后，controller 以 `(Act, Floor)` 记录到 `run_memory.declined_card_rewards` 并从父 `COMBAT_REWARD` 动作表移除同一张卡牌奖励入口，防止协议导航造成重开同一奖励的循环。静态知识库由 `tools/fetch_card_knowledge.py` 从 [spire-archive StS1 数据](https://github.com/nkhoit/spire-archive)生成，`data/knowledge/` 是受 Git 跟踪的版本化快照；上游来源、文件清单和本项目的显式文本修复均记录在该目录的 `manifest.json` 与 `README.md`。刷新快照后必须审查 Git diff，运行时 CommunicationMod 字段始终优先。
 
 ## 数据使用规则
 

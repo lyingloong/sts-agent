@@ -16,12 +16,16 @@ ENV/
 .env.*
 !.env.example
 *.local
+deepseek_api.txt
+config/teacher_api_key.txt
+*_api.txt
+*.secret
 
 # Generated data and model artifacts
 data/raw/
 data/trajectories/
 data/datasets/
-data/knowledge/
+data/transfer/
 data/fixtures/generated/
 data/runtime/
 models/

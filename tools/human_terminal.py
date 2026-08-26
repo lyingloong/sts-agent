@@ -136,9 +136,11 @@ def main() -> int:
             packet_type = packet.get("type")
             if packet_type == "hello":
                 print(f"{DIM}{packet.get('message', 'connected')}{RESET}" if use_color else packet.get("message", "connected"), flush=True)
-            elif packet_type == "view":
+            elif packet_type in {"view", "teacher_update"}:
                 view_text = str(packet.get("text", ""))
                 render_view(view_text, clear, use_color)
+                if packet_type == "teacher_update" or packet.get("auto_execute"):
+                    continue
                 text = read_action(view_text, clear, use_color, bool(packet.get("in_game", False)))
                 writer.write(json.dumps({"type": "input", "text": text}, ensure_ascii=False) + "\n")
                 writer.flush()

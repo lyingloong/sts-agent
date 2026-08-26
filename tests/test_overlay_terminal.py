@@ -63,6 +63,25 @@ class OverlayFormattingTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "接受一: 结束回合  p=38.1%")
 
+    def test_teacher_panel_uses_thinking_and_final_output(self) -> None:
+        rendered = overlay_terminal.teacher_panel_text(
+            {
+                "mode": "teacher_collection",
+                "source": "teacher_auto",
+                "model_action": "CHOOSE:index=1",
+                "teacher": {
+                    "model_id": "deepseek-v4-pro",
+                    "latency_ms": 321,
+                    "thinking": "保留资源，离开事件。",
+                    "output": '{"action_id":"A2"}',
+                },
+            }
+        )
+        self.assertIn("远程教师模式 · 思考已开启", rendered)
+        self.assertIn("自动执行", rendered)
+        self.assertIn("保留资源，离开事件。", rendered)
+        self.assertIn('{"action_id":"A2"}', rendered)
+
     def test_history_line_falls_back_to_action_id(self) -> None:
         self.assertEqual(overlay_terminal.history_line({"step_id": 2, "action_id": "END_TURN"}), "#2 END_TURN")
 

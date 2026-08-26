@@ -173,6 +173,33 @@ def candidate_button_text(candidate: dict[str, Any], index: int) -> str:
     return f"{prefix}: {label}{score_text}"
 
 
+def teacher_panel_text(decision: dict[str, Any] | None) -> str:
+    """Render the remote teacher's thinking/output without showing candidates."""
+    if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
+        return ""
+    teacher = decision.get("teacher")
+    teacher = teacher if isinstance(teacher, dict) else {}
+    raw_status = str(decision.get("source") or decision.get("assist_status") or "等待教师")
+    status = {"teacher_auto": "自动执行", "human_override": "等待人工接管"}.get(raw_status, raw_status)
+    model = str(teacher.get("model_id") or decision.get("model_id") or "-")
+    action = str(decision.get("model_action") or "-")
+    latency = teacher.get("latency_ms")
+    latency_text = f"{latency} ms" if isinstance(latency, (int, float)) else "-"
+    thinking_enabled = teacher.get("thinking_enabled", True)
+    mode_label = "思考已开启" if thinking_enabled else "快速模式"
+    lines = [
+        f"远程教师模式 · {mode_label}",
+        f"模型：{model}    状态：{status}",
+        f"动作：{action}    延迟：{latency_text}",
+    ]
+    thinking = str(teacher.get("thinking") or "").strip()
+    output = str(teacher.get("output") or "").strip()
+    lines.extend(("", "教师思考", thinking or "（未返回思考内容）", "", "最终输出", output or "（未返回输出）"))
+    if decision.get("assist_reason") and not decision.get("model_candidates"):
+        lines.extend(("", f"回退原因：{decision.get('assist_reason')}"))
+    return "\n".join(lines)
+
+
 def status_tab_stops(width: int) -> tuple[int, int, int]:
     """Return tab stops that split the status table into four equal columns."""
     usable_width = max(width - 20, 240)
@@ -203,11 +230,14 @@ class OverlayTerminal:
         self.ui_font = self._choose_font("Microsoft YaHei UI", "Noto Sans SC", "Microsoft YaHei", "Segoe UI")
         self.data_font = self._choose_font("Microsoft YaHei UI", "Noto Sans SC", "Microsoft YaHei", "Cascadia Mono")
         self._drag_origin: dict[str, tuple[int, int]] = {}
-        self._resize_origin: dict[str, tuple[int, int, int, int]] = {}
+        self._resize_origin: dict[str, tuple[int, int, int, int, int, int, str]] = {}
+        self._resize_handles: list[tk.Frame] = []
         self._configure_window(self.root, "status", 360, 260)
         self._configure_window(self.control, "control", 380, 260)
         self._build_status_window()
         self._build_control_window()
+        self._install_resize_handles(self.root)
+        self._install_resize_handles(self.control)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.control.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._schedule_layout_save, add="+")
@@ -328,25 +358,56 @@ class OverlayTerminal:
         widget.bind("<ButtonPress-1>", begin)
         widget.bind("<B1-Motion>", drag)
 
-    def _resize_grip(self, parent: tk.Misc, window: tk.Misc) -> tk.Frame:
-        grip = tk.Frame(parent, background=BACKGROUND, width=16, height=16, cursor="size_nw_se")
-        grip.grid_propagate(False)
-        key = str(window)
+    def _install_resize_handles(self, window: tk.Misc) -> None:
+        """Add edge/corner resize hit areas for the borderless Tk windows."""
+        edge = 7
+        handles = {
+            "n": ("sb_v_double_arrow", {"x": 0, "y": 0, "relwidth": 1, "height": edge}),
+            "s": ("sb_v_double_arrow", {"x": 0, "rely": 1, "relwidth": 1, "height": edge, "y": -edge}),
+            "w": ("sb_h_double_arrow", {"x": 0, "y": 0, "width": edge, "relheight": 1}),
+            "e": ("sb_h_double_arrow", {"relx": 1, "x": -edge, "y": 0, "width": edge, "relheight": 1}),
+            "nw": ("size_nw_se", {"x": 0, "y": 0, "width": edge, "height": edge}),
+            "se": ("size_nw_se", {"relx": 1, "rely": 1, "x": -edge, "y": -edge, "width": edge, "height": edge}),
+            "ne": ("size_ne_sw", {"relx": 1, "x": -edge, "y": 0, "width": edge, "height": edge}),
+            "sw": ("size_ne_sw", {"x": 0, "rely": 1, "y": -edge, "width": edge, "height": edge}),
+        }
+        for side, (cursor, place_options) in handles.items():
+            handle = tk.Frame(window, background=BACKGROUND, cursor=cursor, bd=0, highlightthickness=0)
+            handle.place(**place_options)
+            handle.bind("<ButtonPress-1>", lambda event, item=side: self._begin_resize(event, window, item))
+            handle.bind("<B1-Motion>", lambda event, item=side: self._resize_window(event, window, item))
+            handle.bind("<ButtonRelease-1>", lambda _event, item=side: self._resize_origin.pop(f"{window}:{item}", None))
+            self._resize_handles.append(handle)
 
-        def begin(event: tk.Event[tk.Misc]) -> None:
-            self._resize_origin[key] = (event.x_root, event.y_root, window.winfo_width(), window.winfo_height())
+    def _begin_resize(self, event: tk.Event[tk.Misc], window: tk.Misc, side: str) -> None:
+        self._resize_origin[f"{window}:{side}"] = (
+            event.x_root,
+            event.y_root,
+            window.winfo_rootx(),
+            window.winfo_rooty(),
+            window.winfo_width(),
+            window.winfo_height(),
+            side,
+        )
 
-        def resize(event: tk.Event[tk.Misc]) -> None:
-            origin = self._resize_origin.get(key)
-            if origin is None:
-                return
-            x, y, width, height = origin
-            min_width, min_height = window.minsize()
-            window.geometry(f"{max(min_width, width + event.x_root - x)}x{max(min_height, height + event.y_root - y)}")
+    def _resize_window(self, event: tk.Event[tk.Misc], window: tk.Misc, side: str) -> None:
+        origin = self._resize_origin.get(f"{window}:{side}")
+        if origin is None:
+            return
+        start_x, start_y, left, top, start_width, start_height, _ = origin
+        dx = event.x_root - start_x
+        dy = event.y_root - start_y
+        min_width, min_height = (int(value) for value in window.minsize())
 
-        grip.bind("<ButtonPress-1>", begin)
-        grip.bind("<B1-Motion>", resize)
-        return grip
+        width = start_width + dx if "e" in side else start_width - dx if "w" in side else start_width
+        height = start_height + dy if "s" in side else start_height - dy if "n" in side else start_height
+        width = max(min_width, width)
+        height = max(min_height, height)
+        if "w" in side:
+            left = left + start_width - width
+        if "n" in side:
+            top = top + start_height - height
+        window.geometry(f"{width}x{height}+{left}+{top}")
 
     def _build_status_window(self) -> None:
         outer = tk.Frame(self.root, background=BACKGROUND, padx=10, pady=10)
@@ -380,14 +441,17 @@ class OverlayTerminal:
         footer = tk.Frame(outer, background=BACKGROUND, height=16)
         footer.grid(row=2, column=0, sticky="ew")
         footer.grid_columnconfigure(0, weight=1)
-        self._resize_grip(footer, self.root).grid(row=0, column=1, sticky="se")
 
     def _build_control_window(self) -> None:
         outer = tk.Frame(self.control, background=BACKGROUND, padx=10, pady=10)
         outer.grid(sticky="nsew")
         self.control.grid_rowconfigure(0, weight=1)
         self.control.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(5, weight=1)
+        # Let the model/teacher panel absorb vertical resize space. The
+        # footer only contains the window's resize hit area and should stay
+        # at its requested height.
+        outer.grid_rowconfigure(2, weight=1)
+        outer.grid_rowconfigure(5, weight=0, minsize=16)
         outer.grid_columnconfigure(0, weight=1)
 
         title_bar = self._title_bar(outer, self.control, "MODEL / ACTION")
@@ -403,14 +467,77 @@ class OverlayTerminal:
         ).grid(row=1, column=0, sticky="w", pady=(0, 8))
 
         self.candidate_frame = tk.Frame(outer, background=BACKGROUND)
-        self.candidate_frame.grid(row=2, column=0, sticky="ew")
+        self.candidate_frame.grid(
+            row=2,
+            column=0,
+            sticky="nsew",
+            padx=1,
+            pady=1,
+        )
         self.candidate_frame.grid_columnconfigure(0, weight=1)
+        self.candidate_frame.configure(highlightbackground="#4c5053", highlightthickness=1)
+        candidate_header = tk.Frame(self.candidate_frame, background=PANEL, height=30)
+        candidate_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        candidate_header.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            candidate_header,
+            text="模型候选",
+            foreground=ACCENT,
+            background=PANEL,
+            font=(self.ui_font, 10, "bold"),
+            padx=9,
+            pady=5,
+        ).grid(row=0, column=0, sticky="w")
+        self.candidate_meta = tk.Label(
+            candidate_header,
+            text="等待模型反馈",
+            foreground=MUTED,
+            background=PANEL,
+            font=(self.data_font, 9),
+            padx=9,
+            pady=5,
+        )
+        self.candidate_meta.grid(row=0, column=1, sticky="e")
         self.candidate_buttons: list[tk.Button] = []
         self.quick_buttons: list[tk.Button] = []
+
+        self.teacher_frame = tk.Frame(
+            outer,
+            background=FIELD,
+            highlightbackground="#4c5053",
+            highlightthickness=1,
+        )
+        self.teacher_frame.grid(row=2, column=0, sticky="nsew")
+        self.teacher_frame.grid_rowconfigure(0, weight=1)
+        self.teacher_frame.grid_columnconfigure(0, weight=1)
+        self.teacher_text = tk.Text(
+            self.teacher_frame,
+            height=10,
+            wrap="word",
+            state="disabled",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+            font=(self.data_font, 9),
+        )
+        self.teacher_text.grid(row=0, column=0, sticky="nsew")
+        self._configure_teacher_tags()
+        self.teacher_frame.grid_remove()
 
         action_frame = tk.Frame(outer, background=BACKGROUND)
         action_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         action_frame.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            action_frame,
+            text="手动动作",
+            foreground=MUTED,
+            background=BACKGROUND,
+            font=(self.ui_font, 9, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self.action_entry = tk.Entry(
             action_frame,
             background=FIELD,
@@ -421,22 +548,36 @@ class OverlayTerminal:
             relief="flat",
             font=(self.data_font, 11),
         )
-        self.action_entry.grid(row=0, column=0, sticky="ew", ipady=6)
+        self.action_entry.grid(row=1, column=0, sticky="ew", ipady=6)
         self.action_entry.bind("<Return>", self._submit_entry)
         self.send_button = self._button(action_frame, "执行", self.submit_action)
-        self.send_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")
+        self.send_button.configure(
+            background=ACCENT,
+            foreground="#10221f",
+            activebackground="#61ddc2",
+            activeforeground="#10221f",
+            font=(self.ui_font, 9, "bold"),
+        )
+        self.send_button.grid(row=1, column=1, padx=(8, 0), sticky="ew")
 
         quick = tk.Frame(outer, background=BACKGROUND)
         quick.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        quick.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            quick,
+            text="快捷操作",
+            foreground=MUTED,
+            background=BACKGROUND,
+            font=(self.ui_font, 9, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         for index, (label, action) in enumerate((("结束回合", "e"), ("继续", "c"), ("返回", "x"))):
             quick.grid_columnconfigure(index, weight=1)
             button = self._button(quick, label, lambda value=action: self.submit_action(value), compact=True)
-            button.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
+            button.grid(row=1, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
             self.quick_buttons.append(button)
         resize_bar = tk.Frame(outer, background=BACKGROUND, height=16)
         resize_bar.grid(row=5, column=0, sticky="nsew")
         resize_bar.grid_columnconfigure(0, weight=1)
-        self._resize_grip(resize_bar, self.control).grid(row=0, column=1, sticky="se")
 
     def _button(self, parent: tk.Misc, text: str, command: Callable[[], None], compact: bool = False) -> tk.Button:
         return tk.Button(
@@ -454,6 +595,9 @@ class OverlayTerminal:
             pady=5,
             font=(self.ui_font, 9),
             cursor="hand2",
+            highlightthickness=1,
+            highlightbackground="#4c5053",
+            highlightcolor=ACCENT,
         )
 
     def _set_text(self, widget: tk.Text, text: str) -> None:
@@ -461,6 +605,72 @@ class OverlayTerminal:
         widget.delete("1.0", "end")
         widget.insert("1.0", text)
         widget.configure(state="disabled")
+
+    def _set_teacher_panel(self, decision: dict[str, Any] | None) -> None:
+        if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
+            self._set_text(self.teacher_text, teacher_panel_text(decision))
+            return
+        teacher = decision.get("teacher")
+        teacher = teacher if isinstance(teacher, dict) else {}
+        raw_status = str(decision.get("source") or decision.get("assist_status") or "等待教师")
+        status = {"teacher_auto": "自动执行", "human_override": "等待人工接管"}.get(raw_status, raw_status)
+        model = str(teacher.get("model_id") or decision.get("model_id") or "-")
+        action = str(decision.get("model_action") or "-")
+        latency = teacher.get("latency_ms")
+        latency_text = f"{latency} ms" if isinstance(latency, (int, float)) else "-"
+        thinking_enabled = teacher.get("thinking_enabled", True)
+        mode_label = "思考已开启" if thinking_enabled else "快速模式"
+        thinking = str(teacher.get("thinking") or "").strip() or "（未返回思考内容）"
+        output = str(teacher.get("output") or "").strip() or "（未返回输出）"
+
+        self.teacher_text.configure(state="normal")
+        self.teacher_text.delete("1.0", "end")
+        self.teacher_text.insert("end", f"远程教师模式 · {mode_label}", "teacher_title")
+        self.teacher_text.insert("end", f"\n模型：{model}    状态：{status}", "teacher_meta")
+        self.teacher_text.insert("end", f"\n动作：{action}    延迟：{latency_text}", "teacher_meta")
+        self.teacher_text.insert("end", "\n\n教师思考", "teacher_section")
+        self.teacher_text.insert("end", f"\n{thinking}", "teacher_body")
+        self.teacher_text.insert("end", "\n\n最终输出", "teacher_section")
+        self.teacher_text.insert("end", f"\n{output}", "teacher_output")
+        if decision.get("assist_reason") and not decision.get("model_candidates"):
+            self.teacher_text.insert("end", f"\n\n回退原因：{decision.get('assist_reason')}", "teacher_warning")
+        self.teacher_text.configure(state="disabled")
+
+    def _configure_teacher_tags(self) -> None:
+        self.teacher_text.tag_configure(
+            "teacher_title",
+            foreground=ACCENT,
+            font=(self.ui_font, 10, "bold"),
+            spacing1=4,
+            spacing3=5,
+        )
+        self.teacher_text.tag_configure(
+            "teacher_meta",
+            foreground=MUTED,
+            font=(self.data_font, 9),
+        )
+        self.teacher_text.tag_configure(
+            "teacher_section",
+            foreground=WARNING,
+            font=(self.ui_font, 10, "bold"),
+            spacing1=7,
+            spacing3=2,
+        )
+        self.teacher_text.tag_configure(
+            "teacher_body",
+            foreground=TEXT,
+            font=(self.data_font, 9),
+        )
+        self.teacher_text.tag_configure(
+            "teacher_output",
+            foreground=ACCENT,
+            font=(self.data_font, 9),
+        )
+        self.teacher_text.tag_configure(
+            "teacher_warning",
+            foreground=ERROR,
+            font=(self.ui_font, 9, "bold"),
+        )
 
     def _configure_status_tags(self) -> None:
         self.status_text.tag_configure("summary_run", foreground=ACCENT, font=(self.ui_font, 10, "bold"))
@@ -608,18 +818,41 @@ class OverlayTerminal:
             )
         decision = packet.get("decision")
         self._clear_candidate_actions()
-        candidates = decision.get("model_candidates", []) if isinstance(decision, dict) else []
-        if isinstance(candidates, list):
-            for index, candidate in enumerate(candidates, start=1):
-                if not isinstance(candidate, dict):
-                    continue
-                label = candidate_button_text(candidate, index)
-                command = "a" if index == 1 else f"pick {index}"
-                button = self._button(self.candidate_frame, label, lambda value=command: self.submit_action(value), compact=True)
-                button.grid(row=index - 1, column=0, sticky="ew", pady=(0, 5))
-                self.candidate_buttons.append(button)
-        self._set_controls_enabled(True)
-        self.action_entry.focus_set()
+        teacher_mode = isinstance(decision, dict) and decision.get("mode") == "teacher_collection"
+        if teacher_mode:
+            self.candidate_frame.grid_remove()
+            self.teacher_frame.grid()
+            self._set_teacher_panel(decision)
+        else:
+            self.teacher_frame.grid_remove()
+            self.candidate_frame.grid()
+            candidates = decision.get("model_candidates", []) if isinstance(decision, dict) else []
+            model_id = str(decision.get("model_id") or "-") if isinstance(decision, dict) else "-"
+            count = len(candidates) if isinstance(candidates, list) else 0
+            self.candidate_meta.configure(text=f"模型：{model_id}  ·  {count} 个选项")
+            if isinstance(candidates, list):
+                for index, candidate in enumerate(candidates, start=1):
+                    if not isinstance(candidate, dict):
+                        continue
+                    label = candidate_button_text(candidate, index)
+                    command = "a" if index == 1 else f"pick {index}"
+                    button = self._button(self.candidate_frame, label, lambda value=command: self.submit_action(value), compact=True)
+                    button.configure(anchor="w", padx=10)
+                    if index == 1:
+                        button.configure(
+                            background="#256f62",
+                            activebackground="#349984",
+                            font=(self.ui_font, 9, "bold"),
+                        )
+                    button.grid(row=index, column=0, sticky="ew", pady=(0, 5), padx=7)
+                    self.candidate_buttons.append(button)
+        if packet.get("auto_execute"):
+            self.pending_view = False
+            self._set_controls_enabled(False)
+            self._set_connection("教师已自动执行：" + str(decision.get("model_action", "-")), ACCENT)
+        else:
+            self._set_controls_enabled(True)
+            self.action_entry.focus_set()
 
     def _submit_entry(self, _event: tk.Event[tk.Misc]) -> str:
         self.submit_action()
@@ -673,8 +906,10 @@ class OverlayTerminal:
                         packet_type = packet.get("type")
                         if packet_type == "hello":
                             self._post_ui(self._set_connection, str(packet.get("message", "已连接")), ACCENT)
-                        elif packet_type == "view":
+                        elif packet_type in {"view", "teacher_update"}:
                             self._post_ui(self._show_view, packet)
+                            if packet_type == "teacher_update" or packet.get("auto_execute"):
+                                continue
                             action = self.actions.get()
                             writer.write(json.dumps({"type": "input", "text": action}, ensure_ascii=False) + "\n")
                             writer.flush()
