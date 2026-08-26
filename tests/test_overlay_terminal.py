@@ -63,6 +63,38 @@ class OverlayFormattingTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "接受一: 结束回合  p=38.1%")
 
+    def test_online_rl_action_distinguishes_sampled_action_from_top_candidates(self) -> None:
+        action = overlay_terminal.online_rl_action_text(
+            {
+                "model_action_label": "出牌 双重打击 -> 敌人 0",
+                "model_action_probability": 0.193,
+            }
+        )
+        distribution = overlay_terminal.online_rl_distribution_text(
+            {"rank": 1, "label": "结束回合", "score": 0.381}
+        )
+        self.assertEqual(action, "本步已执行：出牌 双重打击 -> 敌人 0  p=19.3%")
+        self.assertEqual(distribution, "策略 Top 1: 结束回合  p=38.1%")
+
+    def test_online_rl_panel_reports_rollout_and_update_progress(self) -> None:
+        rendered = overlay_terminal.online_rl_panel_text(
+            {
+                "policy_version": "v000003",
+                "iteration": 3,
+                "group_id": "g-000004",
+                "group_size": 4,
+                "rollout_index": 2,
+                "episodes_collected": 1,
+                "stage": "正在执行第 2/4 次 rollout",
+                "gpu": {"index": 5, "free_memory_mib": 18432, "utilization_percent": 12},
+            },
+            "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+        )
+        self.assertIn("模型：Qwen3-0.6B", rendered)
+        self.assertIn("策略版本：v000003  |  参数更新：第 3 次", rendered)
+        self.assertIn("Rollout：当前 2/4  |  已完成 1/4", rendered)
+        self.assertIn("GPU 5 · 剩余 18432 MiB · 利用率 12%", rendered)
+
     def test_model_name_uses_only_the_final_path_component(self) -> None:
         self.assertEqual(
             overlay_terminal.display_model_name("/data/wanghao/sts-agent/models/base/Qwen3-0.6B+sft-v0-r001"),

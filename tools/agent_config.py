@@ -69,6 +69,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "geometry": "500x440+580+84",
             "opacity": 0.97,
         },
+        "online_rl": {
+            "geometry": "360x240+1090+84",
+            "opacity": 0.97,
+        },
     },
 }
 
@@ -208,7 +212,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")
-    for name in ("status", "control"):
+    for name in ("status", "control", "online_rl"):
         window = overlay[name]
         _require_string(window["geometry"], f"overlay.{name}.geometry")
         if not WINDOW_GEOMETRY_PATTERN.fullmatch(window["geometry"]):

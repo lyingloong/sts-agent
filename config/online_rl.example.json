@@ -29,6 +29,8 @@
     "clip_range": 0.2,
     "update_epochs": 1,
     "max_grad_norm": 1.0,
-    "load_in_4bit": true
+    "load_in_4bit": true,
+    "gradient_checkpointing": true,
+    "empty_cache_between_steps": true
   }
 }

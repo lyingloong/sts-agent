@@ -48,6 +48,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "update_epochs": 1,
         "max_grad_norm": 1.0,
         "load_in_4bit": True,
+        "gradient_checkpointing": True,
+        "empty_cache_between_steps": True,
     },
 }
 
@@ -123,6 +125,10 @@ def configure_worker_gpu(gpu_config: dict[str, Any]) -> dict[str, int]:
                 f"requires at least {minimum} MiB"
             )
     os.environ["CUDA_VISIBLE_DEVICES"] = str(selected["index"])
+    # This process performs variable-length 4k-token backward passes. Set the
+    # allocator before Torch is imported so freed blocks can be reused without
+    # splitting the GPU heap into unusable fragments.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     return selected
 
 
@@ -179,6 +185,9 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError(f"update.{key} must be positive")
     if not isinstance(config["update"]["load_in_4bit"], bool):
         raise ValueError("update.load_in_4bit must be true or false")
+    for key in ("gradient_checkpointing", "empty_cache_between_steps"):
+        if not isinstance(config["update"][key], bool):
+            raise ValueError(f"update.{key} must be true or false")
     return config
 
 
@@ -247,6 +256,8 @@ class OnlineWorker:
                     clip_range=float(update["clip_range"]),
                     update_epochs=int(update["update_epochs"]),
                     max_grad_norm=float(update["max_grad_norm"]),
+                    gradient_checkpointing=bool(update["gradient_checkpointing"]),
+                    empty_cache_between_steps=bool(update["empty_cache_between_steps"]),
                 ),
                 load_in_4bit=bool(update["load_in_4bit"]),
             )
@@ -267,6 +278,17 @@ class OnlineWorker:
         if expected_version is not None and str(expected_version) != self.store.current_policy_version:
             raise ProtocolError(f"policy version changed; expected {expected_version}, current {self.store.current_policy_version}")
         group = self.store.begin_episode(episode_id, run_config)
+        episodes = group.get("episodes", {})
+        if not isinstance(episodes, dict):
+            raise ProtocolError("rollout group episodes must be an object")
+        episode_ids = list(episodes)
+        try:
+            rollout_index = episode_ids.index(episode_id) + 1
+        except ValueError as exc:  # Defensive: begin_episode must admit this ID.
+            raise ProtocolError("episode is missing from its rollout group") from exc
+        episodes_collected = sum(
+            1 for entry in episodes.values() if isinstance(entry, dict) and entry.get("status") == "submitted"
+        )
         scores = normalize_scores(self.policy.score(observation, legal_actions), float(self.config["sampling"]["temperature"]))
         draw = self.random.random()
         cumulative = 0.0
@@ -281,7 +303,11 @@ class OnlineWorker:
             "request_id": request.get("request_id"),
             "model_id": self.model_id,
             "policy_version": self.store.current_policy_version,
+            "iteration": self.store.completed_update_count,
             "group_id": group["group_id"],
+            "group_size": int(self.config["group_size"]),
+            "rollout_index": rollout_index,
+            "episodes_collected": episodes_collected,
             "action_id": selected["action_id"],
             "selected_logprob": selected["normalized_logprob"],
             "sampling_draw": draw,
@@ -296,6 +322,7 @@ class OnlineWorker:
             "request_id": request.get("request_id"),
             "group_id": group["group_id"],
             "policy_version": self.store.current_policy_version,
+            "iteration": self.store.completed_update_count,
             "episodes_collected": len(group["episodes"]),
             "group_size": int(self.config["group_size"]),
         }
@@ -313,6 +340,7 @@ class OnlineWorker:
         metrics["parent_policy_version"] = group["policy_version"]
         self.store.complete_group(str(group["group_id"]), new_version, metrics)
         response.update({"type": "policy_updated", "policy_version": new_version, "update": metrics})
+        response["iteration"] = self.store.completed_update_count
         return response
 
 
@@ -332,6 +360,7 @@ def serve(config: dict[str, Any], mock: bool, debug: bool) -> int:
                 "mode": "remote_online_rl",
                 "model_id": worker.model_id,
                 "policy_version": worker.store.current_policy_version,
+                "iteration": worker.store.completed_update_count,
                 "group_size": config["group_size"],
                 "gpu": worker.gpu,
             },

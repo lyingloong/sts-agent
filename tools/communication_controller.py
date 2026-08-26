@@ -1707,6 +1707,8 @@ class PolicyClient:
         self.process: subprocess.Popen[str] | None = None
         self.request_id = 0
         self.disabled_reason: str | None = None
+        self.remote_model_id = self.model
+        self.online_rl_status: dict[str, Any] = {}
 
     def _python_executable(self) -> str:
         if self.python != "auto":
@@ -1735,14 +1737,72 @@ class PolicyClient:
     def _disable(self, reason: str) -> None:
         self.disabled_reason = reason
         self.enabled = False
+        if self.runtime == "remote_online_rl":
+            self.online_rl_status.update({"stage": "远端在线策略不可用", "error": reason})
         self.close()
         print(f"candidate assist disabled: {reason}", file=sys.stderr, flush=True)
 
+    def _set_online_rl_status(self, stage: str | None = None, **values: Any) -> dict[str, Any]:
+        """Maintain the display-only lifecycle snapshot for Online RL."""
+        if stage is not None:
+            self.online_rl_status["stage"] = stage
+        for key, value in values.items():
+            if value is None:
+                if key == "error":
+                    self.online_rl_status.pop(key, None)
+                continue
+            self.online_rl_status[key] = value
+        return dict(self.online_rl_status)
+
+    def online_rl_status_decision(self, stage: str | None = None, **values: Any) -> dict[str, Any]:
+        """Build a read-only decision packet for the Overlay's Online RL window."""
+        return {
+            "mode": "remote_online_rl",
+            "model_id": self.remote_model_id,
+            "candidate_source": "online_rl_worker",
+            "model_action": None,
+            "model_candidates": [],
+            "online_rl": self._set_online_rl_status(stage, **values),
+            "executed_action": None,
+            "source": None,
+            "overridden": None,
+        }
+
+    def record_online_episode_result(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Project a terminal worker response into stable, user-facing status."""
+        common = {
+            "group_id": response.get("group_id"),
+            "policy_version": response.get("policy_version"),
+            "iteration": response.get("iteration"),
+            "group_size": response.get("group_size"),
+            "episodes_collected": response.get("episodes_collected"),
+        }
+        if response.get("type") == "policy_updated":
+            return self.online_rl_status_decision(
+                "参数更新完成；下一组 rollout 将使用新策略",
+                **common,
+                rollout_index=response.get("group_size"),
+                update=response.get("update"),
+                error=None,
+            )
+        if response.get("type") == "episode_queued":
+            return self.online_rl_status_decision(
+                "本局轨迹已入队；等待下一次 rollout",
+                **common,
+                rollout_index=response.get("episodes_collected"),
+                error=None,
+            )
+        return self.online_rl_status_decision(
+            "本局轨迹上传或参数更新失败",
+            **common,
+            error=str(response.get("error") or "远端 worker 返回未知结果"),
+        )
+
     def _fallback_decision(self, status: str, reason: str) -> dict[str, Any]:
         """Return an observable human-fallback state for the terminal/trace."""
-        return {
-            "mode": "confidence_auto" if self.confidence_auto else "candidate_assist",
-            "model_id": self.model,
+        result = {
+            "mode": "remote_online_rl" if self.runtime == "remote_online_rl" else ("confidence_auto" if self.confidence_auto else "candidate_assist"),
+            "model_id": self.remote_model_id,
             "candidate_source": "policy_server",
             "model_action": None,
             "model_candidates": [],
@@ -1753,10 +1813,19 @@ class PolicyClient:
             "source": None,
             "overridden": None,
         }
+        if self.runtime == "remote_online_rl":
+            result["candidate_source"] = "online_rl_worker"
+            result["online_rl"] = self._set_online_rl_status(
+                "远程在线策略请求中" if status == "请求中" else "远程在线策略需要人工处理",
+                error=reason if status in {"不可用", "超时"} else None,
+            )
+        return result
 
     def status_decision(self) -> dict[str, Any]:
         """Expose startup/readiness state even on screens without ranking."""
         if self.enabled and self.process is not None and self.process.poll() is None:
+            if self.runtime == "remote_online_rl":
+                return self.online_rl_status_decision("在线策略就绪；等待下一次 rollout")
             mode = (
                 f"置信度自动执行已启用（p1>={self.auto_min_probability:.0%}）"
                 if self.confidence_auto
@@ -1769,6 +1838,16 @@ class PolicyClient:
         """Expose an immediate UI state while a policy request is in flight."""
         if not self.enabled:
             return self.status_decision()
+        if self.runtime == "remote_online_rl":
+            group_size = self.online_rl_status.get("group_size")
+            episodes_collected = self.online_rl_status.get("episodes_collected")
+            stage = "正在建立 rollout 组并采样"
+            if isinstance(group_size, int) and group_size > 0:
+                completed = episodes_collected if isinstance(episodes_collected, int) else 0
+                next_rollout = 1 if completed >= group_size else completed + 1
+                stage = f"正在为第 {next_rollout}/{group_size} 次 rollout 采样"
+            self._set_online_rl_status(stage)
+            return self._fallback_decision("请求中", "远程在线策略正在采样动作")
         location = "远程推理服务" if self.runtime != "local" else "本机模型"
         return self._fallback_decision("请求中", f"{location}正在计算候选动作")
 
@@ -1887,6 +1966,16 @@ class PolicyClient:
         if ready.get("type") != "ready":
             self._disable(f"unexpected policy handshake: {ready}")
             return False
+        self.remote_model_id = str(ready.get("model_id") or self.model)
+        if self.runtime == "remote_online_rl":
+            self._set_online_rl_status(
+                "在线策略就绪；等待开始 rollout",
+                policy_version=ready.get("policy_version"),
+                iteration=ready.get("iteration"),
+                group_size=ready.get("group_size"),
+                gpu=ready.get("gpu"),
+                error=None,
+            )
         print(
             f"policy ready: {ready.get('model_id', self.model)} runtime={self.runtime} "
             f"version={ready.get('policy_version', '-')}",
@@ -2011,17 +2100,27 @@ class PolicyClient:
                 )
         selected = by_alias[selected_alias]
         selected_action = alias_to_action[selected_alias]
+        self._set_online_rl_status(
+            f"正在执行第 {response.get('rollout_index', '?')}/{response.get('group_size', '?')} 次 rollout",
+            group_id=response.get("group_id"),
+            policy_version=response.get("policy_version"),
+            iteration=response.get("iteration"),
+            group_size=response.get("group_size"),
+            rollout_index=response.get("rollout_index"),
+            episodes_collected=response.get("episodes_collected"),
+            error=None,
+        )
         return {
             "mode": "remote_online_rl",
-            "model_id": response.get("model_id", self.model),
+            "model_id": response.get("model_id", self.remote_model_id),
             "candidate_source": "online_rl_worker",
             "model_action": str(selected_action.get("id", "")),
+            "model_action_label": selected_action.get("label") or selected_action.get("command"),
+            "model_action_probability": float(selected["probability"]),
             "model_candidates": candidates,
             "action_scores": action_scores,
             "model_confidence": float(selected["probability"]),
-            "online_rl": {
-                "group_id": response.get("group_id"),
-                "policy_version": response.get("policy_version"),
+            "online_rl": dict(self.online_rl_status) | {
                 "selected_alias": selected_alias,
                 "selected_logprob": float(selected["normalized_logprob"]),
                 "sampling_draw": response.get("sampling_draw"),
@@ -2030,7 +2129,6 @@ class PolicyClient:
             "source": None,
             "overridden": None,
         }
-
     def submit_trace(
         self,
         trace_path: Path,
@@ -2620,7 +2718,7 @@ def ask_action(
         try:
             bridge.send(
                 {
-                    "type": "teacher_update",
+                    "type": "model_update",
                     "text": format_view(message, run_id, error, decision_update, visited_shop_rooms, actions),
                     "in_game": bool(message.get("in_game")),
                     "decision": decision_update,
@@ -2716,11 +2814,11 @@ def ask_action(
                 file=sys.stderr,
                 flush=True,
             )
-        if automatic_source == "teacher_auto":
-            # Teacher mode is non-interactive, but the overlay still needs a
-            # read-only update for its dedicated thinking/output panel. The
-            # overlay recognizes auto_execute and does not block for input.
-            send_teacher_update(automatic_decision)
+        if automatic_source in {"teacher_auto", "online_policy_sample"}:
+            # Both automatic modes bypass terminal input. Push their resolved
+            # result first so the Overlay can show the actual selected action
+            # instead of leaving the Model/Action panel blank.
+            send_model_update(automatic_decision, auto_execute=True)
         return str(automatic["command"]), automatic, automatic_decision
     while True:
         bridge.send(
@@ -3005,14 +3103,50 @@ def main() -> int:
                     write_trace(completed_record)
                     if (
                         completed_record["terminal"]
+                        and policy.runtime == "remote_online_rl"
                         and run_id is not None
                         and run_config is not None
                         and trace_path is not None
                         and trace_output is not None
                     ):
                         trace_output.flush()
+                        current_online = policy.online_rl_status
+                        rollout_index = current_online.get("rollout_index")
+                        group_size = current_online.get("group_size")
+                        is_group_final = (
+                            isinstance(rollout_index, int)
+                            and isinstance(group_size, int)
+                            and rollout_index == group_size
+                        )
+                        upload_stage = (
+                            f"正在更新参数：第 {rollout_index}/{group_size} 次 rollout 已结束"
+                            if is_group_final
+                            else f"正在上传第 {rollout_index or '?'} / {group_size or '?'} 次 rollout 轨迹"
+                        )
+                        upload_decision = policy.online_rl_status_decision(upload_stage)
+                        try:
+                            bridge.send(
+                                {
+                                    "type": "online_rl_update",
+                                    "model_id": upload_decision["model_id"],
+                                    "online_rl": upload_decision["online_rl"],
+                                }
+                            )
+                        except OSError:
+                            pass
                         online_result = policy.submit_trace(trace_path, run_id, run_config)
                         if online_result is not None:
+                            online_decision = policy.record_online_episode_result(online_result)
+                            try:
+                                bridge.send(
+                                    {
+                                        "type": "online_rl_update",
+                                        "model_id": online_decision["model_id"],
+                                        "online_rl": online_decision["online_rl"],
+                                    }
+                                )
+                            except OSError:
+                                pass
                             write_event(
                                 {
                                     "event": "online_rl_episode_result",

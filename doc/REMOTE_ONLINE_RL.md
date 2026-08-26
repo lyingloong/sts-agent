@@ -83,6 +83,14 @@ screen, returns to the main menu, and starts the next run with the same
 character, ascension and seed. It pauses rather than changing seed when the
 remote worker rejects an episode or becomes unavailable.
 
+In this mode, Overlay opens a third independent, movable and resizable `ONLINE
+RL` window. It reports the policy version and successful update count, current
+group ID, `当前 rollout / K` and completed episodes, the selected remote GPU,
+and lifecycle states including sampling, trajectory upload, parameter update,
+and update completion. The `MODEL / ACTION` window separately shows the actual
+sampled action and its probability; this may differ from the highest-probability
+action because rollout sampling is stochastic.
+
 Consequently, enter `s <character> <ascension> <seed>` only once for a normal
 online run. The controller keeps cycling through groups until the game,
 controller, or remote worker is stopped. Do not manually intervene in a
@@ -140,6 +148,14 @@ The fourth upload can take longer because it performs the update. The
 controller waits up to `update_timeout_seconds` (default 30 minutes) before
 allowing another policy request. It holds one remote GPU for both sampling and
 updating, so adapter changes are synchronous and no cross-GPU reload is needed.
+
+`update.gradient_checkpointing` and `update.empty_cache_between_steps` are
+enabled by default. They make the 4096-token action-scoring update fit on a
+24GB RTX 4090: sampling still uses KV cache under `no_grad`, while the backward
+pass disables it, checkpoints activations, and returns freed variable-length
+blocks to CUDA between actions. Keep both enabled unless a measured update is
+comfortably below the GPU memory limit. The worker also sets
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` before importing Torch.
 
 ## Protocol smoke test
 

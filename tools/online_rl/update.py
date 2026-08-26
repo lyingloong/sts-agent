@@ -7,6 +7,7 @@ four trajectories from the same initial condition and frozen policy version.
 
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,8 @@ class UpdateConfig:
     clip_range: float = 0.2
     update_epochs: int = 1
     max_grad_norm: float = 1.0
+    gradient_checkpointing: bool = True
+    empty_cache_between_steps: bool = True
 
 
 class TrainableAliasPolicy:
@@ -63,14 +66,28 @@ class TrainableAliasPolicy:
             )
             model_kwargs["device_map"] = {"": 0}
         base = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        # Cache is useful for no-grad action sampling, but it is prohibitively
+        # expensive during a 4k-token backward pass. Keep the model itself in
+        # the low-memory training configuration; ``score`` opts into cache for
+        # its short-lived inference forwards below.
+        base.config.use_cache = False
         if load_in_4bit:
-            # The rollout update is one observation at a time. Keeping KV
-            # cache enabled avoids recomputing a 4k prefix per legal alias.
-            base = prepare_model_for_kbit_training(base, use_gradient_checkpointing=False)
+            checkpoint_kwargs: dict[str, Any] = {}
+            if config.gradient_checkpointing and "gradient_checkpointing_kwargs" in inspect.signature(
+                prepare_model_for_kbit_training
+            ).parameters:
+                # PyTorch 2.9 requires this to be explicit. Non-reentrant
+                # checkpointing is the lower-overhead choice for this model.
+                checkpoint_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
+            base = prepare_model_for_kbit_training(
+                base,
+                use_gradient_checkpointing=config.gradient_checkpointing,
+                **checkpoint_kwargs,
+            )
         elif hasattr(base, "enable_input_require_grads"):
             base.enable_input_require_grads()
         self.model = PeftModel.from_pretrained(base, str(adapter), is_trainable=True)
-        self.model.config.use_cache = True
+        self.model.config.use_cache = False
         self.device = next(self.model.parameters()).device
         trainable = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         if not trainable:
@@ -122,23 +139,41 @@ class TrainableAliasPolicy:
             raise ValueError(f"online RL sample exceeds max_length={self.config.max_length}")
         return prefix_ids, aliases, suffixes
 
-    def action_logprobs(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> tuple[list[str], Any]:
+    def action_logprobs(
+        self,
+        observation: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+        *,
+        use_cache: bool,
+    ) -> tuple[list[str], Any]:
         """Return unnormalized alias continuation log probabilities, with gradients."""
 
         prefix_ids, aliases, suffixes = self._prefix_and_suffixes(observation, legal_actions)
-        output = self.model(input_ids=prefix_ids, use_cache=True)
+        output = self.model(input_ids=prefix_ids, use_cache=use_cache)
         first_logprobs = self.torch.log_softmax(output.logits[0, -1].float(), dim=-1)
         values = []
         for suffix in suffixes:
             value = first_logprobs[suffix[0]]
             if len(suffix) > 1:
                 continuation = self.torch.tensor([suffix[:-1]], dtype=self.torch.long, device=self.device)
-                continuation_output = self.model(
-                    input_ids=continuation,
-                    past_key_values=output.past_key_values,
-                    use_cache=False,
-                )
-                next_logprobs = self.torch.log_softmax(continuation_output.logits[0].float(), dim=-1)
+                if use_cache:
+                    continuation_output = self.model(
+                        input_ids=continuation,
+                        past_key_values=output.past_key_values,
+                        use_cache=False,
+                    )
+                    continuation_logits = continuation_output.logits[0]
+                else:
+                    # Gradient checkpointing is incompatible with retaining a
+                    # 4k-token KV cache. Re-evaluate only the few aliases that
+                    # have multi-token continuations; A<n> is usually one
+                    # token, so this remains rare in practice.
+                    continuation_output = self.model(
+                        input_ids=self.torch.cat((prefix_ids, continuation), dim=1),
+                        use_cache=False,
+                    )
+                    continuation_logits = continuation_output.logits[0, -len(suffix) : -1]
+                next_logprobs = self.torch.log_softmax(continuation_logits.float(), dim=-1)
                 for position, token_id in enumerate(suffix[1:]):
                     value = value + next_logprobs[position, token_id]
             values.append(value)
@@ -147,7 +182,7 @@ class TrainableAliasPolicy:
     def score(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         self.model.eval()
         with self.torch.no_grad():
-            aliases, values = self.action_logprobs(observation, legal_actions)
+            aliases, values = self.action_logprobs(observation, legal_actions, use_cache=True)
         labels = {str(action.get("id")): str(action.get("label") or action.get("id")) for action in legal_actions}
         return [
             {"action_id": alias, "label": labels[alias], "logprob": float(value)}
@@ -168,13 +203,21 @@ class TrainableAliasPolicy:
             raise ValueError("rollout group has no steps")
 
         self.model.train()
+        self.model.config.use_cache = False
+        if self.torch.cuda.is_available():
+            self.torch.cuda.empty_cache()
+            self.torch.cuda.reset_peak_memory_stats(self.device)
         losses: list[float] = []
         for _ in range(self.config.update_epochs):
             self.optimizer.zero_grad(set_to_none=True)
             epoch_loss = 0.0
             for episode, advantage in zip(episodes, advantages):
                 for step in episode["steps"]:
-                    aliases, raw_logprobs = self.action_logprobs(step["observation"], step["legal_actions"])
+                    aliases, raw_logprobs = self.action_logprobs(
+                        step["observation"],
+                        step["legal_actions"],
+                        use_cache=False,
+                    )
                     try:
                         selected_index = aliases.index(step["selected_alias"])
                     except ValueError as exc:
@@ -189,11 +232,16 @@ class TrainableAliasPolicy:
                     loss = -self.torch.minimum(unclipped, clipped) / step_count
                     loss.backward()
                     epoch_loss += float(loss.detach())
+                    if self.config.empty_cache_between_steps and self.torch.cuda.is_available():
+                        # Each action has an independently-sized observation.
+                        # Returning freed blocks to CUDA prevents a long map
+                        # prompt from fragmenting the later update steps.
+                        self.torch.cuda.empty_cache()
             grad_norm = float(self.torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm))
             self.optimizer.step()
             losses.append(epoch_loss)
         self.model.eval()
-        return {
+        result = {
             "algorithm": "episode_group_relative_ppo",
             "rewards": rewards,
             "advantages": advantages,
@@ -204,6 +252,12 @@ class TrainableAliasPolicy:
             "grad_norm": grad_norm,
             "sampling_temperature": sampling_temperature,
         }
+        if self.torch.cuda.is_available():
+            result["peak_memory_mib"] = round(
+                self.torch.cuda.max_memory_allocated(self.device) / (1024 * 1024),
+                1,
+            )
+        return result
 
     def save_adapter(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)

@@ -98,6 +98,8 @@ class OnlineRlTests(unittest.TestCase):
                 encoding="utf-8",
             )
             worker = OnlineWorker(load_config(config_path), mock=True)
+            self.assertTrue(worker.config["update"]["gradient_checkpointing"])
+            self.assertTrue(worker.config["update"]["empty_cache_between_steps"])
             request = {
                 "request_id": 1,
                 "episode_id": "e-1",
@@ -107,14 +109,22 @@ class OnlineRlTests(unittest.TestCase):
             }
             first = worker.sample(request)
             self.assertEqual(first["group_id"], "g-000001")
+            self.assertEqual(first["iteration"], 0)
+            self.assertEqual(first["rollout_index"], 1)
+            self.assertEqual(first["episodes_collected"], 0)
+            self.assertEqual(first["group_size"], 2)
             one = episode_payload("e-1", group_id=first["group_id"], version=first["policy_version"])
             queued = worker.submit_episode({"episode": one})
             self.assertEqual(queued["type"], "episode_queued")
+            self.assertEqual(queued["episodes_collected"], 1)
             second = worker.sample({**request, "episode_id": "e-2"})
+            self.assertEqual(second["rollout_index"], 2)
+            self.assertEqual(second["episodes_collected"], 1)
             two = episode_payload("e-2", group_id=second["group_id"], version=second["policy_version"])
             updated = worker.submit_episode({"episode": two})
             self.assertEqual(updated["type"], "policy_updated")
             self.assertEqual(updated["policy_version"], "v000001")
+            self.assertEqual(updated["iteration"], 1)
 
     def test_temperature_normalization_tracks_sampling_policy(self) -> None:
         values = normalize_scores(

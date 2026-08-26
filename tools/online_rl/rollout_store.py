@@ -47,6 +47,11 @@ class RolloutStore:
     def current_policy_version(self) -> str:
         return str(self.state["current_policy_version"])
 
+    @property
+    def completed_update_count(self) -> int:
+        """Return the number of successful policy updates in this experiment."""
+        return max(0, int(self.state.get("next_policy_index", 1)) - 1)
+
     def _save(self) -> None:
         atomic_write_json(self.state_path, self.state)
 

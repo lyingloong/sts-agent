@@ -179,6 +179,60 @@ def candidate_button_text(candidate: dict[str, Any], index: int) -> str:
     return f"{prefix}: {label}{score_text}"
 
 
+def online_rl_action_text(decision: dict[str, Any]) -> str:
+    """Render the sampled action, which need not be the top-probability one."""
+    label = table_cell(decision.get("model_action_label") or decision.get("model_action") or "未知动作")
+    probability = decision.get("model_action_probability", decision.get("model_confidence"))
+    return f"本步已执行：{label}  p={format_probability(probability)}"
+
+
+def online_rl_distribution_text(candidate: dict[str, Any]) -> str:
+    rank = candidate.get("rank")
+    prefix = f"策略 Top {rank}" if isinstance(rank, int) else "策略候选"
+    label = table_cell(candidate.get("label") or candidate.get("action_id") or "未知动作")
+    return f"{prefix}: {label}  p={format_probability(candidate.get('score'))}"
+
+
+def online_rl_panel_text(status: Any, model_id: Any = None) -> str:
+    """Render a compact, persistent status summary for autonomous RL runs."""
+    value = status if isinstance(status, dict) else {}
+    model = display_model_name(model_id)
+    version = table_cell(value.get("policy_version") or "等待远端 worker")
+    iteration = value.get("iteration")
+    iteration_text = str(iteration) if isinstance(iteration, int) else "-"
+    group = table_cell(value.get("group_id") or "等待首个 rollout")
+    group_size = value.get("group_size")
+    rollout_index = value.get("rollout_index")
+    collected = value.get("episodes_collected")
+    progress = "-"
+    if isinstance(group_size, int) and group_size > 0:
+        current = rollout_index if isinstance(rollout_index, int) else "-"
+        completed = collected if isinstance(collected, int) else 0
+        progress = f"当前 {current}/{group_size}  |  已完成 {completed}/{group_size}"
+    lines = [
+        "远程在线强化学习",
+        f"模型：{model}",
+        f"策略版本：{version}  |  参数更新：第 {iteration_text} 次",
+        f"分组：{group}",
+        f"Rollout：{progress}",
+        "",
+        "当前状态",
+        table_cell(value.get("stage") or "等待 controller 状态"),
+    ]
+    gpu = value.get("gpu")
+    if isinstance(gpu, dict) and isinstance(gpu.get("index"), int):
+        details = [f"GPU {gpu['index']}"]
+        if isinstance(gpu.get("free_memory_mib"), int):
+            details.append(f"剩余 {gpu['free_memory_mib']} MiB")
+        if isinstance(gpu.get("utilization_percent"), int):
+            details.append(f"利用率 {gpu['utilization_percent']}%")
+        lines.extend(("", "远端设备", " · ".join(details)))
+    error = table_cell(value.get("error"))
+    if error:
+        lines.extend(("", "异常", error))
+    return "\n".join(lines)
+
+
 def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     """Render the remote teacher's thinking/output without showing candidates."""
     if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
@@ -231,6 +285,8 @@ class OverlayTerminal:
         self.root.title("StS Agent - State")
         self.control = tk.Toplevel(self.root)
         self.control.title("StS Agent - Model & Action")
+        self.online_rl = tk.Toplevel(self.root)
+        self.online_rl.title("StS Agent - Online RL")
         self.connection_state = tk.StringVar()
         self.control_connection = tk.StringVar()
         self.ui_font = self._choose_font("Microsoft YaHei UI", "Noto Sans SC", "Microsoft YaHei", "Segoe UI")
@@ -240,16 +296,24 @@ class OverlayTerminal:
         self._resize_handles: list[tk.Frame] = []
         self._configure_window(self.root, "status", 360, 260)
         self._configure_window(self.control, "control", 380, 260)
+        self._configure_window(self.online_rl, "online_rl", 300, 210)
         self._build_status_window()
         self._build_control_window()
+        self._build_online_rl_window()
         self._install_resize_handles(self.root)
         self._install_resize_handles(self.control)
+        self._install_resize_handles(self.online_rl)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.control.protocol("WM_DELETE_WINDOW", self.close)
+        self.online_rl.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._schedule_layout_save, add="+")
         self.control.bind("<Configure>", self._schedule_layout_save, add="+")
+        self.online_rl.bind("<Configure>", self._schedule_layout_save, add="+")
         self.root.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
         self.control.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
+        self.online_rl.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
+        if self.config["policy"]["runtime"] != "remote_online_rl":
+            self.online_rl.withdraw()
         self._set_controls_enabled(False)
         self._set_connection("正在连接 controller...", WARNING)
         if self.always_on_top:
@@ -266,7 +330,7 @@ class OverlayTerminal:
         return {
             name: geometry
             for name, geometry in value.items()
-            if name in {"status", "control"} and isinstance(geometry, str) and GEOMETRY_PATTERN.fullmatch(geometry)
+            if name in {"status", "control", "online_rl"} and isinstance(geometry, str) and GEOMETRY_PATTERN.fullmatch(geometry)
         }
 
     def _configure_window(self, window: tk.Misc, name: str, min_width: int, min_height: int) -> None:
@@ -285,7 +349,7 @@ class OverlayTerminal:
         """Use the native Windows topmost band without activating either Overlay."""
         if not self.always_on_top or self.closing:
             return
-        for window in (self.root, self.control):
+        for window in (self.root, self.control, self.online_rl):
             try:
                 window.attributes("-topmost", True)
                 if sys.platform == "win32":
@@ -485,7 +549,7 @@ class OverlayTerminal:
         candidate_header = tk.Frame(self.candidate_frame, background=PANEL, height=30)
         candidate_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         candidate_header.grid_columnconfigure(0, weight=1)
-        tk.Label(
+        self.candidate_title = tk.Label(
             candidate_header,
             text="模型候选",
             foreground=ACCENT,
@@ -493,7 +557,8 @@ class OverlayTerminal:
             font=(self.ui_font, 10, "bold"),
             padx=9,
             pady=5,
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self.candidate_title.grid(row=0, column=0, sticky="w")
         self.candidate_meta = tk.Label(
             candidate_header,
             text="等待模型反馈",
@@ -585,6 +650,46 @@ class OverlayTerminal:
         resize_bar.grid(row=5, column=0, sticky="nsew")
         resize_bar.grid_columnconfigure(0, weight=1)
 
+    def _build_online_rl_window(self) -> None:
+        outer = tk.Frame(self.online_rl, background=BACKGROUND, padx=10, pady=10)
+        outer.grid(sticky="nsew")
+        self.online_rl.grid_rowconfigure(0, weight=1)
+        self.online_rl.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        self._title_bar(outer, self.online_rl, "ONLINE RL").grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        text_frame = tk.Frame(outer, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        self.online_rl_text = tk.Text(
+            text_frame,
+            wrap="word",
+            state="disabled",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=9,
+            font=(self.data_font, 9),
+        )
+        self.online_rl_text.grid(row=0, column=0, sticky="nsew")
+        self._configure_online_rl_tags()
+        footer = tk.Frame(outer, background=BACKGROUND, height=16)
+        footer.grid(row=2, column=0, sticky="ew")
+
+    def _configure_online_rl_tags(self) -> None:
+        self.online_rl_text.tag_configure("rl_title", foreground=ACCENT, font=(self.ui_font, 11, "bold"), spacing3=4)
+        self.online_rl_text.tag_configure("rl_meta", foreground=MUTED, font=(self.data_font, 9))
+        self.online_rl_text.tag_configure("rl_progress", foreground=TEXT, font=(self.data_font, 9, "bold"))
+        self.online_rl_text.tag_configure("rl_section", foreground=WARNING, font=(self.ui_font, 10, "bold"), spacing1=9, spacing3=2)
+        self.online_rl_text.tag_configure("rl_stage", foreground=ACCENT, font=(self.data_font, 10, "bold"))
+        self.online_rl_text.tag_configure("rl_device", foreground=MUTED, font=(self.data_font, 9))
+        self.online_rl_text.tag_configure("rl_error", foreground=ERROR, font=(self.data_font, 9, "bold"))
+
     def _button(self, parent: tk.Misc, text: str, command: Callable[[], None], compact: bool = False) -> tk.Button:
         return tk.Button(
             parent,
@@ -611,6 +716,53 @@ class OverlayTerminal:
         widget.delete("1.0", "end")
         widget.insert("1.0", text)
         widget.configure(state="disabled")
+
+    def _set_online_rl_panel(self, status: Any, model_id: Any = None) -> None:
+        """Render asynchronous rollout/update progress without blocking the UI."""
+        value = status if isinstance(status, dict) else {}
+        if isinstance(model_id, str) and model_id.strip():
+            self.online_rl_model_id = model_id
+        model = display_model_name(getattr(self, "online_rl_model_id", None))
+        version = table_cell(value.get("policy_version") or "等待远端 worker")
+        iteration = value.get("iteration")
+        iteration_text = str(iteration) if isinstance(iteration, int) else "-"
+        group = table_cell(value.get("group_id") or "等待首个 rollout")
+        group_size = value.get("group_size")
+        rollout_index = value.get("rollout_index")
+        collected = value.get("episodes_collected")
+        progress = "-"
+        if isinstance(group_size, int) and group_size > 0:
+            current = rollout_index if isinstance(rollout_index, int) else "-"
+            completed = collected if isinstance(collected, int) else 0
+            progress = f"当前 {current}/{group_size}  |  已完成 {completed}/{group_size}"
+
+        self.online_rl.deiconify()
+        self.online_rl_text.configure(state="normal")
+        self.online_rl_text.delete("1.0", "end")
+        self.online_rl_text.insert("end", "远程在线强化学习", "rl_title")
+        self.online_rl_text.insert("end", f"\n模型：{model}", "rl_meta")
+        self.online_rl_text.insert("end", f"\n策略版本：{version}  |  参数更新：第 {iteration_text} 次", "rl_meta")
+        self.online_rl_text.insert("end", f"\n分组：{group}", "rl_meta")
+        self.online_rl_text.insert("end", f"\nRollout：{progress}", "rl_progress")
+        self.online_rl_text.insert("end", "\n\n当前状态", "rl_section")
+        self.online_rl_text.insert("end", f"\n{table_cell(value.get('stage') or '等待 controller 状态')}", "rl_stage")
+        gpu = value.get("gpu")
+        if isinstance(gpu, dict) and isinstance(gpu.get("index"), int):
+            details = [f"GPU {gpu['index']}"]
+            if isinstance(gpu.get("free_memory_mib"), int):
+                details.append(f"剩余 {gpu['free_memory_mib']} MiB")
+            if isinstance(gpu.get("utilization_percent"), int):
+                details.append(f"利用率 {gpu['utilization_percent']}%")
+            self.online_rl_text.insert("end", "\n\n远端设备", "rl_section")
+            self.online_rl_text.insert("end", f"\n{' · '.join(details)}", "rl_device")
+        error = table_cell(value.get("error"))
+        if error:
+            self.online_rl_text.insert("end", "\n\n异常", "rl_section")
+            self.online_rl_text.insert("end", f"\n{error}", "rl_error")
+        self.online_rl_text.configure(state="disabled")
+
+    def _show_online_rl_update(self, packet: dict[str, Any]) -> None:
+        self._set_online_rl_panel(packet.get("online_rl"), packet.get("model_id"))
 
     def _set_teacher_panel(self, decision: dict[str, Any] | None) -> None:
         if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
@@ -825,6 +977,9 @@ class OverlayTerminal:
         decision = packet.get("decision")
         self._clear_candidate_actions()
         teacher_mode = isinstance(decision, dict) and decision.get("mode") == "teacher_collection"
+        online_rl_mode = isinstance(decision, dict) and decision.get("mode") == "remote_online_rl"
+        if online_rl_mode:
+            self._set_online_rl_panel(decision.get("online_rl"), decision.get("model_id"))
         if teacher_mode:
             self.candidate_frame.grid_remove()
             self.teacher_frame.grid()
@@ -836,9 +991,51 @@ class OverlayTerminal:
             model_id = display_model_name(decision.get("model_id")) if isinstance(decision, dict) else "-"
             count = len(candidates) if isinstance(candidates, list) else 0
             status = str(decision.get("assist_status") or "") if isinstance(decision, dict) else ""
-            meta = "正在计算" if packet.get("model_pending") or status == "请求中" else f"{count} 个选项"
-            self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
-            if isinstance(candidates, list):
+            if online_rl_mode:
+                self.candidate_title.configure(text="在线策略采样")
+                meta = "正在采样" if packet.get("model_pending") or status == "请求中" else "已采样并自动执行"
+                self.candidate_meta.configure(text=f"策略：{model_id}  ·  {meta}")
+                if not packet.get("model_pending") and isinstance(decision, dict) and decision.get("model_action"):
+                    selected = self._button(self.candidate_frame, online_rl_action_text(decision), lambda: None, compact=True)
+                    selected.configure(
+                        anchor="w",
+                        padx=10,
+                        state="disabled",
+                        background="#256f62",
+                        disabledforeground=TEXT,
+                    )
+                    selected.grid(row=1, column=0, sticky="ew", pady=(0, 5), padx=7)
+                    self.candidate_buttons.append(selected)
+                    if isinstance(candidates, list):
+                        row = 2
+                        for candidate in candidates:
+                            if not isinstance(candidate, dict) or candidate.get("action_id") == decision.get("model_action"):
+                                continue
+                            item = self._button(
+                                self.candidate_frame,
+                                online_rl_distribution_text(candidate),
+                                lambda: None,
+                                compact=True,
+                            )
+                            item.configure(anchor="w", padx=10, state="disabled", disabledforeground=MUTED)
+                            item.grid(row=row, column=0, sticky="ew", pady=(0, 5), padx=7)
+                            self.candidate_buttons.append(item)
+                            row += 1
+                elif isinstance(decision, dict) and decision.get("assist_reason"):
+                    fallback = self._button(
+                        self.candidate_frame,
+                        "策略不可用：" + table_cell(decision.get("assist_reason")),
+                        lambda: None,
+                        compact=True,
+                    )
+                    fallback.configure(anchor="w", padx=10, state="disabled", disabledforeground=ERROR)
+                    fallback.grid(row=1, column=0, sticky="ew", pady=(0, 5), padx=7)
+                    self.candidate_buttons.append(fallback)
+            else:
+                self.candidate_title.configure(text="模型候选")
+                meta = "正在计算" if packet.get("model_pending") or status == "请求中" else f"{count} 个选项"
+                self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
+            if not online_rl_mode and isinstance(candidates, list):
                 for index, candidate in enumerate(candidates, start=1):
                     if not isinstance(candidate, dict):
                         continue
@@ -860,7 +1057,8 @@ class OverlayTerminal:
         elif packet.get("auto_execute"):
             self.pending_view = False
             self._set_controls_enabled(False)
-            self._set_connection("教师已自动执行：" + str(decision.get("model_action", "-")), ACCENT)
+            prefix = "在线策略已执行" if online_rl_mode else "教师已自动执行"
+            self._set_connection(prefix + "：" + str(decision.get("model_action", "-")), ACCENT)
         else:
             self._set_controls_enabled(True)
             self.action_entry.focus_set()
@@ -917,13 +1115,15 @@ class OverlayTerminal:
                         packet_type = packet.get("type")
                         if packet_type == "hello":
                             self._post_ui(self._set_connection, str(packet.get("message", "已连接")), ACCENT)
-                        elif packet_type in {"view", "teacher_update"}:
+                        elif packet_type in {"view", "teacher_update", "model_update"}:
                             self._post_ui(self._show_view, packet)
-                            if packet_type == "teacher_update" or packet.get("auto_execute"):
+                            if packet_type in {"teacher_update", "model_update"} or packet.get("auto_execute"):
                                 continue
                             action = self.actions.get()
                             writer.write(json.dumps({"type": "input", "text": action}, ensure_ascii=False) + "\n")
                             writer.flush()
+                        elif packet_type == "online_rl_update":
+                            self._post_ui(self._show_online_rl_update, packet)
                         elif packet_type == "shutdown":
                             self._post_ui(self._set_connection, str(packet.get("message", "controller 已停止")), ERROR)
                             break
@@ -983,7 +1183,11 @@ class OverlayTerminal:
             self.layout_path.parent.mkdir(parents=True, exist_ok=True)
             self.layout_path.write_text(
                 json.dumps(
-                    {"status": self.root.winfo_geometry(), "control": self.control.winfo_geometry()},
+                    {
+                        "status": self.root.winfo_geometry(),
+                        "control": self.control.winfo_geometry(),
+                        "online_rl": self.online_rl.winfo_geometry(),
+                    },
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1008,6 +1212,10 @@ class OverlayTerminal:
         self.actions.put("q")
         try:
             self.control.destroy()
+        except tk.TclError:
+            pass
+        try:
+            self.online_rl.destroy()
         except tk.TclError:
             pass
         self.root.destroy()
