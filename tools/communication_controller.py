@@ -660,6 +660,18 @@ def policy_observation(
     """Route only the public context relevant to the active screen."""
     normalized = normalize_state(message)
     attach_runtime_context(normalized, visited_shop_rooms, action_history, declined_card_reward_keys)
+    return route_policy_observation(normalized)
+
+
+def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
+    """Apply the inference context budget to an already-normalized state.
+
+    Trace files retain full normalized state for auditability. Both live policy
+    inference and offline SFT must route that state through this function so a
+    model is never trained on map information that it cannot see at runtime.
+    The function mutates and returns ``normalized`` for the same efficient
+    ownership pattern used by ``policy_observation``.
+    """
     # Full route information belongs only to the actual map selection screen.
     # A transient map overlay is normalized as TRANSITION and must not leak
     # route detail into event/reward/combat decisions.

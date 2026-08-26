@@ -12,7 +12,7 @@
 - 轨迹按局保存；教师 SFT 导出只接受稳定、合法且 `source=teacher_auto` 的动作。
 - `data/knowledge/` 是受 Git 跟踪的 StS1 静态知识快照；轨迹、数据集、模型和运行时文件均不提交。
 
-SFT trainer 和 GRPO rollout worker 尚未实现。训练不应放入 `communication_controller.py`。
+`tools/train_sft.py` 已实现第一版 SFT；固定种子游戏评测、GRPO rollout worker 和远程推理 endpoint 尚未实现。训练逻辑不应放入 `communication_controller.py`。
 
 ## 快速入口
 
@@ -46,6 +46,8 @@ python tools\prepare_training_bundle.py `
 ```
 
 该命令生成可校验 bundle：SFT JSONL、可选的原始 action traces、`manifest.json` 和 `SHA256SUMS`。不包含 API 密钥、`data/raw/`、模型缓存、`.venv` 或 `.uv-cache`。完整流程见 [训练机与迁移指南](doc/TRAINING_ON_4090.md)。
+
+训练入口是 `tools/train_sft.py`：它复用线上 alias selector prompt，按完整 run 切分验证集，并只训练 LoRA adapter。训练机运行方式见迁移指南中的“首次 SFT 运行”。
 
 ## 目录
 

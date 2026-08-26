@@ -129,6 +129,39 @@ Qwen 基础模型应在训练机下载到明确目录，训练记录固定 revis
   eval_by_seed.json
 ```
 
+## 5.1 首次 SFT 运行
+
+仓库提供 `tools/train_sft.py`，其训练输入严格匹配线上 selector：先按 `screen_type` 路由 trace 中的 observation，再拼接本步动态 `A1/A2/...` 合法动作表，输出只监督目标 alias 与结束标记。不会将动作 ID 直接训练为跨样本固定含义。
+
+先从 bundle 目录运行 checksum，再执行一轮单卡 smoke test：
+
+```bash
+cd /data/wanghao/sts-agent
+source .venv/bin/activate
+
+CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
+  --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
+  --output outputs/sft/qwen3-0.6b/sft-v0-smoke \
+  --max-train-samples 128 \
+  --epochs 1
+```
+
+成功完成 smoke test 后，换一个新的输出目录执行完整首训：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
+  --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
+  --output outputs/sft/qwen3-0.6b/sft-v0-r001 \
+  --epochs 1 \
+  --max-length 4096 \
+  --per-device-train-batch-size 4 \
+  --gradient-accumulation-steps 2
+```
+
+默认将 3 个完整 run 留作 validation；切分固定于 `--seed`，绝不随机按动作切分。模型使用 4-bit NF4 QLoRA、rank 16、BF16（4090 支持时）和 gradient checkpointing。超过 `--max-length` 的样本会被记录并整条跳过，而不是截断导致合法动作表不完整。首轮只跑 1 epoch，依据 `metrics.json`、`run_manifest.json` 和未见种子实际游戏评测决定是否继续，不直接增加 epoch。
+
+若希望用本地下载好的基座，可增加 `--model /data/wanghao/sts-agent/models/base/Qwen3-0.6B`；训练器会先校验相邻 bundle `manifest.json` 中的 JSONL SHA-256。输出目录必须是新的；断点继续才传入 `--resume-from-checkpoint <checkpoint-path>`。
+
 `run_manifest.json` 至少记录：源码 commit、训练 bundle 名和 sha256、基础模型 ID 与 revision、tokenizer revision、训练参数、随机种子、代码版本和启动时间。只将这一目录同步回本机；基础模型和 optimizer state 留在训练机。
 
 ```bash
