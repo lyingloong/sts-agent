@@ -275,9 +275,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260826)
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=4)
-    parser.add_argument("--per-device-eval-batch-size", type=int, default=4)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=2)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=1)
+    parser.add_argument("--per-device-eval-batch-size", type=int, default=1)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -329,6 +329,7 @@ def training_arguments(training_args_cls: Any, args: argparse.Namespace, bf16: b
         "per_device_eval_batch_size": args.per_device_eval_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "gradient_checkpointing": True,
+        "group_by_length": True,
         "logging_steps": args.logging_steps,
         "save_strategy": "epoch",
         "save_total_limit": args.save_total_limit,

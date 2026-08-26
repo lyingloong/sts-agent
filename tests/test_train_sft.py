@@ -27,6 +27,24 @@ class TrainSftTests(unittest.TestCase):
             self.assertEqual(train_sft.os.environ["NCCL_P2P_DISABLE"], "0")
             self.assertEqual(train_sft.os.environ["NCCL_IB_DISABLE"], "0")
 
+    def test_default_training_arguments_fit_a_single_24gb_gpu(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["train_sft.py", "--dataset", "dataset.jsonl", "--output", "output"],
+        ):
+            args = train_sft.parse_args()
+        self.assertEqual(args.per_device_train_batch_size, 1)
+        self.assertEqual(args.gradient_accumulation_steps, 8)
+
+        class FakeTrainingArguments:
+            def __init__(self, eval_strategy: str, **kwargs: object) -> None:
+                self.kwargs = {"eval_strategy": eval_strategy, **kwargs}
+
+        built = train_sft.training_arguments(FakeTrainingArguments, args, bf16=True, has_evaluation=False)
+        self.assertTrue(built.kwargs["group_by_length"])
+        self.assertEqual(built.kwargs["eval_strategy"], "no")
+
     def test_non_map_trace_observation_drops_map_like_live_inference(self) -> None:
         routed = train_sft.route_trace_observation(
             {
