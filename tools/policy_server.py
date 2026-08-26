@@ -172,7 +172,7 @@ class MockRanker:
 
 
 class QwenRanker:
-    def __init__(self, model_name: str, load_in_4bit: bool, local_files_only: bool) -> None:
+    def __init__(self, model_name: str, load_in_4bit: bool, local_files_only: bool, adapter: str | None = None) -> None:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -224,6 +224,15 @@ class QwenRanker:
         )
         if not model_kwargs.get("device_map"):
             self.model.to(self.device)
+        if adapter:
+            adapter_path = Path(adapter)
+            if not adapter_path.is_dir():
+                raise RuntimeError(f"LoRA adapter directory does not exist: {adapter_path}")
+            try:
+                from peft import PeftModel
+            except ImportError as exc:
+                raise RuntimeError("install peft to load a LoRA adapter") from exc
+            self.model = PeftModel.from_pretrained(self.model, str(adapter_path), is_trainable=False)
         self.model.eval()
         # Qwen ships sampling defaults. They are irrelevant for deterministic
         # candidate ranking and otherwise cause a warning on every turn.
@@ -369,8 +378,8 @@ def serve(args: argparse.Namespace) -> int:
         model_id = "mock-candidate-ranker"
     else:
         try:
-            ranker = QwenRanker(args.model, args.load_in_4bit, args.local_files_only)
-            model_id = args.model
+            ranker = QwenRanker(args.model, args.load_in_4bit, args.local_files_only, args.adapter or None)
+            model_id = args.model if not args.adapter else f"{args.model}+{Path(args.adapter).name}"
         except Exception as exc:
             print(f"policy server failed to load {args.model}: {exc}", file=sys.stderr, flush=True)
             if args.debug:
@@ -437,6 +446,7 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="Qwen ranker for StS Candidate Assist")
     parser.add_argument("--model", default=policy["model"])
+    parser.add_argument("--adapter", default=policy["adapter"], help="local LoRA adapter directory to attach to the base model")
     parser.add_argument("--endpoint", default=policy["endpoint"])
     parser.add_argument("--top-k", type=int, default=policy["top_k"])
     parser.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)

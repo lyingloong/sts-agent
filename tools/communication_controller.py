@@ -8,6 +8,7 @@ for the CommunicationMod protocol.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -1689,7 +1690,9 @@ class PolicyClient:
         policy_config = config["policy"]
         confidence_config = policy_config["confidence_auto"]
         self.enabled = policy_config["enabled"]
+        self.runtime = policy_config["runtime"]
         self.model = policy_config["model"]
+        self.adapter = policy_config["adapter"]
         self.endpoint = policy_config["endpoint"]
         self.top_k = policy_config["top_k"]
         self.screens = tuple(item.strip().upper() for item in policy_config["screens"])
@@ -1700,6 +1703,7 @@ class PolicyClient:
         self.python = policy_config["python"]
         self.mock = policy_config["mock"]
         self.debug = policy_config["debug"]
+        self.remote = policy_config["remote"]
         self.process: subprocess.Popen[str] | None = None
         self.request_id = 0
         self.disabled_reason: str | None = None
@@ -1777,23 +1781,68 @@ class PolicyClient:
         if not server.exists():
             self._disable(f"missing {server}")
             return False
-        command = [
-            self._python_executable(),
-            str(server),
-            "--model",
-            self.model,
-            "--endpoint",
-            self.endpoint,
-            "--top-k",
-            str(self.top_k),
-        ]
-        # Keep game-time startup deterministic. Downloading model weights is
-        # an explicit preparation step handled by download_qwen.py.
-        command.append("--local-files-only")
-        if self.mock:
-            command.append("--mock")
-        if self.debug:
-            command.append("--debug")
+        if self.runtime == "local":
+            command = [
+                self._python_executable(),
+                str(server),
+                "--model",
+                self.model,
+                "--endpoint",
+                self.endpoint,
+                "--top-k",
+                str(self.top_k),
+                # Keep game-time startup deterministic. Downloading model
+                # weights is an explicit preparation step handled elsewhere.
+                "--local-files-only",
+            ]
+            if self.adapter:
+                command.extend(["--adapter", self.adapter])
+            if self.mock:
+                command.append("--mock")
+            if self.debug:
+                command.append("--debug")
+        else:
+            remote_root = str(self.remote["project_root"])
+            if self.runtime == "remote_inference":
+                remote_command = [
+                    str(self.remote["python"]),
+                    "tools/policy_server.py",
+                    "--model",
+                    self.model,
+                    "--endpoint",
+                    self.endpoint,
+                    "--top-k",
+                    str(self.top_k),
+                    "--local-files-only",
+                ]
+                if self.adapter:
+                    remote_command.extend(["--adapter", self.adapter])
+                if self.debug:
+                    remote_command.append("--debug")
+            else:
+                remote_command = [
+                    str(self.remote["python"]),
+                    "tools/online_rl_worker.py",
+                    "--config",
+                    str(self.remote["online_config"]),
+                ]
+                if self.debug:
+                    remote_command.append("--debug")
+            remote_shell = f"cd {shlex.quote(remote_root)} && exec {shlex.join(remote_command)}"
+            command = [
+                "ssh",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                f"ConnectTimeout={int(float(self.remote['connect_timeout_seconds']))}",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                "ServerAliveCountMax=3",
+                str(self.remote["ssh_host"]),
+                remote_shell,
+            ]
         child_env = os.environ.copy()
         child_env["HF_ENDPOINT"] = self.endpoint
         # The policy protocol carries Chinese card and event text. Force the
@@ -1832,13 +1881,20 @@ class PolicyClient:
             self._disable(f"unexpected policy handshake: {ready}")
             return False
         print(
-            f"candidate assist ready: {ready.get('model_id', self.model)} endpoint={ready.get('endpoint', self.endpoint)}",
+            f"policy ready: {ready.get('model_id', self.model)} runtime={self.runtime} "
+            f"version={ready.get('policy_version', '-')}",
             file=sys.stderr,
             flush=True,
         )
         return True
 
-    def rank(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def rank(
+        self,
+        observation: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+        run_id: str | None = None,
+        run_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         if not legal_actions:
             return None
         if not self.enabled:
@@ -1857,12 +1913,16 @@ class PolicyClient:
             alias_to_action[alias] = action
             model_actions.append({"id": alias, "label": str(action.get("label") or action.get("command") or alias)})
         request = {
-            "type": "score" if self.confidence_auto else "rank",
+            "type": "sample" if self.runtime == "remote_online_rl" else ("score" if self.confidence_auto else "rank"),
             "request_id": self.request_id,
             "observation": observation,
             "legal_actions": model_actions,
             "top_k": self.top_k,
         }
+        if self.runtime == "remote_online_rl":
+            if not run_id or not isinstance(run_config, dict):
+                return self._fallback_decision("不可用", "在线策略缺少当前对局标识或起始配置")
+            request.update({"episode_id": run_id, "run_config": run_config})
         try:
             self.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
             self.process.stdin.flush()
@@ -1881,13 +1941,132 @@ class PolicyClient:
         if response.get("type") == "error":
             self._disable(str(response.get("error", "policy error")))
             return self._fallback_decision("不可用", self.disabled_reason or "模型服务报错")
-        expected_type = "scoring" if self.confidence_auto else "ranking"
+        expected_type = "sampled_action" if self.runtime == "remote_online_rl" else ("scoring" if self.confidence_auto else "ranking")
         if response.get("type") != expected_type:
             self._disable(f"unexpected policy response: {response}")
             return self._fallback_decision("不可用", self.disabled_reason or "模型服务返回未知消息")
+        if self.runtime == "remote_online_rl":
+            return self._sampled_decision(response, alias_to_action)
         if self.confidence_auto:
             return self._scoring_decision(response, alias_to_action)
         return self._ranking_decision(response, alias_to_action)
+
+    def _sampled_decision(
+        self,
+        response: dict[str, Any],
+        alias_to_action: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        raw_scores = response.get("action_scores")
+        selected_alias = str(response.get("action_id", ""))
+        if not isinstance(raw_scores, list) or selected_alias not in alias_to_action:
+            return self._fallback_decision("分数无效", "在线策略返回了未知动作或缺少完整分数")
+        by_alias: dict[str, dict[str, Any]] = {}
+        for item in raw_scores:
+            if not isinstance(item, dict):
+                return self._fallback_decision("分数无效", "在线策略动作分数格式无效")
+            alias = str(item.get("action_id", ""))
+            if alias not in alias_to_action or alias in by_alias:
+                return self._fallback_decision("分数无效", "在线策略动作分数包含未知或重复别名")
+            try:
+                probability = float(item.get("probability"))
+                normalized_logprob = float(item.get("normalized_logprob"))
+            except (TypeError, ValueError):
+                return self._fallback_decision("分数无效", "在线策略概率不是数值")
+            if not math.isfinite(probability) or not math.isfinite(normalized_logprob) or probability < 0:
+                return self._fallback_decision("分数无效", "在线策略概率无效")
+            by_alias[alias] = dict(item) | {"probability": probability, "normalized_logprob": normalized_logprob}
+        if set(by_alias) != set(alias_to_action) or not math.isclose(sum(item["probability"] for item in by_alias.values()), 1.0, rel_tol=1e-5, abs_tol=1e-5):
+            return self._fallback_decision("分数不完整", "在线策略没有返回规范化的全动作概率")
+        normalized = sorted(by_alias.values(), key=lambda item: float(item["probability"]), reverse=True)
+        action_scores: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+        for rank, item in enumerate(normalized, start=1):
+            alias = str(item["action_id"])
+            action = alias_to_action[alias]
+            canonical_id = str(action.get("id", ""))
+            action_scores.append(
+                {
+                    "alias": alias,
+                    "action_id": canonical_id,
+                    "logprob": float(item["logprob"]),
+                    "probability": float(item["probability"]),
+                }
+            )
+            if rank <= self.top_k:
+                candidates.append(
+                    {
+                        "rank": rank,
+                        "action_id": canonical_id,
+                        "label": action.get("label") or action.get("command"),
+                        "score": float(item["probability"]),
+                        "log_score": float(item["logprob"]),
+                    }
+                )
+        selected = by_alias[selected_alias]
+        selected_action = alias_to_action[selected_alias]
+        return {
+            "mode": "remote_online_rl",
+            "model_id": response.get("model_id", self.model),
+            "candidate_source": "online_rl_worker",
+            "model_action": str(selected_action.get("id", "")),
+            "model_candidates": candidates,
+            "action_scores": action_scores,
+            "model_confidence": float(selected["probability"]),
+            "online_rl": {
+                "group_id": response.get("group_id"),
+                "policy_version": response.get("policy_version"),
+                "selected_alias": selected_alias,
+                "selected_logprob": float(selected["normalized_logprob"]),
+                "sampling_draw": response.get("sampling_draw"),
+            },
+            "executed_action": None,
+            "source": None,
+            "overridden": None,
+        }
+
+    def submit_trace(
+        self,
+        trace_path: Path,
+        run_id: str,
+        run_config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Upload one durable terminal episode to the online worker.
+
+        The file is written locally before this call. A broken SSH connection
+        therefore pauses the next group but never loses the game trajectory.
+        """
+
+        if self.runtime != "remote_online_rl" or not self.enabled:
+            return None
+        try:
+            payload = online_episode_from_trace(trace_path, run_id, run_config)
+        except (OSError, ValueError) as exc:
+            return {"type": "error", "error": f"cannot prepare online episode: {exc}"}
+        if not self._start() or self.process is None or self.process.stdin is None or self.process.stdout is None:
+            return {"type": "error", "error": self.disabled_reason or "online worker is unavailable"}
+        self.request_id += 1
+        request = {"type": "episode", "request_id": self.request_id, "episode": payload}
+        try:
+            self.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
+        except (OSError, ValueError) as exc:
+            self._disable(f"online episode upload failed: {exc}")
+            return {"type": "error", "error": self.disabled_reason}
+        line = self._readline_with_timeout(self.process.stdout, float(self.remote["update_timeout_seconds"]))
+        if not line:
+            self._disable("online episode upload/update timed out")
+            return {"type": "error", "error": self.disabled_reason}
+        try:
+            response = json.loads(line)
+        except json.JSONDecodeError as exc:
+            self._disable(f"invalid online worker response: {exc}")
+            return {"type": "error", "error": self.disabled_reason}
+        if response.get("type") == "error":
+            return response
+        if response.get("type") not in {"episode_queued", "policy_updated"}:
+            self._disable(f"unexpected online worker response: {response}")
+            return {"type": "error", "error": self.disabled_reason}
+        return response
 
     def _ranking_decision(
         self,
@@ -2006,6 +2185,84 @@ class PolicyClient:
                 process.kill()
             except OSError:
                 pass
+
+
+def online_episode_from_trace(
+    trace_path: Path,
+    run_id: str,
+    run_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a replayable online-RL episode from accepted local trace records."""
+
+    steps: list[dict[str, Any]] = []
+    group_id: str | None = None
+    policy_version: str | None = None
+    terminal_state: dict[str, Any] | None = None
+    with trace_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid trace JSON at line {line_number}: {exc.msg}") from exc
+            if not isinstance(record, dict):
+                continue
+            if record.get("terminal") and isinstance(record.get("post_state"), dict):
+                terminal_state = record["post_state"]
+            decision = record.get("decision")
+            if not isinstance(decision, dict) or decision.get("mode") != "remote_online_rl":
+                continue
+            if record.get("accepted") is not True or decision.get("source") != "online_policy_sample":
+                raise ValueError("online rollout contains an unaccepted or human-overridden action")
+            online = decision.get("online_rl")
+            pre_state = record.get("pre_state")
+            actions = record.get("legal_actions")
+            if not isinstance(online, dict) or not isinstance(pre_state, dict) or not isinstance(actions, list):
+                raise ValueError("online rollout trace is missing decision context")
+            current_group_id = str(online.get("group_id") or "")
+            current_version = str(online.get("policy_version") or "")
+            selected_alias = str(online.get("selected_alias") or "")
+            if not current_group_id or not current_version or not selected_alias:
+                raise ValueError("online rollout trace is missing group, version, or selected alias")
+            if group_id is None:
+                group_id = current_group_id
+                policy_version = current_version
+            elif group_id != current_group_id or policy_version != current_version:
+                raise ValueError("one episode cannot mix online RL groups or policy versions")
+            model_actions = [
+                {"id": f"A{index}", "label": str(action.get("label") or action.get("command") or f"A{index}")}
+                for index, action in enumerate(actions, start=1)
+                if isinstance(action, dict)
+            ]
+            aliases = {str(action["id"]) for action in model_actions}
+            if selected_alias not in aliases:
+                raise ValueError("selected alias is absent from reconstructed legal actions")
+            try:
+                old_logprob = float(online.get("selected_logprob"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("selected online action has no numeric old log probability") from exc
+            steps.append(
+                {
+                    "step_id": int(record.get("step_id")),
+                    "observation": route_policy_observation(copy.deepcopy(pre_state)),
+                    "legal_actions": model_actions,
+                    "selected_alias": selected_alias,
+                    "old_logprob": old_logprob,
+                }
+            )
+    if not steps:
+        raise ValueError("trace contains no online RL actions")
+    if group_id is None or policy_version is None or terminal_state is None:
+        raise ValueError("online rollout must end in a stable GAME_OVER or VICTORY state")
+    return {
+        "episode_id": run_id,
+        "group_id": group_id,
+        "policy_version": policy_version,
+        "run_config": run_config,
+        "steps": steps,
+        "terminal_state": terminal_state,
+    }
 
 
 class TeacherClient:
@@ -2238,6 +2495,9 @@ def auto_action_for_decision(
     """Resolve only a controller-approved high-confidence model action."""
     if not isinstance(decision, dict):
         return None
+    if decision.get("mode") == "remote_online_rl":
+        action_id = str(decision.get("model_action", ""))
+        return next((action for action in actions if str(action.get("id", "")) == action_id), None)
     confidence = decision.get("confidence")
     if not isinstance(confidence, dict) or confidence.get("route") != "auto_execute":
         return None
@@ -2329,6 +2589,7 @@ def ask_action(
     error: str | None = None,
     policy: PolicyClient | None = None,
     teacher: TeacherClient | None = None,
+    run_config: dict[str, Any] | None = None,
     visited_shop_rooms: set[tuple[int, int]] | None = None,
     action_history: list[dict[str, Any]] | None = None,
     declined_card_reward_keys: set[tuple[int, int]] | None = None,
@@ -2385,10 +2646,11 @@ def ask_action(
     elif policy is None:
         decision = None
     elif candidate_assist_allowed(message, policy.screens):
-        decision = policy.rank(
-            policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys),
-            actions,
-        )
+        observation = policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys)
+        if getattr(policy, "runtime", "local") == "remote_online_rl":
+            decision = policy.rank(observation, actions, run_id=run_id, run_config=run_config)
+        else:
+            decision = policy.rank(observation, actions)
     else:
         decision = policy.status_decision()
     # Error responses are a hard human handoff. Repeating an otherwise
@@ -2402,6 +2664,8 @@ def ask_action(
             automatic_source = "teacher_auto"
         else:
             automatic = auto_action_for_decision(decision, actions)
+            if isinstance(decision, dict) and decision.get("mode") == "remote_online_rl":
+                automatic_source = "online_policy_sample"
     if automatic is not None:
         automatic_decision = finalize_decision(decision, automatic, automatic_source)
         confidence = automatic_decision.get("confidence", {}) if automatic_decision else {}
@@ -2410,6 +2674,14 @@ def ask_action(
             print(
                 f"teacher auto: {automatic.get('id')} model={teacher_info.get('model_id', '?')} "
                 f"latency_ms={teacher_info.get('latency_ms', '?')}",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif automatic_source == "online_policy_sample":
+            online = automatic_decision.get("online_rl", {}) if automatic_decision else {}
+            print(
+                f"online policy: {automatic.get('id')} group={online.get('group_id', '?')} "
+                f"version={online.get('policy_version', '?')}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -2496,6 +2768,7 @@ def main() -> int:
     declined_card_reward_keys: set[tuple[int, int]] = set()
     action_history: list[dict[str, Any]] = []
     smoke_bomb_resume_at: float | None = None
+    online_restart_config: dict[str, Any] | None = None
     trace_output: TextIO | None = None
     event_output: TextIO | None = None
     trace_path: Path | None = None
@@ -2548,6 +2821,36 @@ def main() -> int:
         value["recent_actions"] = recent_action_summary(action_history)
         return value
 
+    def begin_run(action: dict[str, Any], collection_mode: str) -> str:
+        """Start a new durable run context for a human or online-RL START."""
+
+        nonlocal run_index, run_id, step_id, run_config
+        run_index += 1
+        run_id = f"{session_id}-run-{run_index:03d}"
+        step_id = 0
+        visited_shop_rooms.clear()
+        declined_card_reward_keys.clear()
+        action_history.clear()
+        run_config = {
+            "character": action.get("character", "IRONCLAD"),
+            "ascension": action.get("ascension", 0),
+            "seed": action.get("seed"),
+            "seed_source": "requested" if action.get("seed") else "random",
+            "internal_seed": None,
+            "collection_mode": collection_mode,
+        }
+        open_run_outputs()
+        write_event(
+            {
+                "event": "run_start",
+                "run_id": run_id,
+                "run_config": run_config,
+                "command": action["command"],
+                "at": now_iso(),
+            }
+        )
+        return str(action["command"])
+
     # The game must not expose a start action before local setup has finished.
     # CommunicationMod waits for this stdout handshake.
     teacher.prewarm()
@@ -2595,15 +2898,16 @@ def main() -> int:
                         pending = None
                     if current_message is not None:
                         result = ask_action(
-                            bridge,
-                            current_message,
-                            run_id,
-                            str(message.get("error")),
-                            policy,
-                            teacher,
-                            visited_shop_rooms,
-                            action_history,
-                            declined_card_reward_keys,
+                            bridge=bridge,
+                            message=current_message,
+                            run_id=run_id,
+                            error=str(message.get("error")),
+                            policy=policy,
+                            teacher=teacher,
+                            run_config=run_config,
+                            visited_shop_rooms=visited_shop_rooms,
+                            action_history=action_history,
+                            declined_card_reward_keys=declined_card_reward_keys,
                         )
                         if result is None:
                             return 0
@@ -2658,25 +2962,51 @@ def main() -> int:
                             )
                     action_history.append(accepted_action_history_item(pending, message))
                     del action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
-                    write_trace(
-                        {
-                            "schema_version": "0.2" if pending.get("decision") else "0.1",
-                            "session_id": session_id,
-                            "run_id": pending.get("run_id"),
-                            "run_config": pending.get("run_config"),
-                            "step_id": pending.get("step_id"),
-                            "screen_type": pending.get("screen_type"),
-                            "pre_state": pending.get("pre_state"),
-                            "legal_actions": pending.get("legal_actions", []),
-                            "decision": trace_decision(pending.get("decision")),
-                            "action": pending.get("action"),
-                            "command": pending.get("command"),
-                            "post_state": trace_state(message),
-                            "accepted": True,
-                            "stable_after_action": not smoke_bomb_used,
-                            "terminal": game_state(message).get("screen_type") in {"GAME_OVER", "VICTORY"},
-                        },
-                    )
+                    completed_record = {
+                        "schema_version": "0.2" if pending.get("decision") else "0.1",
+                        "session_id": session_id,
+                        "run_id": pending.get("run_id"),
+                        "run_config": pending.get("run_config"),
+                        "step_id": pending.get("step_id"),
+                        "screen_type": pending.get("screen_type"),
+                        "pre_state": pending.get("pre_state"),
+                        "legal_actions": pending.get("legal_actions", []),
+                        "decision": trace_decision(pending.get("decision")),
+                        "action": pending.get("action"),
+                        "command": pending.get("command"),
+                        "post_state": trace_state(message),
+                        "accepted": True,
+                        "stable_after_action": not smoke_bomb_used,
+                        "terminal": game_state(message).get("screen_type") in {"GAME_OVER", "VICTORY"},
+                    }
+                    write_trace(completed_record)
+                    if (
+                        completed_record["terminal"]
+                        and run_id is not None
+                        and run_config is not None
+                        and trace_path is not None
+                        and trace_output is not None
+                    ):
+                        trace_output.flush()
+                        online_result = policy.submit_trace(trace_path, run_id, run_config)
+                        if online_result is not None:
+                            write_event(
+                                {
+                                    "event": "online_rl_episode_result",
+                                    "run_id": run_id,
+                                    "result": online_result,
+                                    "at": now_iso(),
+                                }
+                            )
+                            print(
+                                f"online RL episode: {online_result.get('type')} "
+                                f"group={online_result.get('group_id', '?')} "
+                                f"policy={online_result.get('policy_version', '?')}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            if online_result.get("type") in {"episode_queued", "policy_updated"}:
+                                online_restart_config = run_config.copy()
                     if smoke_bomb_used:
                         smoke_bomb_resume_at = time.monotonic() + SMOKE_BOMB_ANIMATION_DELAY_SECONDS
                         write_event(
@@ -2708,6 +3038,47 @@ def main() -> int:
                     # not leak the previous run's action history into it.
                     action_history.clear()
                     declined_card_reward_keys.clear()
+                if online_restart_config is not None:
+                    if message.get("in_game"):
+                        exit_actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
+                        exit_action = next(
+                            (item for item in exit_actions if item.get("kind") == "confirm"),
+                            None,
+                        )
+                        if exit_action is not None:
+                            pending = make_pending(
+                                message,
+                                run_id,
+                                run_config,
+                                step_id,
+                                exit_action,
+                                None,
+                                visited_shop_rooms,
+                                action_history,
+                                declined_card_reward_keys,
+                            )
+                            step_id += 1
+                            print(str(exit_action["command"]), flush=True)
+                            continue
+                        print("online RL waiting for terminal transition", file=sys.stderr, flush=True)
+                        print("STATE", flush=True)
+                        continue
+                    restart_action = {
+                        "id": "START_RUN",
+                        "kind": "start_run",
+                        "character": online_restart_config["character"],
+                        "ascension": online_restart_config["ascension"],
+                        "seed": online_restart_config["seed"],
+                    }
+                    restart_action["command"] = (
+                        f"START {restart_action['character']} {restart_action['ascension']}"
+                        + (f" {restart_action['seed']}" if restart_action["seed"] else "")
+                    )
+                    online_restart_config = None
+                    command = begin_run(restart_action, "remote_online_rl")
+                    write_event({"event": "online_rl_auto_restart", "run_id": run_id, "at": now_iso()})
+                    print(command, flush=True)
+                    continue
                 if run_config is not None and run_config.get("internal_seed") is None and message.get("in_game"):
                     observed_seed = game_state(message).get("seed")
                     if observed_seed is not None:
@@ -2733,6 +3104,7 @@ def main() -> int:
                     run_id,
                     policy=policy,
                     teacher=teacher,
+                    run_config=run_config,
                     visited_shop_rooms=visited_shop_rooms,
                     action_history=action_history,
                     declined_card_reward_keys=declined_card_reward_keys,
@@ -2741,31 +3113,10 @@ def main() -> int:
                     return 0
                 command, action, decision = result
                 if action.get("kind") == "start_run":
-                    run_index += 1
-                    run_id = f"{session_id}-run-{run_index:03d}"
-                    step_id = 0
-                    visited_shop_rooms.clear()
-                    declined_card_reward_keys.clear()
-                    action_history.clear()
-                    run_config = {
-                        "character": action.get("character", "IRONCLAD"),
-                        "ascension": action.get("ascension", 0),
-                        "seed": action.get("seed"),
-                        "seed_source": "requested" if action.get("seed") else "random",
-                        "internal_seed": None,
-                        "collection_mode": "teacher_sft" if teacher.enabled else "interactive",
-                    }
-                    open_run_outputs()
-                    write_event(
-                        {
-                            "event": "run_start",
-                            "run_id": run_id,
-                            "run_config": run_config,
-                            "command": command,
-                            "at": now_iso(),
-                        },
+                    collection_mode = "teacher_sft" if teacher.enabled else (
+                        "remote_online_rl" if policy.runtime == "remote_online_rl" else "interactive"
                     )
-                    print(command, flush=True)
+                    print(begin_run(action, collection_mode), flush=True)
                     pending = None
                 elif command == "STATE":
                     pending = None

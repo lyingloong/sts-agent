@@ -5,8 +5,10 @@
     "port": 8765
   },
   "policy": {
-    "enabled": false,
+    "enabled": true,
+    "runtime": "local",
     "model": "Qwen/Qwen3-0.6B",
+    "adapter": "outputs/sft/qwen3-0.6b/sft-v0-r001",
     "endpoint": "https://hf-mirror.com",
     "top_k": 3,
     "timeout_seconds": 90.0,
@@ -15,13 +17,21 @@
     "python": "auto",
     "mock": false,
     "debug": false,
+    "remote": {
+      "ssh_host": "linke84090",
+      "project_root": "/data/wanghao/sts-agent",
+      "python": ".venv/bin/python",
+      "online_config": "config/online_rl.json",
+      "connect_timeout_seconds": 30.0,
+      "update_timeout_seconds": 1800.0
+    },
     "confidence_auto": {
-      "enabled": true,
+      "enabled": false,
       "min_probability": 0.85
     }
   },
   "teacher": {
-    "enabled": true,
+    "enabled": false,
     "base_url": "https://ws-1ha2dqzqhcry4uty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     "model": "deepseek-v4-flash",
     "api_key_file": "ali_api.txt",

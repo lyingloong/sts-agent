@@ -12,7 +12,7 @@
 - 轨迹按局保存；教师 SFT 导出只接受稳定、合法且 `source=teacher_auto` 的动作。
 - `data/knowledge/` 是受 Git 跟踪的 StS1 静态知识快照；轨迹、数据集、模型和运行时文件均不提交。
 
-`tools/train_sft.py` 已实现第一版 SFT；固定种子游戏评测、GRPO rollout worker 和远程推理 endpoint 尚未实现。训练逻辑不应放入 `communication_controller.py`。
+`tools/train_sft.py` 已实现第一版 SFT；远程固定 adapter 推理和单 GPU、K=4 的 episode-level 在线更新已实现。固定种子自动评测仍待实现。训练逻辑不放入 `communication_controller.py`。
 
 ## 快速入口
 
@@ -71,6 +71,7 @@ tools/                  controller、知识库、导出与客户端工具
 - [8x RTX 4090 训练机与迁移指南](doc/TRAINING_ON_4090.md)
 - [在线纠正式模仿学习设计参考](doc/ONLINE_DAGGER.md)
 - [教师场景化提示词说明](doc/TEACHER_PROMPTS.md)
+- [远程推理与单 GPU 在线 RL](doc/REMOTE_ONLINE_RL.md)
 - [数据目录和保留策略](data/README.md)
 
 ## 验证

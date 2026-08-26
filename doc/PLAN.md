@@ -19,7 +19,7 @@
 
 - 现有 30 局均为 Ironclad A0，全部死亡；23 局未进入 Act 2，7 局进入 Act 2，最高到 Act 2 Boss。
 - 数据可用于第一轮接口/行为冷启动，不能作为策略质量或通关能力的结论。
-- 固定种子游戏评测、GRPO rollout worker 和远程推理 endpoint 尚未实现；第一版 SFT trainer 已实现。
+- 固定种子自动游戏评测尚未实现；第一版 SFT trainer、远程 LoRA 推理和单 GPU、K=4 的 episode-level 在线更新原型已实现。
 - 游戏环境仍在本地 Windows；远程 8x 4090 只承担训练与离线计算。
 
 ## 下一阶段
@@ -28,7 +28,7 @@
 2. 在未见种子上评测合法动作率、卡死率、平均层数、Act 进度与延迟。
 3. 用模型辅助或人工纠正补充深层、不同角色和不同进阶的高质量状态。
 4. 运行 `tools/train_sft.py` 的单卡 smoke test 和首轮 `sft_base_v0`；训练模块已经实现按局切分、alias action SFT 和 checkpoint/run manifest。
-5. 实现固定种子游戏评测；当 SFT 基线和评测稳定后，再实现冻结策略的 K=4 GRPO rollout 与组内更新。
+5. 实现固定种子自动评测；先以其验证远程在线更新原型的稳定性，再决定是否扩大冻结策略的 K=4 rollout 与组内更新实验。
 
 ## 模型与资源策略
 

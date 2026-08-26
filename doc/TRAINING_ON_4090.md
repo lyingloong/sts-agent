@@ -11,7 +11,7 @@ controller + Overlay                     基础模型下载与 LoRA checkpoint �
 action-trace 采集                        数据校验、训练日志和 run manifest
 ```
 
-当前 controller 只会在本机启动 `policy_server.py`，尚未实现远程推理服务。因此训练后需要把 LoRA adapter 拉回本机，或后续单独实现远程 policy endpoint。8 张 4090 不能自动产生 8 路游戏 rollout；每一路 rollout 仍需要一个真实、可控制的 StS 游戏进程。
+当前 controller 可通过持久 `ssh -T` 启动远程 `policy_server.py`，也可启动单 GPU `online_rl_worker.py` 进行冻结策略的 K=4 episode-level 在线更新。配置和操作见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。8 张 4090 不能自动产生 8 路游戏 rollout；每一路 rollout 仍需要一个真实、可控制的 StS 游戏进程。
 
 截至 2026-08-26，第一批数据为 30 条完整终局轨迹、6,417 条可导出教师 SFT 样本。它们全部是 Ironclad A0 且均以死亡结束，适合验证 SFT 管线和接口学习，不适合作为最终策略质量结论。
 
@@ -110,7 +110,7 @@ Qwen 基础模型应在训练机下载到明确目录，训练记录固定 revis
 - 不同 LoRA rank、学习率、训练长度的 SFT 消融；
 - 固定种子上的独立评测；
 - 数据质量、重复状态和教师错误分析；
-- 后续具备多游戏实例后再运行 GRPO rollout worker。
+- 后续具备多游戏实例后再扩展并行 rollout worker；当前单本地游戏实例对应单远程 GPU worker。
 
 当数据规模增长到数十万以上样本或模型显著变大后，再用 `accelerate`/DDP/FSDP 扩展多卡训练。8 张消费级 4090 不带 NVLink，当前小模型不应为了“用满卡”引入分布式复杂度。
 
@@ -181,4 +181,4 @@ rsync -aP --checksum <user>@<host>:/data/sts-agent/outputs/sft/qwen3-0.6b/sft-v0
 
 在未见种子上先检查合法动作率、卡死率、平均层数、Act 进度和推理延迟，而不是只比较 training loss。当前 30 局全败的教师数据只能产生 `sft_base_v0`；在继续 GRPO 前，应补充更深层、不同角色和人工纠正的数据。
 
-GRPO 的更新可以在 4090 机器进行，但 rollout 必须从冻结 checkpoint 开始并由真实游戏环境收集。当前最简单的闭环是：训练机导出 adapter -> 本机加载 adapter 采集固定种子 rollout -> bundle 回传训练机 -> 组内更新 -> 固定种子验证。不要在一局游戏中更新权重。
+在线更新原型在 4090 机器中常驻 base + LoRA：本地游戏经 SSH 请求动作，按同一冻结版本和同一初始条件收集 K=4 局，终局后上传完整 trace 并在同一 GPU 更新 adapter。不要在一局游戏中更新权重。固定种子验证仍应独立于用于更新的种子。

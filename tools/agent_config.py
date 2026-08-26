@@ -18,7 +18,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "policy": {
         "enabled": True,
+        "runtime": "local",
         "model": "Qwen/Qwen3-0.6B",
+        "adapter": "",
         "endpoint": "https://huggingface.co",
         "top_k": 3,
         "timeout_seconds": 8.0,
@@ -27,6 +29,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "python": "auto",
         "mock": False,
         "debug": False,
+        "remote": {
+            "ssh_host": "linke84090",
+            "project_root": "/data/wanghao/sts-agent",
+            "python": ".venv/bin/python",
+            "online_config": "config/online_rl.json",
+            "connect_timeout_seconds": 30.0,
+            "update_timeout_seconds": 1800.0,
+        },
         "confidence_auto": {
             "enabled": True,
             "min_probability": 0.85,
@@ -127,7 +137,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("server.port must be an integer from 1 to 65535")
 
     _require_bool(policy["enabled"], "policy.enabled")
+    if policy["runtime"] not in {"local", "remote_inference", "remote_online_rl"}:
+        raise ConfigError("policy.runtime must be local, remote_inference, or remote_online_rl")
     _require_string(policy["model"], "policy.model")
+    if not isinstance(policy["adapter"], str):
+        raise ConfigError("policy.adapter must be a string")
     _require_string(policy["endpoint"], "policy.endpoint")
     if not str(policy["endpoint"]).startswith(("https://", "http://")):
         raise ConfigError("policy.endpoint must start with http:// or https://")
@@ -139,6 +153,18 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _require_string(policy["python"], "policy.python")
     _require_bool(policy["mock"], "policy.mock")
     _require_bool(policy["debug"], "policy.debug")
+    remote = policy["remote"]
+    _require_string(remote["ssh_host"], "policy.remote.ssh_host")
+    _require_string(remote["project_root"], "policy.remote.project_root")
+    if not str(remote["project_root"]).startswith("/"):
+        raise ConfigError("policy.remote.project_root must be an absolute remote POSIX path")
+    _require_string(remote["python"], "policy.remote.python")
+    _require_string(remote["online_config"], "policy.remote.online_config")
+    online_config = Path(str(remote["online_config"]))
+    if online_config.is_absolute() or ".." in online_config.parts:
+        raise ConfigError("policy.remote.online_config must be a relative remote path")
+    _require_number(remote["connect_timeout_seconds"], "policy.remote.connect_timeout_seconds", 1.0, 300.0)
+    _require_number(remote["update_timeout_seconds"], "policy.remote.update_timeout_seconds", 30.0, 7200.0)
     screens = policy["screens"]
     if not isinstance(screens, list) or not screens or not all(isinstance(item, str) for item in screens):
         raise ConfigError("policy.screens must be a non-empty list of strings")

@@ -118,4 +118,4 @@ R = 100 * victory
 
 3050 只承担游戏、CommunicationMod、controller、远程教师请求和 trace 写盘；教师 API 不占本地模型显存。Qwen SFT、离线评测和 GRPO 更新放在远程 8x 4090。对当前 Qwen3-0.6B 和 6,417 条样本，第一轮使用单张 4090 QLoRA；其余 GPU 用于并行消融和评测，而不是强行 DDP。游戏仍在本机，因此 rollout 要先把冻结 adapter 取回本机运行，再把新轨迹 bundle 回传训练机。
 
-当前仓库已实现教师采集、SFT 导出、训练 bundle 和 `tools/train_sft.py` 的 QLoRA alias-action SFT。尚未实现 GRPO rollout worker、奖励器、固定种子游戏评测、远程推理 endpoint 和 checkpoint 同步器。它们应保持为独立训练模块，不放进 `communication_controller.py`。数据 release、环境和 checkpoint 契约见 [TRAINING_ON_4090.md](TRAINING_ON_4090.md)。
+当前仓库已实现教师采集、SFT 导出、训练 bundle 和 `tools/train_sft.py` 的 QLoRA alias-action SFT，也实现了远程固定 adapter 推理与单 GPU、K=4 的 episode-level 在线更新原型。固定种子自动评测、数据质量门槛和更完整的研究级 GRPO 对照尚未实现。训练逻辑保持在独立模块中，不放进 `communication_controller.py`。远程协议和运行方式见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。

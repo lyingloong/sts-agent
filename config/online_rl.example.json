@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "model": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+  "initial_adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
+  "initial_policy_version": "sft-v0-r001",
+  "output_root": "/data/wanghao/sts-agent/outputs/online_rl/ironclad-a0-seed-4QTKQ7VBMFX47",
+  "group_size": 4,
+  "seed": 20260826,
+  "sampling": {
+    "temperature": 0.8
+  },
+  "reward": {
+    "version": "v1",
+    "weights": {
+      "victory": 1000.0,
+      "act": 100.0,
+      "floor": 1.0,
+      "hp_fraction": 10.0
+    }
+  },
+  "update": {
+    "max_length": 4096,
+    "learning_rate": 1e-5,
+    "clip_range": 0.2,
+    "update_epochs": 1,
+    "max_grad_norm": 1.0,
+    "load_in_4bit": true
+  }
+}
