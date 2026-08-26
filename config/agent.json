@@ -6,9 +6,9 @@
   },
   "policy": {
     "enabled": true,
-    "runtime": "local",
-    "model": "Qwen/Qwen3-0.6B",
-    "adapter": "outputs/sft/qwen3-0.6b/sft-v0-r001",
+    "runtime": "remote_inference",
+    "model": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+    "adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
     "endpoint": "https://hf-mirror.com",
     "top_k": 3,
     "timeout_seconds": 90.0,

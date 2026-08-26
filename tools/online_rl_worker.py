@@ -15,13 +15,14 @@ import json
 import math
 import os
 import random
+import subprocess
 import sys
 import traceback
 from pathlib import Path
 from typing import Any
 
 from online_rl.protocol import ProtocolError, atomic_write_json, require_object, require_string
-from online_rl.rewards import episode_reward
+from online_rl.rewards import DEFAULT_REWARD_WEIGHTS, episode_reward
 from online_rl.rollout_store import RolloutStore
 from online_rl.update import TrainableAliasPolicy, UpdateConfig
 
@@ -34,11 +35,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_root": "outputs/online_rl/default",
     "group_size": 4,
     "seed": 20260826,
-    "sampling": {"temperature": 0.8},
+    "sampling": {"temperature": 1.2},
     "reward": {
-        "version": "v1",
-        "weights": {"victory": 1000.0, "act": 100.0, "floor": 1.0, "hp_fraction": 10.0},
+        "version": "v2_terminal_progress_heart",
+        "weights": dict(DEFAULT_REWARD_WEIGHTS),
     },
+    "gpu": {"device": "auto", "minimum_free_memory_mib": 12000},
     "update": {
         "max_length": 4096,
         "learning_rate": 1e-5,
@@ -48,6 +50,80 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "load_in_4bit": True,
     },
 }
+
+
+def select_gpu(candidates: list[dict[str, int]], minimum_free_memory_mib: int) -> dict[str, int]:
+    """Choose the least-utilized GPU that has enough free VRAM."""
+
+    eligible = [item for item in candidates if item["free_memory_mib"] >= minimum_free_memory_mib]
+    if not eligible:
+        summary = ", ".join(
+            f"GPU {item['index']}: {item['free_memory_mib']} MiB free, {item['utilization_percent']}% util"
+            for item in candidates
+        )
+        raise RuntimeError(
+            f"no GPU has at least {minimum_free_memory_mib} MiB free; observed: {summary or 'none'}"
+        )
+    return min(eligible, key=lambda item: (item["utilization_percent"], -item["free_memory_mib"], item["index"]))
+
+
+def query_gpus() -> list[dict[str, int]]:
+    """Read physical GPU availability before CUDA is initialized."""
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"cannot query GPU availability with nvidia-smi: {exc}") from exc
+    candidates: list[dict[str, int]] = []
+    for line in result.stdout.splitlines():
+        fields = [item.strip() for item in line.split(",")]
+        if len(fields) != 3:
+            continue
+        try:
+            candidates.append(
+                {
+                    "index": int(fields[0]),
+                    "free_memory_mib": int(fields[1]),
+                    "utilization_percent": int(fields[2]),
+                }
+            )
+        except ValueError:
+            continue
+    if not candidates:
+        raise RuntimeError("nvidia-smi returned no parseable GPU availability rows")
+    return candidates
+
+
+def configure_worker_gpu(gpu_config: dict[str, Any]) -> dict[str, int]:
+    """Pin the worker to one physical GPU before importing Torch."""
+
+    device = gpu_config["device"]
+    minimum = int(gpu_config["minimum_free_memory_mib"])
+    candidates = query_gpus()
+    if device == "auto":
+        selected = select_gpu(candidates, minimum)
+    else:
+        selected = next((item for item in candidates if item["index"] == device), None)
+        if selected is None:
+            raise RuntimeError(f"configured GPU {device} does not exist")
+        if selected["free_memory_mib"] < minimum:
+            raise RuntimeError(
+                f"configured GPU {device} has only {selected['free_memory_mib']} MiB free; "
+                f"requires at least {minimum} MiB"
+            )
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(selected["index"])
+    return selected
 
 
 def merge(default: dict[str, Any], supplied: dict[str, Any], location: str = "") -> dict[str, Any]:
@@ -83,6 +159,18 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("seed must be an integer")
     if not isinstance(config["sampling"]["temperature"], (int, float)) or config["sampling"]["temperature"] <= 0:
         raise ValueError("sampling.temperature must be positive")
+    gpu = config["gpu"]
+    if gpu["device"] != "auto" and (isinstance(gpu["device"], bool) or not isinstance(gpu["device"], int) or gpu["device"] < 0):
+        raise ValueError("gpu.device must be 'auto' or a non-negative integer")
+    if (
+        isinstance(gpu["minimum_free_memory_mib"], bool)
+        or not isinstance(gpu["minimum_free_memory_mib"], int)
+        or gpu["minimum_free_memory_mib"] < 1
+    ):
+        raise ValueError("gpu.minimum_free_memory_mib must be a positive integer")
+    for name, value in config["reward"]["weights"].items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value < 0:
+            raise ValueError(f"reward.weights.{name} must be a non-negative finite number")
     for key in ("max_length", "update_epochs"):
         if not isinstance(config["update"][key], int) or config["update"][key] < 1:
             raise ValueError(f"update.{key} must be an integer >= 1")
@@ -146,7 +234,9 @@ class OnlineWorker:
         if mock:
             self.policy: MockOnlinePolicy | TrainableAliasPolicy = MockOnlinePolicy()
             self.model_id = "mock-online-policy"
+            self.gpu: dict[str, int] | None = None
         else:
+            self.gpu = configure_worker_gpu(config["gpu"])
             update = config["update"]
             self.policy = TrainableAliasPolicy(
                 str(config["model"]),
@@ -243,6 +333,7 @@ def serve(config: dict[str, Any], mock: bool, debug: bool) -> int:
                 "model_id": worker.model_id,
                 "policy_version": worker.store.current_policy_version,
                 "group_size": config["group_size"],
+                "gpu": worker.gpu,
             },
             ensure_ascii=False,
         ),

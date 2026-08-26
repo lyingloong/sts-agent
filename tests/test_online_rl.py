@@ -13,7 +13,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 from online_rl.protocol import ProtocolError, validate_episode_payload  # noqa: E402
 from online_rl.rewards import episode_reward  # noqa: E402
 from online_rl.rollout_store import RolloutStore  # noqa: E402
-from online_rl_worker import OnlineWorker, load_config, normalize_scores  # noqa: E402
+from online_rl_worker import OnlineWorker, load_config, normalize_scores, select_gpu  # noqa: E402
 import communication_controller as controller  # noqa: E402
 
 
@@ -46,8 +46,33 @@ class OnlineRlTests(unittest.TestCase):
     def test_reward_exposes_components(self) -> None:
         result = episode_reward({"screen_type": "VICTORY", "act": 3, "floor": 50, "current_hp": 20, "max_hp": 80})
         self.assertTrue(result["won"])
-        self.assertEqual(result["victory"], 1000.0)
-        self.assertGreater(float(result["total"]), 1300.0)
+        self.assertFalse(result["beat_heart"])
+        self.assertEqual(result["victory"], 5000.0)
+        self.assertEqual(result["act"], 1800.0)
+        self.assertEqual(result["floor"], 1500.0)
+        self.assertEqual(result["hp_fraction"], 0.5)
+        self.assertEqual(result["total"], 8300.5)
+
+    def test_heart_victory_receives_extra_terminal_reward(self) -> None:
+        result = episode_reward({"screen_type": "VICTORY", "act": 4, "floor": 54, "current_hp": 20, "max_hp": 100})
+        self.assertTrue(result["beat_heart"])
+        self.assertEqual(result["heart"], 10000.0)
+        self.assertGreater(float(result["total"]), 19000.0)
+
+    def test_auto_gpu_prefers_low_utilization_then_more_free_memory(self) -> None:
+        selected = select_gpu(
+            [
+                {"index": 0, "free_memory_mib": 23000, "utilization_percent": 9},
+                {"index": 1, "free_memory_mib": 22000, "utilization_percent": 0},
+                {"index": 2, "free_memory_mib": 8000, "utilization_percent": 0},
+            ],
+            12000,
+        )
+        self.assertEqual(selected["index"], 1)
+
+    def test_auto_gpu_rejects_insufficient_free_memory(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "at least 12000 MiB"):
+            select_gpu([{"index": 0, "free_memory_mib": 11999, "utilization_percent": 0}], 12000)
 
     def test_store_refuses_mixed_initial_conditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

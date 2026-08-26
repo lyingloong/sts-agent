@@ -30,6 +30,12 @@ Edit only the absolute paths in `config/online_rl.json`. It is ignored by Git.
 `checkpoint-*` directory. The first run uses `initial_policy_version`; each
 completed group creates `output_root/versions/v000001/`, then `v000002/`, etc.
 
+The example uses `gpu.device: "auto"`. At worker startup it queries
+`nvidia-smi`, filters GPUs with at least `minimum_free_memory_mib` free (12 GiB
+by default), then selects the lowest-utilization eligible GPU, breaking ties by
+more free memory. The worker pins itself to that GPU for its full lifetime;
+it does not migrate the resident model between groups.
+
 The remote Python environment needs the training dependencies:
 
 ```bash
@@ -77,6 +83,11 @@ screen, returns to the main menu, and starts the next run with the same
 character, ascension and seed. It pauses rather than changing seed when the
 remote worker rejects an episode or becomes unavailable.
 
+Consequently, enter `s <character> <ascension> <seed>` only once for a normal
+online run. The controller keeps cycling through groups until the game,
+controller, or remote worker is stopped. Do not manually intervene in a
+rollout: a human-overridden action invalidates that episode for the update.
+
 Use a fixed character, ascension and display seed. The worker admits the first
 episode to an active group and requires every next episode in that group to
 share those three values and the same frozen policy version. It refuses a
@@ -105,6 +116,25 @@ and applies clipped policy-gradient loss to every sampled action. This is not
 TRL's one-prompt/multiple-text-completions GRPO abstraction, because game state
 changes after every action. Reward components are versioned and written to each
 group's `group.json`: victory, Act, floor and terminal HP fraction.
+
+The current reward version is `v2_terminal_progress_heart`:
+
+```text
+5000 * victory
++ 10000 * beat_heart
++ 600 * terminal_act
++ 30 * terminal_floor
++ 2 * terminal_hp_fraction
+```
+
+`beat_heart` is true only for a `VICTORY` terminal state in Act 4. The floor
+term is deliberately comparable to the Act term over a normal run, while HP
+is only a tie-breaker. Sampling uses temperature `T=1.2`: legal-action scores
+are divided by `T` before softmax, creating more rollout diversity than
+`T=1.0`. The same temperature is used when recomputing PPO ratios during the
+update. If a completed K=4 group has near-zero reward standard deviation,
+raise it to `1.4`; if rollouts become uniformly destructive, lower it toward
+`1.0`.
 
 The fourth upload can take longer because it performs the update. The
 controller waits up to `update_timeout_seconds` (default 30 minutes) before

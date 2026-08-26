@@ -1765,6 +1765,13 @@ class PolicyClient:
             return self._fallback_decision("就绪", f"{self.model} 已预热，{mode}")
         return self._fallback_decision("不可用", self.disabled_reason or "模型辅助已关闭")
 
+    def requesting_decision(self) -> dict[str, Any]:
+        """Expose an immediate UI state while a policy request is in flight."""
+        if not self.enabled:
+            return self.status_decision()
+        location = "远程推理服务" if self.runtime != "local" else "本机模型"
+        return self._fallback_decision("请求中", f"{location}正在计算候选动作")
+
     def prewarm(self) -> dict[str, Any]:
         """Load the local policy before CommunicationMod receives readiness."""
         if not self.enabled:
@@ -2595,10 +2602,19 @@ def ask_action(
     declined_card_reward_keys: set[tuple[int, int]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
     actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
-    teacher_active = teacher is not None and candidate_assist_allowed(message, teacher.screens)
+    teacher_active = (
+        teacher is not None
+        and bool(getattr(teacher, "enabled", False))
+        and candidate_assist_allowed(message, teacher.screens)
+    )
 
-    def send_teacher_update(decision_update: dict[str, Any]) -> None:
-        """Push a read-only streaming update when a UI client is connected."""
+    def send_model_update(
+        decision_update: dict[str, Any],
+        *,
+        model_pending: bool = False,
+        auto_execute: bool = False,
+    ) -> None:
+        """Push a transient teacher or policy status without changing game state."""
         if getattr(bridge, "connection", None) is None:
             return
         try:
@@ -2609,13 +2625,17 @@ def ask_action(
                     "in_game": bool(message.get("in_game")),
                     "decision": decision_update,
                     "overlay": overlay_view_data(message, run_id, actions, action_history),
-                    "auto_execute": True,
+                    "model_pending": model_pending,
+                    "auto_execute": auto_execute,
                 }
             )
         except OSError:
             # The game action can still be executed if the optional UI closes
             # during a long streaming request.
             return
+
+    def send_teacher_update(decision_update: dict[str, Any]) -> None:
+        send_model_update(decision_update, auto_execute=True)
 
     if teacher_active:
         send_teacher_update(
@@ -2647,6 +2667,9 @@ def ask_action(
         decision = None
     elif candidate_assist_allowed(message, policy.screens):
         observation = policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys)
+        requesting_decision = getattr(policy, "requesting_decision", None)
+        if callable(requesting_decision):
+            send_model_update(requesting_decision(), model_pending=True)
         if getattr(policy, "runtime", "local") == "remote_online_rl":
             decision = policy.rank(observation, actions, run_id=run_id, run_config=run_config)
         else:

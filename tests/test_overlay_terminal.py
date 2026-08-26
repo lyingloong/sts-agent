@@ -63,6 +63,12 @@ class OverlayFormattingTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "接受一: 结束回合  p=38.1%")
 
+    def test_model_name_uses_only_the_final_path_component(self) -> None:
+        self.assertEqual(
+            overlay_terminal.display_model_name("/data/wanghao/sts-agent/models/base/Qwen3-0.6B+sft-v0-r001"),
+            "Qwen3-0.6B+sft-v0-r001",
+        )
+
     def test_teacher_panel_uses_thinking_and_final_output(self) -> None:
         rendered = overlay_terminal.teacher_panel_text(
             {

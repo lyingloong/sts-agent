@@ -32,6 +32,7 @@ class FakePolicy:
 
 
 class FakeTeacher:
+    enabled = True
     screens = ("ALL",)
     model = "teacher-test"
 
@@ -189,6 +190,28 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(final["source"], "teacher_auto")
         self.assertFalse(final["overridden"])
         self.assertEqual(final["teacher"]["prompt_version"], "test-v1")
+
+    def test_disabled_teacher_does_not_shadow_policy(self) -> None:
+        decision = {
+            "mode": "confidence_auto",
+            "model_id": "policy-test",
+            "model_action": "CHOOSE:index=0",
+            "model_candidates": [{"action_id": "CHOOSE:index=0"}],
+            "confidence": {"route": "auto_execute", "top_probability": 0.91, "margin": 0.67},
+        }
+        teacher = FakeTeacher()
+        teacher.enabled = False
+        command, action, final = controller.ask_action(
+            NoBridge(),
+            event_message(),
+            "run-1",
+            policy=FakePolicy(decision),
+            teacher=teacher,
+        )
+        self.assertEqual(command, "CHOOSE 0")
+        self.assertEqual(action["id"], "CHOOSE:index=0")
+        assert final is not None
+        self.assertEqual(final["source"], "model_auto")
 
     def test_teacher_action_must_remain_legal(self) -> None:
         action = controller.teacher_action_for_decision(

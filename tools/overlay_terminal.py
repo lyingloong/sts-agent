@@ -66,6 +66,12 @@ def format_probability(value: Any) -> str:
         return "-"
 
 
+def display_model_name(value: Any) -> str:
+    """Render a concise model identifier while preserving an adapter suffix."""
+    text = str(value or "").strip().replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1] if text else "-"
+
+
 def enable_windows_dpi_awareness() -> None:
     """Avoid Windows bitmap scaling, which makes Tk text look blurry."""
     if sys.platform != "win32":
@@ -181,7 +187,7 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     teacher = teacher if isinstance(teacher, dict) else {}
     raw_status = str(decision.get("source") or decision.get("assist_status") or "等待教师")
     status = {"teacher_auto": "自动执行", "human_override": "等待人工接管"}.get(raw_status, raw_status)
-    model = str(teacher.get("model_id") or decision.get("model_id") or "-")
+    model = display_model_name(teacher.get("model_id") or decision.get("model_id"))
     action = str(decision.get("model_action") or "-")
     latency = teacher.get("latency_ms")
     latency_text = f"{latency} ms" if isinstance(latency, (int, float)) else "-"
@@ -614,7 +620,7 @@ class OverlayTerminal:
         teacher = teacher if isinstance(teacher, dict) else {}
         raw_status = str(decision.get("source") or decision.get("assist_status") or "等待教师")
         status = {"teacher_auto": "自动执行", "human_override": "等待人工接管"}.get(raw_status, raw_status)
-        model = str(teacher.get("model_id") or decision.get("model_id") or "-")
+        model = display_model_name(teacher.get("model_id") or decision.get("model_id"))
         action = str(decision.get("model_action") or "-")
         latency = teacher.get("latency_ms")
         latency_text = f"{latency} ms" if isinstance(latency, (int, float)) else "-"
@@ -827,9 +833,11 @@ class OverlayTerminal:
             self.teacher_frame.grid_remove()
             self.candidate_frame.grid()
             candidates = decision.get("model_candidates", []) if isinstance(decision, dict) else []
-            model_id = str(decision.get("model_id") or "-") if isinstance(decision, dict) else "-"
+            model_id = display_model_name(decision.get("model_id")) if isinstance(decision, dict) else "-"
             count = len(candidates) if isinstance(candidates, list) else 0
-            self.candidate_meta.configure(text=f"模型：{model_id}  ·  {count} 个选项")
+            status = str(decision.get("assist_status") or "") if isinstance(decision, dict) else ""
+            meta = "正在计算" if packet.get("model_pending") or status == "请求中" else f"{count} 个选项"
+            self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
             if isinstance(candidates, list):
                 for index, candidate in enumerate(candidates, start=1):
                     if not isinstance(candidate, dict):
@@ -846,7 +854,10 @@ class OverlayTerminal:
                         )
                     button.grid(row=index, column=0, sticky="ew", pady=(0, 5), padx=7)
                     self.candidate_buttons.append(button)
-        if packet.get("auto_execute"):
+        if packet.get("model_pending"):
+            self._set_controls_enabled(False)
+            self._set_connection("模型正在计算候选", WARNING)
+        elif packet.get("auto_execute"):
             self.pending_view = False
             self._set_controls_enabled(False)
             self._set_connection("教师已自动执行：" + str(decision.get("model_action", "-")), ACCENT)
