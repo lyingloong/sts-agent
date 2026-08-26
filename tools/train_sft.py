@@ -13,6 +13,7 @@ import copy
 import hashlib
 import inspect
 import json
+import math
 import os
 import random
 import subprocess
@@ -257,6 +258,38 @@ def serializable_args(args: argparse.Namespace) -> dict[str, Any]:
     return {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
 
 
+def summarize_epoch_losses(log_history: list[dict[str, Any]]) -> list[dict[str, float | int]]:
+    """Aggregate Trainer fixed-step training-loss windows by epoch.
+
+    Each loss is the mean of a logging interval. The result is a train-only
+    diagnostic, not a replacement for held-out gameplay evaluation.
+    """
+
+    windows: dict[int, list[float]] = {}
+    for item in log_history:
+        if not isinstance(item, dict) or "loss" not in item or "epoch" not in item:
+            continue
+        try:
+            epoch_position = float(item["epoch"])
+            loss = float(item["loss"])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(epoch_position) or not math.isfinite(loss):
+            continue
+        # A loss logged at exactly epoch 1.0 belongs to the first epoch.
+        epoch = max(1, math.ceil(epoch_position))
+        windows.setdefault(epoch, []).append(loss)
+    return [
+        {
+            "epoch": epoch,
+            "logged_windows": len(values),
+            "mean_logged_loss": sum(values) / len(values),
+            "last_logged_loss": values[-1],
+        }
+        for epoch, values in sorted(windows.items())
+    ]
+
+
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Train a response-only QLoRA StS action selector")
@@ -490,9 +523,21 @@ def train(args: argparse.Namespace) -> int:
     trainer.save_model(str(args.output))
     tokenizer.save_pretrained(args.output / "tokenizer")
     (args.output / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    epoch_loss_summary = {
+        "schema_version": "sts-sft-epoch-loss-0.1",
+        "kind": "mean_of_trainer_logging_windows",
+        "logging_steps": args.logging_steps,
+        "warning": "train-only diagnostic; do not select a policy from this without gameplay evaluation",
+        "epochs": summarize_epoch_losses(list(trainer.state.log_history)),
+    }
+    (args.output / "epoch_loss_summary.json").write_text(
+        json.dumps(epoch_loss_summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     run_manifest["status"] = "completed"
     run_manifest["completed_at_utc"] = datetime.now(UTC).isoformat()
     run_manifest["metrics"] = metrics
+    run_manifest["epoch_loss_summary"] = epoch_loss_summary
     run_manifest_path.write_text(json.dumps(run_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(args.output), "metrics": metrics}, ensure_ascii=False), flush=True)
     return 0

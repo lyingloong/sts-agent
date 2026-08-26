@@ -109,6 +109,25 @@ class TrainSftTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mutually exclusive"):
                 train_sft.validate_args(args)
 
+    def test_epoch_loss_summary_groups_logging_windows_by_epoch(self) -> None:
+        result = train_sft.summarize_epoch_losses(
+            [
+                {"epoch": 0.25, "loss": 0.8},
+                {"epoch": 1.0, "loss": 0.4},
+                {"epoch": 1.25, "loss": 0.2},
+                {"epoch": 2.0, "loss": 0.1},
+                {"epoch": "bad", "loss": 0.0},
+                {"epoch": 2.5, "loss": float("nan")},
+            ]
+        )
+        self.assertEqual(
+            result,
+            [
+                {"epoch": 1, "logged_windows": 2, "mean_logged_loss": 0.6000000000000001, "last_logged_loss": 0.4},
+                {"epoch": 2, "logged_windows": 2, "mean_logged_loss": 0.15000000000000002, "last_logged_loss": 0.1},
+            ],
+        )
+
     def test_non_map_trace_observation_drops_map_like_live_inference(self) -> None:
         routed = train_sft.route_trace_observation(
             {

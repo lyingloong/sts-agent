@@ -195,6 +195,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --gradient-accumulation-steps 8
 ~~~
 
+训练完成后，输出目录中的 epoch_loss_summary.json 会汇总每个 epoch 的训练 loss；它是每 logging_steps 个 optimizer step 的日志窗口均值，不是验证 loss，也不能替代固定种子游戏评测。若需要在长续训中保留每个 epoch 的 adapter 供评测，将 --save-total-limit 设为对应 epoch 数，例如新增 27 个 epoch 时设为 27。
+
 ```bash
 rsync -aP --checksum <user>@<host>:/data/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001/ \
   outputs/sft/qwen3-0.6b/sft-v0-r001/
