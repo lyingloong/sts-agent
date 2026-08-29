@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "model": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
-  "initial_adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
-  "initial_policy_version": "sft-v0-r001",
+  "initial_adapter": "/data/wanghao/sts-agent/outputs/online_rl/posthoc-r001/versions/v000002",
+  "initial_policy_version": "rl-001",
   "output_root": "/data/wanghao/sts-agent/outputs/online_rl/ironclad-a0-seed-4QTKQ7VBMFX47",
   "group_size": 4,
   "seed": 20260826,

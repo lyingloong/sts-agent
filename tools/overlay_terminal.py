@@ -274,6 +274,55 @@ def action_review_text(value: Any) -> str:
     return "\n".join(lines) if lines else "本局没有可复盘的已确认动作。"
 
 
+def attribution_result_text(packet: dict[str, Any]) -> str:
+    """Render only validated teacher attributions, never raw model output."""
+
+    annotation = packet.get("annotation")
+    annotation = annotation if isinstance(annotation, dict) else {}
+    status = table_cell(annotation.get("status") or "unknown")
+    model = display_model_name(annotation.get("model_id"))
+    latency = annotation.get("latency_ms")
+    latency_text = f"{latency} ms" if isinstance(latency, (int, float)) else "-"
+    applied = annotation.get("applied")
+    applied = [item for item in applied if isinstance(item, dict)] if isinstance(applied, list) else []
+    rejected = annotation.get("rejected")
+    rejected = [item for item in rejected if isinstance(item, dict)] if isinstance(rejected, list) else []
+    reinforce = [item for item in applied if item.get("direction") == "reinforce"]
+    weaken = [item for item in applied if item.get("direction") == "weaken"]
+    lines = [
+        "教师归因结果",
+        f"模型：{model}  |  状态：{status}  |  延迟：{latency_text}",
+        f"通过：{len(applied)}（强化 {len(reinforce)} / 弱化 {len(weaken)}）  |  过滤：{len(rejected)}",
+    ]
+    for heading, items in (("可强化", reinforce), ("应弱化", weaken)):
+        lines.extend(("", heading))
+        if not items:
+            lines.append("无通过校验的动作")
+            continue
+        for item in items:
+            step = item.get("step_id")
+            step_text = f"#{step}" if isinstance(step, int) else "#?"
+            confidence = format_probability(item.get("confidence"))
+            severity = item.get("severity")
+            label = table_cell(item.get("action_label") or item.get("selected_alias") or "未知动作")
+            evidence = table_cell(item.get("evidence"))
+            lines.append(f"{step_text}  q={confidence}  严重度={severity}  {label}")
+            if evidence:
+                lines.append(f"  {evidence}")
+    error = table_cell(annotation.get("error"))
+    if error:
+        lines.extend(("", f"错误：{error}"))
+    elif rejected:
+        reasons = []
+        for item in rejected:
+            reason = table_cell(item.get("reason"))
+            if reason and reason not in reasons:
+                reasons.append(reason)
+        if reasons:
+            lines.extend(("", "过滤原因：" + "；".join(reasons[:3])))
+    return "\n".join(lines)
+
+
 def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     """Render the remote teacher's thinking/output without showing candidates."""
     if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
@@ -323,6 +372,7 @@ class OverlayTerminal:
         self._save_after: str | None = None
         self._topmost_after: str | None = None
         self.reflection_dialog: tk.Toplevel | None = None
+        self.attribution_dialog: tk.Toplevel | None = None
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
@@ -337,15 +387,27 @@ class OverlayTerminal:
         self._drag_origin: dict[str, tuple[int, int]] = {}
         self._resize_origin: dict[str, tuple[int, int, int, int, int, int, str]] = {}
         self._resize_handles: list[tk.Frame] = []
+        # Borderless windows are not reliably represented in the Windows
+        # taskbar. Track the ones temporarily handed back to the window
+        # manager so the explicit minimize button always has a restore path.
+        self._minimized_frameless: set[str] = set()
+        self._minimize_in_progress: set[str] = set()
         self._configure_window(self.root, "status", 360, 260)
         self._configure_window(self.control, "control", 380, 260)
         self._configure_window(self.online_rl, "online_rl", 300, 210)
+        for window in (self.root, self.control, self.online_rl):
+            window.bind(
+                "<Map>",
+                lambda _event, target=window: self._restore_frameless_window(target),
+                add="+",
+            )
         self._build_status_window()
         self._build_control_window()
         self._build_online_rl_window()
-        self._install_resize_handles(self.root)
-        self._install_resize_handles(self.control)
-        self._install_resize_handles(self.online_rl)
+        if self.config["overlay"]["frameless"]:
+            self._install_resize_handles(self.root)
+            self._install_resize_handles(self.control)
+            self._install_resize_handles(self.online_rl)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.control.protocol("WM_DELETE_WINDOW", self.close)
         self.online_rl.protocol("WM_DELETE_WINDOW", self.close)
@@ -393,6 +455,8 @@ class OverlayTerminal:
         if not self.always_on_top or self.closing:
             return
         for window in (self.root, self.control, self.online_rl):
+            if str(window) in self._minimized_frameless:
+                continue
             try:
                 window.attributes("-topmost", True)
                 if sys.platform == "win32":
@@ -437,13 +501,37 @@ class OverlayTerminal:
             padx=10,
         )
         label.grid(row=0, column=0, sticky="w")
-        close_button = tk.Button(
-            bar,
-            text="x",
-            command=self.close,
-            background=PANEL,
+        if self.config["overlay"]["frameless"]:
+            minimize_button = self._minimize_button(bar, window, background=PANEL)
+            minimize_button.grid(row=0, column=2, sticky="e")
+            close_button = tk.Button(
+                bar,
+                text="x",
+                command=self.close,
+                background=PANEL,
+                foreground=MUTED,
+                activebackground=ERROR,
+                activeforeground=TEXT,
+                relief="flat",
+                borderwidth=0,
+                padx=11,
+                pady=5,
+                font=(self.ui_font, 10, "bold"),
+                cursor="hand2",
+            )
+            close_button.grid(row=0, column=3, sticky="e")
+            self._bind_drag(bar, window)
+            self._bind_drag(label, window)
+        return bar
+
+    def _minimize_button(self, parent: tk.Misc, window: tk.Misc, *, background: str) -> tk.Button:
+        return tk.Button(
+            parent,
+            text="-",
+            command=lambda: self._minimize_window(window),
+            background=background,
             foreground=MUTED,
-            activebackground=ERROR,
+            activebackground=BUTTON_ACTIVE,
             activeforeground=TEXT,
             relief="flat",
             borderwidth=0,
@@ -452,10 +540,69 @@ class OverlayTerminal:
             font=(self.ui_font, 10, "bold"),
             cursor="hand2",
         )
-        close_button.grid(row=0, column=2, sticky="e")
-        self._bind_drag(bar, window)
-        self._bind_drag(label, window)
-        return bar
+
+    def _is_frameless_primary_window(self, window: tk.Misc) -> bool:
+        return bool(
+            self.config["overlay"]["frameless"]
+            and window in (self.root, self.control, self.online_rl)
+        )
+
+    def _minimize_window(self, window: tk.Misc) -> None:
+        """Minimize one panel while preserving a taskbar restore affordance."""
+
+        if self.closing:
+            return
+        key = str(window)
+        frameless = self._is_frameless_primary_window(window)
+        try:
+            if frameless:
+                self._minimized_frameless.add(key)
+                self._minimize_in_progress.add(key)
+                window.overrideredirect(False)
+            window.iconify()
+        except tk.TclError:
+            self._minimized_frameless.discard(key)
+        finally:
+            self._minimize_in_progress.discard(key)
+
+    def _restore_frameless_window(self, window: tk.Misc) -> None:
+        """Restore borderless styling after a taskbar-minimized panel returns."""
+
+        key = str(window)
+        if self.closing or key not in self._minimized_frameless or key in self._minimize_in_progress:
+            return
+        try:
+            if window.state() == "iconic":
+                return
+            self._minimized_frameless.discard(key)
+            window.overrideredirect(True)
+            window.attributes("-alpha", float(self.config["overlay"][self._window_name(window)]["opacity"]))
+            window.attributes("-topmost", self.always_on_top)
+            self.root.after_idle(self._raise_topmost_windows)
+        except tk.TclError:
+            self._minimized_frameless.discard(key)
+
+    def _window_name(self, window: tk.Misc) -> str:
+        if window is self.root:
+            return "status"
+        if window is self.control:
+            return "control"
+        return "online_rl"
+
+    def _show_state_panel_for_prompt(self) -> None:
+        """Make a human-input prompt visible even when other panels are minimized."""
+
+        key = str(self.root)
+        if key in self._minimized_frameless:
+            try:
+                self.root.deiconify()
+            except tk.TclError:
+                return
+            self._restore_frameless_window(self.root)
+        try:
+            self.root.lift()
+        except tk.TclError:
+            pass
 
     def _bind_drag(self, widget: tk.Misc, window: tk.Misc) -> None:
         key = str(window)
@@ -1134,14 +1281,16 @@ class OverlayTerminal:
         self.pending_view = False
         self._set_controls_enabled(False)
         self._set_connection("等待本局终局反思", WARNING)
-        dialog = tk.Toplevel(self.control)
+        self._show_state_panel_for_prompt()
+        # Do not attach this prompt to MODEL / ACTION: that panel may be
+        # minimized while an online rollout ends and needs human feedback.
+        dialog = tk.Toplevel(self.root)
         self.reflection_dialog = dialog
         dialog.title("StS Agent - Rollout Reflection")
         dialog.geometry("780x760+540+120")
         dialog.minsize(580, 540)
         dialog.configure(background=BACKGROUND)
         dialog.attributes("-topmost", self.always_on_top)
-        dialog.transient(self.control)
         dialog.grab_set()
         outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
         outer.grid(sticky="nsew")
@@ -1151,13 +1300,18 @@ class OverlayTerminal:
         outer.grid_rowconfigure(3, weight=3)
         outer.grid_rowconfigure(5, weight=1)
         outer.grid_rowconfigure(7, weight=1)
+        header = tk.Frame(outer, background=BACKGROUND)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
         tk.Label(
-            outer,
+            header,
             text="ROLLOUT REFLECTION",
             foreground=ACCENT,
             background=BACKGROUND,
             font=(self.ui_font, 12, "bold"),
         ).grid(row=0, column=0, sticky="w")
+        if self.config["overlay"]["frameless"]:
+            self._minimize_button(header, dialog, background=BACKGROUND).grid(row=0, column=1, sticky="e")
         tk.Label(
             outer,
             text=posthoc_reflection_text(packet),
@@ -1279,6 +1433,84 @@ class OverlayTerminal:
         submit.grid(row=0, column=1)
         dialog.protocol("WM_DELETE_WINDOW", lambda: finish(True))
         reinforce.focus_set()
+        dialog.lift()
+
+    def _show_attribution_result(self, packet: dict[str, Any]) -> None:
+        """Show the teacher's post-hoc selected steps without blocking rollout."""
+
+        if self.closing:
+            return
+        if self.attribution_dialog is not None:
+            try:
+                self.attribution_dialog.destroy()
+            except tk.TclError:
+                pass
+        # This result must remain visible even if MODEL / ACTION is minimized.
+        dialog = tk.Toplevel(self.root)
+        self.attribution_dialog = dialog
+        dialog.title("StS Agent - Teacher Attribution")
+        dialog.geometry("700x540+650+140")
+        dialog.minsize(480, 340)
+        dialog.configure(background=BACKGROUND)
+        dialog.attributes("-topmost", self.always_on_top)
+        outer = tk.Frame(dialog, background=BACKGROUND, padx=12, pady=12)
+        outer.grid(sticky="nsew")
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+        header = tk.Frame(outer, background=BACKGROUND)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            header,
+            text="TEACHER ATTRIBUTION",
+            foreground=ACCENT,
+            background=BACKGROUND,
+            font=(self.ui_font, 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        if self.config["overlay"]["frameless"]:
+            self._minimize_button(header, dialog, background=BACKGROUND).grid(row=0, column=1, sticky="e")
+        text_frame = tk.Frame(outer, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        text = tk.Text(
+            text_frame,
+            wrap="word",
+            state="normal",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=9,
+            font=(self.data_font, 10),
+        )
+        text.grid(row=0, column=0, sticky="nsew")
+        text.insert("1.0", attribution_result_text(packet))
+        text.configure(state="disabled")
+        scrollbar = tk.Scrollbar(
+            text_frame,
+            command=text.yview,
+            relief="flat",
+            borderwidth=0,
+            background=BUTTON,
+            activebackground=BUTTON_ACTIVE,
+            troughcolor=FIELD,
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=scrollbar.set)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_attribution_dialog(dialog))
+
+    def _close_attribution_dialog(self, dialog: tk.Toplevel) -> None:
+        if self.attribution_dialog is dialog:
+            self.attribution_dialog = None
+        try:
+            dialog.destroy()
+        except tk.TclError:
+            pass
 
     def _submit_entry(self, _event: tk.Event[tk.Misc]) -> str:
         self.submit_action()
@@ -1346,6 +1578,8 @@ class OverlayTerminal:
                             response = self.reflection_responses.get()
                             writer.write(json.dumps(response, ensure_ascii=False) + "\n")
                             writer.flush()
+                        elif packet_type == "posthoc_attribution_result":
+                            self._post_ui(self._show_attribution_result, packet)
                         elif packet_type == "shutdown":
                             self._post_ui(self._set_connection, str(packet.get("message", "controller 已停止")), ERROR)
                             break
@@ -1439,6 +1673,12 @@ class OverlayTerminal:
             except tk.TclError:
                 pass
             self.reflection_dialog = None
+        if self.attribution_dialog is not None:
+            try:
+                self.attribution_dialog.destroy()
+            except tk.TclError:
+                pass
+            self.attribution_dialog = None
         try:
             self.control.destroy()
         except tk.TclError:

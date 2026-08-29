@@ -17,8 +17,39 @@ from typing import Any
 from teacher_client import RemoteTeacherClient, TeacherError, compact_json
 
 
-PROMPT_VERSION = "posthoc-attribution-v1"
+PROMPT_VERSION = "posthoc-attribution-v2"
 SCHEMA_VERSION = "sts-posthoc-attribution-0.1"
+
+# Observations have already been normalized to public game data before this
+# module receives them. These fields are nevertheless derived from the local
+# static knowledge bases rather than from the changing run state, so they add
+# a large amount of repeated prompt text without helping post-hoc attribution.
+POSTHOC_STATIC_FIELDS = frozenset(
+    {
+        "description",
+        "raw_description",
+        "flavor",
+        "flavor_text",
+        "effect",
+        "effects",
+    }
+)
+POSTHOC_LIST_LIMITS = {
+    "nodes": 128,
+    "cards": 80,
+    "hand": 16,
+    "monsters": 12,
+    "powers": 24,
+    "potions": 12,
+    "relics": 48,
+    "rewards": 24,
+    "choices": 48,
+    "options": 48,
+    "recent_actions": 8,
+    "event_history": 12,
+    "children": 8,
+    "parents": 8,
+}
 
 
 class PosthocFeedbackError(RuntimeError):
@@ -34,47 +65,59 @@ def compact_text(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "...<truncated>"
 
 
-def _compact_object(value: Any, *, depth: int = 0) -> Any:
-    """Keep an action ledger informative without sending full raw traces."""
+def _posthoc_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
+    """Retain public, dynamic state while bounding pathological payloads."""
 
-    if depth >= 4:
+    if depth >= 9:
         return "<nested>"
     if isinstance(value, str):
-        return compact_text(value, 300)
+        limit = 1600 if key in {"body_text", "text"} else 600
+        return compact_text(value, limit)
     if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
         return value
     if isinstance(value, list):
-        result = [_compact_object(item, depth=depth + 1) for item in value[:16]]
-        if len(value) > 16:
-            result.append(f"...<{len(value) - 16} more>")
+        limit = POSTHOC_LIST_LIMITS.get(key or "", 64)
+        result = [_posthoc_value(item, key=key, depth=depth + 1) for item in value[:limit]]
+        if len(value) > limit:
+            result.append(f"...<{len(value) - limit} more>")
         return result
     if isinstance(value, dict):
-        keys = (
-            "screen_type",
-            "room_phase",
-            "action_phase",
-            "act",
-            "floor",
-            "class",
-            "ascension_level",
-            "current_hp",
-            "max_hp",
-            "gold",
-            "potions",
-            "relics",
-            "combat",
-            "screen_state",
-            "selection_context",
-            "event_history",
-            "recent_actions",
-            "run_memory",
-        )
         return {
-            key: _compact_object(value[key], depth=depth + 1)
-            for key in keys
-            if key in value and value[key] not in (None, [], {})
+            item_key: _posthoc_value(item, key=item_key, depth=depth + 1)
+            for item_key, item in value.items()
+            if item_key not in POSTHOC_STATIC_FIELDS and item not in (None, [], {})
         }
     return compact_text(value, 200)
+
+
+def _posthoc_state_snapshot(observation: Any, map_ids: dict[str, str]) -> dict[str, Any]:
+    """Build a detailed dynamic snapshot and deduplicate repeated Act maps."""
+
+    if not isinstance(observation, dict):
+        return {}
+    source = dict(observation)
+    raw_map = source.pop("map", None)
+    result = _posthoc_value(source)
+    if not isinstance(result, dict) or not isinstance(raw_map, dict):
+        return result if isinstance(result, dict) else {}
+
+    raw_nodes = raw_map.get("nodes")
+    map_summary = _posthoc_value(
+        {key: item for key, item in raw_map.items() if key != "nodes"},
+        key="map",
+    )
+    map_summary = map_summary if isinstance(map_summary, dict) else {}
+    if isinstance(raw_nodes, list):
+        signature = json.dumps(raw_nodes, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        map_id = map_ids.get(signature)
+        if map_id is None:
+            map_id = f"map-{len(map_ids) + 1}"
+            map_ids[signature] = map_id
+            map_summary["nodes"] = _posthoc_value(raw_nodes, key="nodes")
+        map_summary["map_id"] = map_id
+    if map_summary:
+        result["map"] = map_summary
+    return result
 
 
 def terminal_summary(terminal_state: dict[str, Any]) -> dict[str, Any]:
@@ -134,9 +177,10 @@ def action_review_from_trace(trace_path: Path) -> list[dict[str, Any]]:
 
 
 def action_ledger(episode: dict[str, Any]) -> list[dict[str, Any]]:
-    """Make teacher-visible, stable references to sampled policy actions."""
+    """Make detailed, teacher-visible references to sampled policy actions."""
 
     result: list[dict[str, Any]] = []
+    map_ids: dict[str, str] = {}
     for step in episode.get("steps", []):
         if not isinstance(step, dict):
             continue
@@ -161,7 +205,15 @@ def action_ledger(episode: dict[str, Any]) -> list[dict[str, Any]]:
                     "alias": selected_alias,
                     "label": compact_text(selected.get("label") or selected_alias, 240),
                 },
-                "state": _compact_object(step.get("observation")),
+                "legal_actions": [
+                    {
+                        "alias": str(action.get("id") or ""),
+                        "label": compact_text(action.get("label") or action.get("id") or "", 240),
+                    }
+                    for action in step.get("legal_actions", [])
+                    if isinstance(action, dict) and str(action.get("id") or "")
+                ],
+                "state": _posthoc_state_snapshot(step.get("observation"), map_ids),
             }
         )
     return result
@@ -179,6 +231,8 @@ def build_prompt(
     system = (
         "你是《杀戮尖塔》策略训练的事后归因标注器。人类的复盘是唯一的价值方向："
         "只定位日志中已经执行的模型动作，不要自行编造动作、奖励或隐藏状态。"
+        "每个步骤都给出了所选动作、当时全部合法动作和该步动态公开状态；"
+        "state 中不包含静态知识库的卡牌、遗物、药水或能力描述。"
         "请分别找出值得强化和应当弱化的关键动作；同一步不得同时出现在两类。"
         "证据只写简短可审计事实，不输出推理过程、长篇攻略或 Markdown。"
         "严格返回一个 JSON 对象："

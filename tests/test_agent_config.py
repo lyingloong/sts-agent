@@ -19,6 +19,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(confidence["min_probability"], 0.85)
         self.assertNotIn("min_margin", confidence)
         self.assertEqual(config["teacher"]["max_input_chars"], 32000)
+        self.assertEqual(config["posthoc_feedback"]["max_input_chars"], 96000)
 
     def test_teacher_input_limit_must_be_a_non_negative_integer(self) -> None:
         config = agent_config._merge(agent_config.DEFAULT_CONFIG, {"teacher": {"max_input_chars": -1}})
@@ -67,7 +68,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config["server"]["port"], 8765)
         self.assertEqual(config["policy"]["screens"], ["ALL"])
         self.assertTrue(config["overlay"]["always_on_top"])
-        self.assertTrue(config["overlay"]["frameless"])
+        self.assertFalse(config["overlay"]["frameless"])
         self.assertEqual(config["overlay"]["status"]["divider_columns"], 36)
         self.assertEqual(config["policy"]["remote"]["inference_gpu"]["device"], "auto")
 

@@ -131,6 +131,31 @@ def read_posthoc_reflection(packet: dict, use_color: bool) -> dict:
     return {"type": "posthoc_reflection", "skip": False, "reinforce": reinforce, "weaken": weaken}
 
 
+def print_posthoc_attribution(packet: dict) -> None:
+    """Print the same filtered attribution result shown in the Overlay."""
+
+    annotation = packet.get("annotation")
+    annotation = annotation if isinstance(annotation, dict) else {}
+    applied = annotation.get("applied")
+    applied = [item for item in applied if isinstance(item, dict)] if isinstance(applied, list) else []
+    print("\n教师归因结果")
+    print(f"状态：{annotation.get('status', 'unknown')} | 通过动作：{len(applied)}")
+    for direction, title in (("reinforce", "可强化"), ("weaken", "应弱化")):
+        print(title)
+        items = [item for item in applied if item.get("direction") == direction]
+        if not items:
+            print("  无通过校验的动作")
+            continue
+        for item in items:
+            step = item.get("step_id", "?")
+            label = item.get("action_label") or item.get("selected_alias") or "未知动作"
+            confidence = item.get("confidence", "?")
+            evidence = item.get("evidence") or ""
+            print(f"  #{step} q={confidence} {label}")
+            if evidence:
+                print(f"    {evidence}")
+
+
 def main() -> int:
     try:
         config = load_agent_config()
@@ -181,6 +206,8 @@ def main() -> int:
                 response = read_posthoc_reflection(packet, use_color)
                 writer.write(json.dumps(response, ensure_ascii=False) + "\n")
                 writer.flush()
+            elif packet_type == "posthoc_attribution_result":
+                print_posthoc_attribution(packet)
             elif packet_type == "shutdown":
                 print(packet.get("message", "controller stopped"), flush=True)
                 break

@@ -131,6 +131,33 @@ class OverlayFormattingTests(unittest.TestCase):
         self.assertIn("#1  A1 F3  COMBAT_REWARD  [自动] 自动拾取金币 25", rendered)
         self.assertIn("#2  A1 F4  NONE  [模型] 出牌 打击 -> 敌人 0", rendered)
 
+    def test_posthoc_attribution_result_shows_only_validated_actions(self) -> None:
+        rendered = overlay_terminal.attribution_result_text(
+            {
+                "annotation": {
+                    "status": "annotated",
+                    "model_id": "deepseek-v4-pro",
+                    "latency_ms": 923,
+                    "applied": [
+                        {
+                            "step_id": 18,
+                            "direction": "weaken",
+                            "confidence": 0.91,
+                            "severity": 3,
+                            "action_label": "结束回合",
+                            "evidence": "仍有可用能量和防御牌",
+                        }
+                    ],
+                    "rejected": [{"reason": "confidence below configured threshold 0.75"}],
+                }
+            }
+        )
+        self.assertIn("模型：deepseek-v4-pro", rendered)
+        self.assertIn("通过：1（强化 0 / 弱化 1）  |  过滤：1", rendered)
+        self.assertIn("#18  q=91.0%  严重度=3  结束回合", rendered)
+        self.assertIn("仍有可用能量和防御牌", rendered)
+        self.assertIn("过滤原因：confidence below configured threshold 0.75", rendered)
+
     def test_teacher_panel_uses_thinking_and_final_output(self) -> None:
         rendered = overlay_terminal.teacher_panel_text(
             {

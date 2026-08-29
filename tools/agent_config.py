@@ -70,7 +70,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_retries": 1,
         "temperature": 0.0,
         "max_tokens": 2048,
-        "max_input_chars": 48000,
+        "max_input_chars": 96000,
         "max_reflection_chars": 4000,
         "max_candidates_per_direction": 10,
         "max_applied_per_direction": 8,
@@ -78,7 +78,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "overlay": {
         "always_on_top": True,
-        "frameless": True,
+        "frameless": False,
         "status": {
             "geometry": "540x680+24+84",
             "opacity": 0.96,

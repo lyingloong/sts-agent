@@ -3411,6 +3411,17 @@ def main() -> int:
                                         "created_at_utc": posthoc_now_utc(),
                                     },
                                 )
+                                try:
+                                    bridge.send(
+                                        {
+                                            "type": "posthoc_attribution_result",
+                                            "run_id": run_id,
+                                            "terminal_state": posthoc_terminal_summary(online_episode["terminal_state"]),
+                                            "annotation": annotation,
+                                        }
+                                    )
+                                except OSError:
+                                    pass
                                 online_episode["attributions"] = list(annotation.get("applied") or [])
                                 write_event(
                                     {

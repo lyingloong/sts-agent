@@ -29,7 +29,7 @@
   "max_retries": 1,
   "temperature": 0.0,
   "max_tokens": 2048,
-  "max_input_chars": 48000,
+  "max_input_chars": 96000,
   "max_reflection_chars": 4000,
   "max_candidates_per_direction": 10,
   "max_applied_per_direction": 8,
@@ -57,9 +57,17 @@
 5. 本地校验 `step_id`、方向、置信度、严重度和冲突；仅保留每方向最高置信度的 8 个、且 `confidence >= 0.75` 的动作。
 6. 完整 episode 与筛选后的归因上传。第 4 局结束时，同一远端 GPU 进行一次 QLoRA 更新并保存新版本。
 
+教师返回后，Overlay 会显示一个非阻塞的 `TEACHER ATTRIBUTION` 窗口，其中列出实际通过校验、会参与更新的动作（`step_id`、动作、置信度、严重度和简短证据），以及过滤数量和原因摘要。它不显示教师思考或原始响应。
+
 若人类只填写其中一栏，该栏是唯一允许的归因方向；教师在空栏方向给出的候选会被拒绝，不能凭自身判断补出正或负反馈。
 
 文本客户端也支持该流程：终局时依次输入 `可强化>` 和 `应弱化>`；两行都为空即跳过。
+
+### 教师归因输入
+
+`posthoc-attribution-v2` 对每个 `online_policy_sample` 步骤发送所选 alias/动作标签、该步完整 alias 合法动作表，以及动态公开状态。战斗状态包括手牌的 `id/name/type/cost/upgrades/is_playable`、能量/格挡/Power、敌人血量/格挡/意图/Power、牌堆计数和最近动作；非战斗状态保留公开的选项、奖励、商店、事件历史和牌组信息。地图图结构每个 Act 只完整发送一次，后续地图步骤通过 `map_id` 引用并保留当前位置和可达节点。
+
+卡牌、药水、遗物和 Power 的 `description`、flavor/effect 等由本地静态知识库补全的字段不会发送。这避免跨步骤重复静态文本，同时不损失归因所需的实时数值与可选动作。默认 `max_input_chars=96000`；达到上限时仍可在本机配置中提高，配置校验允许至 `262144`。
 
 ## 数据产物
 

@@ -19,7 +19,16 @@ def episode() -> dict:
         "steps": [
             {
                 "step_id": 3,
-                "observation": {"screen_type": "COMBAT", "floor": 5, "combat": {"player": {"energy": 2}}},
+                "observation": {
+                    "screen_type": "COMBAT",
+                    "floor": 5,
+                    "combat": {
+                        "player": {"energy": 2, "powers": [{"id": "Strength", "amount": 1, "description": "static"}]},
+                        "hand": [{"id": "Strike_R", "name": "打击", "cost": 1, "is_playable": True, "description": "Deal 6 damage."}],
+                        "monsters": [{"id": "JawWorm", "current_hp": 40, "intent": "ATTACK", "intent_damage": 11}],
+                    },
+                    "recent_actions": [{"step_id": 2, "action": "出牌 防御", "source": "online_policy_sample"}],
+                },
                 "legal_actions": [{"id": "A1", "label": "出牌 打击"}, {"id": "A2", "label": "结束回合"}],
                 "selected_alias": "A1",
             },
@@ -34,11 +43,32 @@ def episode() -> dict:
 
 
 class PosthocFeedbackTests(unittest.TestCase):
-    def test_action_ledger_only_contains_selected_actions(self) -> None:
+    def test_action_ledger_contains_selected_and_legal_actions_with_dynamic_state(self) -> None:
         ledger = posthoc_feedback.action_ledger(episode())
         self.assertEqual([item["step_id"] for item in ledger], [3, 4])
         self.assertEqual(ledger[0]["selected_action"]["label"], "出牌 打击")
-        self.assertNotIn("A2", str(ledger))
+        self.assertEqual(ledger[0]["legal_actions"], [{"alias": "A1", "label": "出牌 打击"}, {"alias": "A2", "label": "结束回合"}])
+        combat = ledger[0]["state"]["combat"]
+        self.assertEqual(combat["player"]["energy"], 2)
+        self.assertEqual(combat["hand"][0]["name"], "打击")
+        self.assertEqual(combat["monsters"][0]["intent_damage"], 11)
+        self.assertEqual(ledger[0]["state"]["recent_actions"][0]["action"], "出牌 防御")
+        self.assertNotIn("description", str(ledger))
+
+    def test_action_ledger_deduplicates_repeated_map_nodes(self) -> None:
+        map_nodes = [{"x": 0, "y": 0, "symbol": "M", "children": [{"x": 0, "y": 1}]}]
+        value = episode()
+        for step in value["steps"]:
+            step["observation"] = {
+                "screen_type": "MAP",
+                "floor": step["step_id"],
+                "map": {"nodes": map_nodes, "current_node": {"x": 0, "y": 0}, "next_nodes": [{"x": 0, "y": 1}]},
+            }
+        ledger = posthoc_feedback.action_ledger(value)
+        self.assertEqual(ledger[0]["state"]["map"]["map_id"], "map-1")
+        self.assertIn("nodes", ledger[0]["state"]["map"])
+        self.assertEqual(ledger[1]["state"]["map"]["map_id"], "map-1")
+        self.assertNotIn("nodes", ledger[1]["state"]["map"])
 
     def test_trace_action_review_preserves_model_and_automatic_actions(self) -> None:
         records = [
