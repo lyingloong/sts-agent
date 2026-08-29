@@ -44,6 +44,15 @@ class OnlineRlTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             validate_episode_payload(payload)
 
+    def test_episode_validates_attribution_against_sampled_steps(self) -> None:
+        payload = episode_payload("e-1")
+        payload["attributions"] = [{"step_id": 0, "direction": "weaken", "confidence": 0.9, "severity": 3}]
+        parsed = validate_episode_payload(payload)
+        self.assertEqual(parsed["attributions"][0]["direction"], "weaken")
+        payload["attributions"][0]["step_id"] = 99
+        with self.assertRaises(ProtocolError):
+            validate_episode_payload(payload)
+
     def test_reward_exposes_components(self) -> None:
         result = episode_reward({"screen_type": "VICTORY", "act": 3, "floor": 50, "current_hp": 20, "max_hp": 80})
         self.assertTrue(result["won"])
@@ -126,6 +135,72 @@ class OnlineRlTests(unittest.TestCase):
             self.assertEqual(updated["type"], "policy_updated")
             self.assertEqual(updated["policy_version"], "v000001")
             self.assertEqual(updated["iteration"], 1)
+
+    def test_attribution_worker_closes_empty_group_without_new_policy_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "online.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "model": "unused",
+                        "initial_adapter": str(root / "adapter"),
+                        "output_root": str(root / "output"),
+                        "group_size": 2,
+                        "attribution": {"enabled": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            worker = OnlineWorker(load_config(config_path), mock=True)
+            request = {
+                "request_id": 1,
+                "episode_id": "e-1",
+                "run_config": {"character": "IRONCLAD", "ascension": 0, "seed": "4QTKQ7VBMFX47"},
+                "observation": {"screen_type": "NONE"},
+                "legal_actions": [{"id": "A1", "label": "End"}],
+            }
+            first = worker.sample(request)
+            worker.submit_episode({"episode": episode_payload("e-1", first["group_id"], first["policy_version"])})
+            second = worker.sample({**request, "episode_id": "e-2"})
+            completed = worker.submit_episode({"episode": episode_payload("e-2", second["group_id"], second["policy_version"])})
+            self.assertEqual(completed["type"], "group_completed_no_update")
+            self.assertEqual(completed["policy_version"], "sft-v0")
+            self.assertEqual(completed["iteration"], 0)
+
+    def test_attribution_worker_saves_new_policy_when_a_step_is_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "online.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "model": "unused",
+                        "initial_adapter": str(root / "adapter"),
+                        "output_root": str(root / "output"),
+                        "group_size": 2,
+                        "attribution": {"enabled": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            worker = OnlineWorker(load_config(config_path), mock=True)
+            request = {
+                "request_id": 1,
+                "episode_id": "e-1",
+                "run_config": {"character": "IRONCLAD", "ascension": 0, "seed": "4QTKQ7VBMFX47"},
+                "observation": {"screen_type": "NONE"},
+                "legal_actions": [{"id": "A1", "label": "End"}],
+            }
+            first = worker.sample(request)
+            one = episode_payload("e-1", first["group_id"], first["policy_version"])
+            one["attributions"] = [{"step_id": 0, "direction": "reinforce", "confidence": 0.9, "severity": 2}]
+            worker.submit_episode({"episode": one})
+            second = worker.sample({**request, "episode_id": "e-2"})
+            two = episode_payload("e-2", second["group_id"], second["policy_version"])
+            completed = worker.submit_episode({"episode": two})
+            self.assertEqual(completed["type"], "policy_updated")
+            self.assertEqual(completed["policy_version"], "v000001")
 
     def test_temperature_normalization_tracks_sampling_policy(self) -> None:
         values = normalize_scores(

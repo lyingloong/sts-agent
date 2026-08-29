@@ -41,6 +41,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "weights": dict(DEFAULT_REWARD_WEIGHTS),
     },
     "gpu": {"device": "auto", "minimum_free_memory_mib": 12000},
+    "attribution": {
+        "enabled": False,
+        "max_abs_advantage": 2.0,
+    },
     "update": {
         "max_length": 4096,
         "learning_rate": 1e-5,
@@ -117,6 +121,11 @@ def load_config(path: Path) -> dict[str, Any]:
     for key in ("gradient_checkpointing", "empty_cache_between_steps"):
         if not isinstance(config["update"][key], bool):
             raise ValueError(f"update.{key} must be true or false")
+    attribution = config["attribution"]
+    if not isinstance(attribution["enabled"], bool):
+        raise ValueError("attribution.enabled must be true or false")
+    if not isinstance(attribution["max_abs_advantage"], (int, float)) or attribution["max_abs_advantage"] <= 0:
+        raise ValueError("attribution.max_abs_advantage must be positive")
     return config
 
 
@@ -149,9 +158,26 @@ class MockOnlinePolicy:
                 result.append({"action_id": alias, "label": str(action.get("label") or alias), "logprob": -float(index)})
         return result
 
-    def update(self, episodes: list[dict[str, Any]], rewards: list[float], sampling_temperature: float = 1.0) -> dict[str, Any]:
-        del sampling_temperature
-        return {"algorithm": "mock", "episodes": len(episodes), "rewards": rewards, "steps": sum(len(item["steps"]) for item in episodes)}
+    def update(
+        self,
+        episodes: list[dict[str, Any]],
+        rewards: list[float],
+        sampling_temperature: float = 1.0,
+        *,
+        attribution_enabled: bool = False,
+        max_abs_advantage: float = 2.0,
+    ) -> dict[str, Any]:
+        del sampling_temperature, max_abs_advantage
+        selected = sum(len(item.get("attributions", [])) for item in episodes) if attribution_enabled else sum(
+            len(item["steps"]) for item in episodes
+        )
+        return {
+            "algorithm": "mock_signed_masked_episode_grpo" if attribution_enabled else "mock",
+            "episodes": len(episodes),
+            "rewards": rewards,
+            "steps": selected,
+            "updated": bool(selected),
+        }
 
     def save_adapter(self, path: Path) -> None:
         atomic_write_json(path / "mock-adapter.json", {"warning": "mock worker has no trainable adapter"})
@@ -260,15 +286,32 @@ class OnlineWorker:
         episodes = self.store.load_submitted_episodes(group)
         reward_details = [episode_reward(item["terminal_state"], self.config["reward"]["weights"]) for item in episodes]
         rewards = [float(item["total"]) for item in reward_details]
-        metrics = self.policy.update(episodes, rewards, sampling_temperature=float(self.config["sampling"]["temperature"]))
-        new_version = self.store.next_policy_version()
-        adapter_path = self.output_root / "versions" / new_version
-        self.policy.save_adapter(adapter_path)
+        attribution = self.config["attribution"]
+        metrics = self.policy.update(
+            episodes,
+            rewards,
+            sampling_temperature=float(self.config["sampling"]["temperature"]),
+            attribution_enabled=bool(attribution["enabled"]),
+            max_abs_advantage=float(attribution["max_abs_advantage"]),
+        )
         metrics["reward_details"] = reward_details
-        metrics["adapter_path"] = str(adapter_path)
         metrics["parent_policy_version"] = group["policy_version"]
-        self.store.complete_group(str(group["group_id"]), new_version, metrics)
-        response.update({"type": "policy_updated", "policy_version": new_version, "update": metrics})
+        if metrics.get("updated", True):
+            new_version = self.store.next_policy_version()
+            adapter_path = self.output_root / "versions" / new_version
+            self.policy.save_adapter(adapter_path)
+            metrics["adapter_path"] = str(adapter_path)
+            self.store.complete_group(str(group["group_id"]), new_version, metrics)
+            response.update({"type": "policy_updated", "policy_version": new_version, "update": metrics})
+        else:
+            current_version = self.store.current_policy_version
+            self.store.complete_group(
+                str(group["group_id"]),
+                current_version,
+                metrics,
+                policy_changed=False,
+            )
+            response.update({"type": "group_completed_no_update", "policy_version": current_version, "update": metrics})
         response["iteration"] = self.store.completed_update_count
         return response
 
@@ -292,6 +335,7 @@ def serve(config: dict[str, Any], mock: bool, debug: bool) -> int:
                 "iteration": worker.store.completed_update_count,
                 "group_size": config["group_size"],
                 "gpu": worker.gpu,
+                "attribution_enabled": bool(config["attribution"]["enabled"]),
             },
             ensure_ascii=False,
         ),

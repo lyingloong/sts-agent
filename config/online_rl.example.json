@@ -23,6 +23,10 @@
     "device": "auto",
     "minimum_free_memory_mib": 12000
   },
+  "attribution": {
+    "enabled": true,
+    "max_abs_advantage": 2.0
+  },
   "update": {
     "max_length": 4096,
     "learning_rate": 1e-5,

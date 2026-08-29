@@ -137,13 +137,21 @@ class RolloutStore:
             result.append(validate_episode_payload(json.loads(path.read_text(encoding="utf-8"))))
         return result
 
-    def complete_group(self, group_id: str, new_policy_version: str, result: dict[str, Any]) -> None:
+    def complete_group(
+        self,
+        group_id: str,
+        new_policy_version: str,
+        result: dict[str, Any],
+        *,
+        policy_changed: bool = True,
+    ) -> None:
         group = self._group(group_id)
         if not self._is_ready(group):
             raise ProtocolError("cannot complete an incomplete rollout group")
         group.update({"status": "completed", "completed_at_utc": now_utc(), "update": result})
-        self.state["current_policy_version"] = new_policy_version
-        self.state["next_policy_index"] = int(self.state.get("next_policy_index", 1)) + 1
+        if policy_changed:
+            self.state["current_policy_version"] = new_policy_version
+            self.state["next_policy_index"] = int(self.state.get("next_policy_index", 1)) + 1
         self.state["active_group_id"] = None
         self._save()
         self._write_group(group)

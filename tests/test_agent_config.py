@@ -43,6 +43,20 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(validated["teacher"]["enabled"])
         self.assertEqual(validated["teacher"]["model"], "deepseek-v4-pro")
 
+    def test_posthoc_feedback_requires_remote_online_rl(self) -> None:
+        config = agent_config._merge(agent_config.DEFAULT_CONFIG, {"posthoc_feedback": {"enabled": True}})
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(config)
+
+    def test_posthoc_feedback_is_valid_for_remote_online_rl(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"policy": {"runtime": "remote_online_rl"}, "posthoc_feedback": {"enabled": True}},
+        )
+        validated = agent_config.validate_config(config)
+        self.assertTrue(validated["posthoc_feedback"]["enabled"])
+        self.assertEqual(validated["posthoc_feedback"]["max_candidates_per_direction"], 10)
+
     def test_invalid_overlay_geometry_is_rejected(self) -> None:
         config = agent_config._merge(agent_config.DEFAULT_CONFIG, {"overlay": {"status": {"geometry": "wide"}}})
         with self.assertRaises(agent_config.ConfigError):

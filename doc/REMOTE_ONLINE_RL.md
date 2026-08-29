@@ -132,6 +132,14 @@ TRL's one-prompt/multiple-text-completions GRPO abstraction, because game state
 changes after every action. Reward components are versioned and written to each
 group's `group.json`: victory, Act, floor and terminal HP fraction.
 
+An optional second path, `attribution.enabled: true`, replaces the all-step
+loss with signed masked GRPO. The Windows controller requests short human
+positive/negative reflection after each terminal rollout, then a local strong
+teacher locates only the relevant sampled steps. The worker updates only those
+steps and closes a group without creating a new adapter if it has no effective
+attributions. This requires the matching local `posthoc_feedback.enabled`
+configuration; the full contract and formula are in [终局人类反思归因 GRPO](POSTHOC_ATTRIBUTION_GRPO.md).
+
 The current reward version is `v2_terminal_progress_heart`:
 
 ```text

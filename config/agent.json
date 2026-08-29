@@ -36,9 +36,9 @@
   },
   "teacher": {
     "enabled": false,
-    "base_url": "https://ws-1ha2dqzqhcry4uty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    "model": "deepseek-v4-flash",
-    "api_key_file": "ali_api.txt",
+    "base_url": "https://api.llm.ustc.edu.cn/",
+    "model": "deepseek-v4-pro",
+    "api_key_file": "ustc_api.txt",
     "timeout_seconds": 90.0,
     "max_retries": 3,
     "temperature": 0.0,

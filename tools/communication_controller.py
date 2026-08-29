@@ -26,6 +26,14 @@ from typing import Any, Callable, TextIO
 from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
 from item_knowledge import potion_effect, relic_effect
+from posthoc_feedback import (
+    SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
+    PosthocFeedbackClient,
+    PosthocFeedbackError,
+    now_utc as posthoc_now_utc,
+    terminal_summary as posthoc_terminal_summary,
+    write_artifact as write_posthoc_artifact,
+)
 from power_knowledge import power_description
 from teacher_client import RemoteTeacherClient, TeacherError
 
@@ -1828,6 +1836,7 @@ class PolicyClient:
         self.disabled_reason: str | None = None
         self.remote_model_id = self.model
         self.online_rl_status: dict[str, Any] = {}
+        self.online_rl_attribution_enabled = False
 
     def _python_executable(self) -> str:
         if self.python != "auto":
@@ -1909,6 +1918,14 @@ class PolicyClient:
                 "本局轨迹已入队；等待下一次 rollout",
                 **common,
                 rollout_index=response.get("episodes_collected"),
+                error=None,
+            )
+        if response.get("type") == "group_completed_no_update":
+            return self.online_rl_status_decision(
+                "本组归因不足，未更新参数；下一组继续使用当前策略",
+                **common,
+                rollout_index=response.get("group_size"),
+                update=response.get("update"),
                 error=None,
             )
         return self.online_rl_status_decision(
@@ -2092,12 +2109,14 @@ class PolicyClient:
             return False
         self.remote_model_id = str(ready.get("model_id") or self.model)
         if self.runtime == "remote_online_rl":
+            self.online_rl_attribution_enabled = bool(ready.get("attribution_enabled"))
             self._set_online_rl_status(
                 "在线策略就绪；等待开始 rollout",
                 policy_version=ready.get("policy_version"),
                 iteration=ready.get("iteration"),
                 group_size=ready.get("group_size"),
                 gpu=ready.get("gpu"),
+                attribution_enabled=self.online_rl_attribution_enabled,
                 error=None,
             )
         print(
@@ -2253,24 +2272,11 @@ class PolicyClient:
             "source": None,
             "overridden": None,
         }
-    def submit_trace(
-        self,
-        trace_path: Path,
-        run_id: str,
-        run_config: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Upload one durable terminal episode to the online worker.
-
-        The file is written locally before this call. A broken SSH connection
-        therefore pauses the next group but never loses the game trajectory.
-        """
+    def submit_episode(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Upload one prepared, validated episode to the resident online worker."""
 
         if self.runtime != "remote_online_rl" or not self.enabled:
             return None
-        try:
-            payload = online_episode_from_trace(trace_path, run_id, run_config)
-        except (OSError, ValueError) as exc:
-            return {"type": "error", "error": f"cannot prepare online episode: {exc}"}
         if not self._start() or self.process is None or self.process.stdin is None or self.process.stdout is None:
             return {"type": "error", "error": self.disabled_reason or "online worker is unavailable"}
         self.request_id += 1
@@ -2292,10 +2298,30 @@ class PolicyClient:
             return {"type": "error", "error": self.disabled_reason}
         if response.get("type") == "error":
             return response
-        if response.get("type") not in {"episode_queued", "policy_updated"}:
+        if response.get("type") not in {"episode_queued", "policy_updated", "group_completed_no_update"}:
             self._disable(f"unexpected online worker response: {response}")
             return {"type": "error", "error": self.disabled_reason}
         return response
+
+    def submit_trace(
+        self,
+        trace_path: Path,
+        run_id: str,
+        run_config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Upload one durable terminal episode to the online worker.
+
+        The file is written locally before this call. A broken SSH connection
+        therefore pauses the next group but never loses the game trajectory.
+        """
+
+        if self.runtime != "remote_online_rl" or not self.enabled:
+            return None
+        try:
+            payload = online_episode_from_trace(trace_path, run_id, run_config)
+        except (OSError, ValueError) as exc:
+            return {"type": "error", "error": f"cannot prepare online episode: {exc}"}
+        return self.submit_episode(payload)
 
     def _ranking_decision(
         self,
@@ -2491,6 +2517,43 @@ def online_episode_from_trace(
         "run_config": run_config,
         "steps": steps,
         "terminal_state": terminal_state,
+    }
+
+
+def request_posthoc_reflection(
+    bridge: TerminalBridge,
+    run_id: str,
+    terminal_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Request short positive/negative feedback after a complete RL rollout.
+
+    This is a separate terminal packet rather than a game action.  A closed
+    client is treated as an explicit skip so a disconnected Overlay cannot
+    leave CommunicationMod blocked on the victory/death screen.
+    """
+
+    try:
+        bridge.send(
+            {
+                "type": "posthoc_reflection_request",
+                "run_id": run_id,
+                "terminal_state": posthoc_terminal_summary(terminal_state),
+            }
+        )
+    except OSError:
+        return {"reinforce": "", "weaken": "", "skipped": True, "reason": "terminal_unavailable"}
+    response = bridge.receive()
+    if response is None:
+        return {"reinforce": "", "weaken": "", "skipped": True, "reason": "terminal_disconnected"}
+    if response.get("type") != "posthoc_reflection":
+        return {"reinforce": "", "weaken": "", "skipped": True, "reason": "invalid_terminal_response"}
+    if response.get("skip") is True:
+        return {"reinforce": "", "weaken": "", "skipped": True, "reason": "human_skipped"}
+    return {
+        "reinforce": str(response.get("reinforce") or ""),
+        "weaken": str(response.get("weaken") or ""),
+        "skipped": False,
+        "reason": "submitted",
     }
 
 
@@ -3011,6 +3074,8 @@ def main() -> int:
         return 2
     raw_dir = project_root / "data" / "raw" / "communication_controller"
     trace_dir = project_root / "data" / "trajectories"
+    reflection_dir = project_root / "data" / "reflections"
+    attribution_dir = project_root / "data" / "attributions"
     raw_dir.mkdir(parents=True, exist_ok=True)
     trace_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"messages-{session_id}.jsonl"
@@ -3018,6 +3083,7 @@ def main() -> int:
     bridge = TerminalBridge(config["server"]["host"], config["server"]["port"])
     policy = PolicyClient(project_root, config)
     teacher = TeacherClient(project_root, config)
+    posthoc = PosthocFeedbackClient(project_root, config["posthoc_feedback"])
     pending: dict[str, Any] | None = None
     current_message: dict[str, Any] | None = None
     run_id: str | None = None
@@ -3115,7 +3181,13 @@ def main() -> int:
     # The game must not expose a start action before local setup has finished.
     # CommunicationMod waits for this stdout handshake.
     teacher.prewarm()
+    posthoc_preflight_error = posthoc.preflight()
     policy.prewarm()
+    if policy.runtime == "remote_online_rl" and policy.enabled and posthoc.enabled != policy.online_rl_attribution_enabled:
+        # The two switches must move together. Either mismatch would silently
+        # change update semantics: old workers would train every step, while a
+        # masked worker would receive no selected steps at all.
+        policy._disable("posthoc_feedback.enabled 与远端 attribution.enabled 必须同时启用或关闭")
 
     # Required handshake. No diagnostics may go to stdout.
     print("ready", flush=True)
@@ -3250,31 +3322,129 @@ def main() -> int:
                         and trace_output is not None
                     ):
                         trace_output.flush()
-                        current_online = policy.online_rl_status
-                        rollout_index = current_online.get("rollout_index")
-                        group_size = current_online.get("group_size")
-                        is_group_final = (
-                            isinstance(rollout_index, int)
-                            and isinstance(group_size, int)
-                            and rollout_index == group_size
-                        )
-                        upload_stage = (
-                            f"正在更新参数：第 {rollout_index}/{group_size} 次 rollout 已结束"
-                            if is_group_final
-                            else f"正在上传第 {rollout_index or '?'} / {group_size or '?'} 次 rollout 轨迹"
-                        )
-                        upload_decision = policy.online_rl_status_decision(upload_stage)
                         try:
-                            bridge.send(
-                                {
-                                    "type": "online_rl_update",
-                                    "model_id": upload_decision["model_id"],
-                                    "online_rl": upload_decision["online_rl"],
-                                }
+                            online_episode = online_episode_from_trace(trace_path, run_id, run_config)
+                        except (OSError, ValueError) as exc:
+                            online_result: dict[str, Any] | None = {
+                                "type": "error",
+                                "error": f"cannot prepare online episode: {exc}",
+                            }
+                        else:
+                            if posthoc.enabled:
+                                reflection_stage = policy.online_rl_status_decision("等待本局终局人工反思")
+                                try:
+                                    bridge.send(
+                                        {
+                                            "type": "online_rl_update",
+                                            "model_id": reflection_stage["model_id"],
+                                            "online_rl": reflection_stage["online_rl"],
+                                        }
+                                    )
+                                except OSError:
+                                    pass
+                                raw_reflection = request_posthoc_reflection(
+                                    bridge,
+                                    run_id,
+                                    online_episode["terminal_state"],
+                                )
+                                reflection = posthoc.normalize_reflection(
+                                    raw_reflection.get("reinforce"),
+                                    raw_reflection.get("weaken"),
+                                ) | {"reason": raw_reflection.get("reason")}
+                                reflection_path = reflection_dir / f"reflection-{run_id}.json"
+                                write_posthoc_artifact(
+                                    reflection_path,
+                                    {
+                                        "schema_version": POSTHOC_SCHEMA_VERSION,
+                                        "kind": "human_reflection",
+                                        "run_id": run_id,
+                                        "run_config": run_config,
+                                        "terminal_state": posthoc_terminal_summary(online_episode["terminal_state"]),
+                                        "reflection": reflection,
+                                        "created_at_utc": posthoc_now_utc(),
+                                    },
+                                )
+                                annotation: dict[str, Any]
+                                if posthoc_preflight_error:
+                                    annotation = {
+                                        "status": "teacher_unavailable",
+                                        "error": posthoc_preflight_error,
+                                        "applied": [],
+                                        "rejected": [],
+                                    }
+                                else:
+                                    annotation_stage = policy.online_rl_status_decision("教师正在定位可强化和应弱化的关键动作")
+                                    try:
+                                        bridge.send(
+                                            {
+                                                "type": "online_rl_update",
+                                                "model_id": annotation_stage["model_id"],
+                                                "online_rl": annotation_stage["online_rl"],
+                                            }
+                                        )
+                                    except OSError:
+                                        pass
+                                    try:
+                                        annotation = posthoc.annotate(reflection, online_episode)
+                                    except PosthocFeedbackError as exc:
+                                        annotation = {
+                                            "status": "teacher_error",
+                                            "error": str(exc),
+                                            "applied": [],
+                                            "rejected": [],
+                                        }
+                                attribution_path = attribution_dir / f"attribution-{run_id}.json"
+                                write_posthoc_artifact(
+                                    attribution_path,
+                                    {
+                                        "schema_version": POSTHOC_SCHEMA_VERSION,
+                                        "kind": "teacher_attribution",
+                                        "run_id": run_id,
+                                        "run_config": run_config,
+                                        "terminal_state": posthoc_terminal_summary(online_episode["terminal_state"]),
+                                        "reflection_path": str(reflection_path.relative_to(project_root)),
+                                        "annotation": annotation,
+                                        "created_at_utc": posthoc_now_utc(),
+                                    },
+                                )
+                                online_episode["attributions"] = list(annotation.get("applied") or [])
+                                write_event(
+                                    {
+                                        "event": "posthoc_feedback_complete",
+                                        "run_id": run_id,
+                                        "reflection_path": str(reflection_path.relative_to(project_root)),
+                                        "attribution_path": str(attribution_path.relative_to(project_root)),
+                                        "status": annotation.get("status"),
+                                        "selected_steps": len(online_episode["attributions"]),
+                                        "at": now_iso(),
+                                    }
+                                )
+
+                            current_online = policy.online_rl_status
+                            rollout_index = current_online.get("rollout_index")
+                            group_size = current_online.get("group_size")
+                            is_group_final = (
+                                isinstance(rollout_index, int)
+                                and isinstance(group_size, int)
+                                and rollout_index == group_size
                             )
-                        except OSError:
-                            pass
-                        online_result = policy.submit_trace(trace_path, run_id, run_config)
+                            upload_stage = (
+                                f"正在更新参数：第 {rollout_index}/{group_size} 次 rollout 已结束"
+                                if is_group_final
+                                else f"正在上传第 {rollout_index or '?'} / {group_size or '?'} 次 rollout 轨迹"
+                            )
+                            upload_decision = policy.online_rl_status_decision(upload_stage)
+                            try:
+                                bridge.send(
+                                    {
+                                        "type": "online_rl_update",
+                                        "model_id": upload_decision["model_id"],
+                                        "online_rl": upload_decision["online_rl"],
+                                    }
+                                )
+                            except OSError:
+                                pass
+                            online_result = policy.submit_episode(online_episode)
                         if online_result is not None:
                             online_decision = policy.record_online_episode_result(online_result)
                             try:
@@ -3302,7 +3472,7 @@ def main() -> int:
                                 file=sys.stderr,
                                 flush=True,
                             )
-                            if online_result.get("type") in {"episode_queued", "policy_updated"}:
+                            if online_result.get("type") in {"episode_queued", "policy_updated", "group_completed_no_update"}:
                                 online_restart_config = run_config.copy()
                     if smoke_bomb_used:
                         smoke_bomb_resume_at = time.monotonic() + SMOKE_BOMB_ANIMATION_DELAY_SECONDS

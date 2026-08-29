@@ -101,6 +101,12 @@ class OverlayFormattingTests(unittest.TestCase):
             "Qwen3-0.6B+sft-v0-r001",
         )
 
+    def test_posthoc_reflection_summary_uses_terminal_facts(self) -> None:
+        rendered = overlay_terminal.posthoc_reflection_text(
+            {"terminal_state": {"screen_type": "GAME_OVER", "act": 2, "floor": 24, "current_hp": 0, "max_hp": 88}}
+        )
+        self.assertEqual(rendered, "GAME_OVER  |  Act 2 Floor 24  |  HP 0/88")
+
     def test_teacher_panel_uses_thinking_and_final_output(self) -> None:
         rendered = overlay_terminal.teacher_panel_text(
             {

@@ -235,6 +235,24 @@ def online_rl_panel_text(status: Any, model_id: Any = None) -> str:
     return "\n".join(lines)
 
 
+def posthoc_reflection_text(packet: dict[str, Any]) -> str:
+    """Summarize a completed rollout without exposing raw terminal state."""
+
+    terminal = packet.get("terminal_state")
+    terminal = terminal if isinstance(terminal, dict) else {}
+    outcome = table_cell(terminal.get("screen_type") or "终局")
+    act = terminal.get("act")
+    floor = terminal.get("floor")
+    hp = terminal.get("current_hp")
+    max_hp = terminal.get("max_hp")
+    details = [outcome]
+    if isinstance(act, int) and isinstance(floor, int):
+        details.append(f"Act {act} Floor {floor}")
+    if isinstance(hp, int) and isinstance(max_hp, int):
+        details.append(f"HP {hp}/{max_hp}")
+    return "  |  ".join(details)
+
+
 def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     """Render the remote teacher's thinking/output without showing candidates."""
     if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
@@ -277,11 +295,13 @@ class OverlayTerminal:
         self.layout_path = Path(__file__).resolve().parents[1] / "data" / "runtime" / "overlay-layout.json"
         self.saved_layout = self._load_layout()
         self.actions: queue.Queue[str] = queue.Queue()
+        self.reflection_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self.network_thread: threading.Thread | None = None
         self.closing = False
         self.pending_view = False
         self._save_after: str | None = None
         self._topmost_after: str | None = None
+        self.reflection_dialog: tk.Toplevel | None = None
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
@@ -1082,6 +1102,124 @@ class OverlayTerminal:
             self._set_controls_enabled(True)
             self.action_entry.focus_set()
 
+    def _show_reflection_dialog(self, packet: dict[str, Any]) -> None:
+        """Collect two short natural-language labels after an online rollout."""
+
+        if self.closing:
+            self.reflection_responses.put({"type": "posthoc_reflection", "skip": True})
+            return
+        if self.reflection_dialog is not None and self.reflection_dialog.winfo_exists():
+            return
+        self.pending_view = False
+        self._set_controls_enabled(False)
+        self._set_connection("等待本局终局反思", WARNING)
+        dialog = tk.Toplevel(self.control)
+        self.reflection_dialog = dialog
+        dialog.title("StS Agent - Rollout Reflection")
+        dialog.geometry("620x500+600+180")
+        dialog.minsize(460, 360)
+        dialog.configure(background=BACKGROUND)
+        dialog.attributes("-topmost", self.always_on_top)
+        dialog.transient(self.control)
+        dialog.grab_set()
+        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
+        outer.grid(sticky="nsew")
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(3, weight=1)
+        outer.grid_rowconfigure(5, weight=1)
+        tk.Label(
+            outer,
+            text="ROLLOUT REFLECTION",
+            foreground=ACCENT,
+            background=BACKGROUND,
+            font=(self.ui_font, 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            outer,
+            text=posthoc_reflection_text(packet),
+            foreground=MUTED,
+            background=BACKGROUND,
+            font=(self.data_font, 9),
+        ).grid(row=1, column=0, sticky="w", pady=(3, 12))
+        tk.Label(
+            outer,
+            text="可强化之处",
+            foreground=ACCENT,
+            background=BACKGROUND,
+            font=(self.ui_font, 10, "bold"),
+        ).grid(row=2, column=0, sticky="w", pady=(0, 4))
+        reinforce = tk.Text(
+            outer,
+            height=6,
+            wrap="word",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=9,
+            pady=7,
+            font=(self.data_font, 10),
+        )
+        reinforce.grid(row=3, column=0, sticky="nsew")
+        tk.Label(
+            outer,
+            text="应弱化之处",
+            foreground=WARNING,
+            background=BACKGROUND,
+            font=(self.ui_font, 10, "bold"),
+        ).grid(row=4, column=0, sticky="w", pady=(10, 4))
+        weaken = tk.Text(
+            outer,
+            height=6,
+            wrap="word",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=9,
+            pady=7,
+            font=(self.data_font, 10),
+        )
+        weaken.grid(row=5, column=0, sticky="nsew")
+        buttons = tk.Frame(outer, background=BACKGROUND)
+        buttons.grid(row=6, column=0, sticky="e", pady=(12, 0))
+
+        def finish(skip: bool) -> None:
+            if self.reflection_dialog is not dialog:
+                return
+            response = {
+                "type": "posthoc_reflection",
+                "skip": skip,
+                "reinforce": "" if skip else reinforce.get("1.0", "end-1c").strip(),
+                "weaken": "" if skip else weaken.get("1.0", "end-1c").strip(),
+            }
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.reflection_dialog = None
+            self.reflection_responses.put(response)
+            self._set_connection("终局反思已提交；正在请求教师归因", ACCENT)
+
+        skip_button = self._button(buttons, "跳过本局", lambda: finish(True), compact=True)
+        skip_button.grid(row=0, column=0, padx=(0, 8))
+        submit = self._button(buttons, "提交反思", lambda: finish(False), compact=True)
+        submit.configure(
+            background=ACCENT,
+            foreground="#10221f",
+            activebackground="#61ddc2",
+            activeforeground="#10221f",
+            font=(self.ui_font, 9, "bold"),
+        )
+        submit.grid(row=0, column=1)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(True))
+        reinforce.focus_set()
+
     def _submit_entry(self, _event: tk.Event[tk.Misc]) -> str:
         self.submit_action()
         return "break"
@@ -1143,6 +1281,11 @@ class OverlayTerminal:
                             writer.flush()
                         elif packet_type == "online_rl_update":
                             self._post_ui(self._show_online_rl_update, packet)
+                        elif packet_type == "posthoc_reflection_request":
+                            self._post_ui(self._show_reflection_dialog, packet)
+                            response = self.reflection_responses.get()
+                            writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                            writer.flush()
                         elif packet_type == "shutdown":
                             self._post_ui(self._set_connection, str(packet.get("message", "controller 已停止")), ERROR)
                             break
@@ -1228,7 +1371,14 @@ class OverlayTerminal:
         self._save_after = None
         self._topmost_after = None
         self._save_layout()
+        self.reflection_responses.put({"type": "posthoc_reflection", "skip": True})
         self.actions.put("q")
+        if self.reflection_dialog is not None:
+            try:
+                self.reflection_dialog.destroy()
+            except tk.TclError:
+                pass
+            self.reflection_dialog = None
         try:
             self.control.destroy()
         except tk.TclError:

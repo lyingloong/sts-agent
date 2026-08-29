@@ -322,6 +322,82 @@ class RemoteTeacherClient:
             raise TeacherError("teacher returned a non-object response")
         return value
 
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        prompt_version: str,
+        thinking: bool | None = None,
+        json_mode: bool | None = None,
+        streaming: bool | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        on_update: TeacherUpdate | None = None,
+    ) -> dict[str, Any]:
+        """Run a bounded generic completion through the configured teacher.
+
+        Action selection remains the primary public API of this class.  This
+        narrow method lets post-hoc evaluators share the same credential,
+        retry, timeout, and OpenAI-compatible transport without inheriting the
+        action-label parser or storing reasoning traces.
+        """
+
+        if not self.enabled:
+            raise TeacherError("teacher is disabled")
+        if not messages or not all(isinstance(item, dict) for item in messages):
+            raise TeacherError("teacher completion requires non-empty messages")
+        use_thinking = self.thinking if thinking is None else bool(thinking)
+        use_json_mode = self.json_mode if json_mode is None else bool(json_mode)
+        use_streaming = self.streaming if streaming is None else bool(streaming)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature if temperature is None else float(temperature),
+            "max_tokens": self.max_tokens if max_tokens is None else int(max_tokens),
+            "stream": use_streaming,
+            "thinking": {"type": "enabled" if use_thinking else "disabled"},
+        }
+        if use_streaming:
+            payload["stream_options"] = {"include_usage": True}
+        if use_json_mode and not use_thinking:
+            payload["response_format"] = {"type": "json_object"}
+
+        self.request_id += 1
+        started = time.monotonic()
+        last_error: TeacherError | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self._request(payload, on_update)
+                choices = response.get("choices")
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    raise TeacherError("teacher response contains no choice")
+                choice = choices[0]
+                message = choice.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(content, str) or not content.strip():
+                    raise TeacherError("teacher response contains no text content")
+                usage = response.get("usage")
+                self.last_error = None
+                return {
+                    "request_id": self.request_id,
+                    "model_id": str(response.get("model") or self.model),
+                    "prompt_version": prompt_version,
+                    "latency_ms": round((time.monotonic() - started) * 1000),
+                    "attempt": attempt + 1,
+                    "finish_reason": str(choice.get("finish_reason") or ""),
+                    "output": display_text(content, limit=16000),
+                    "usage": {
+                        "prompt_tokens": _usage_value(usage, "prompt_tokens"),
+                        "completion_tokens": _usage_value(usage, "completion_tokens"),
+                        "total_tokens": _usage_value(usage, "total_tokens"),
+                    },
+                }
+            except TeacherError as exc:
+                last_error = exc
+        assert last_error is not None
+        self.last_error = str(last_error)
+        raise last_error
+
     def select(
         self,
         observation: dict[str, Any],

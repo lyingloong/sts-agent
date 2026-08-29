@@ -61,6 +61,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "streaming": True,
         "screens": ["ALL"],
     },
+    "posthoc_feedback": {
+        "enabled": False,
+        "base_url": "https://api.llm.ustc.edu.cn/v1",
+        "model": "deepseek-v4-pro",
+        "api_key_file": "deepseek_api.txt",
+        "timeout_seconds": 180.0,
+        "max_retries": 1,
+        "temperature": 0.0,
+        "max_tokens": 2048,
+        "max_input_chars": 48000,
+        "max_reflection_chars": 4000,
+        "max_candidates_per_direction": 10,
+        "max_applied_per_direction": 8,
+        "min_confidence": 0.75,
+    },
     "overlay": {
         "always_on_top": True,
         "frameless": True,
@@ -136,6 +151,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     server = config["server"]
     policy = config["policy"]
     teacher = config["teacher"]
+    posthoc = config["posthoc_feedback"]
     confidence = policy["confidence_auto"]
     overlay = config["overlay"]
 
@@ -220,6 +236,39 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError(f"teacher.screens contains unsupported values: {', '.join(sorted(unknown_teacher_screens))}")
     if teacher["enabled"] and policy["enabled"]:
         raise ConfigError("teacher.enabled and policy.enabled cannot both be true; disable local policy for teacher collection")
+
+    _require_bool(posthoc["enabled"], "posthoc_feedback.enabled")
+    _require_string(posthoc["base_url"], "posthoc_feedback.base_url")
+    if not str(posthoc["base_url"]).startswith(("https://", "http://")):
+        raise ConfigError("posthoc_feedback.base_url must start with http:// or https://")
+    _require_string(posthoc["model"], "posthoc_feedback.model")
+    _require_string(posthoc["api_key_file"], "posthoc_feedback.api_key_file")
+    posthoc_key_path = Path(str(posthoc["api_key_file"]))
+    if posthoc_key_path.is_absolute() or ".." in posthoc_key_path.parts:
+        raise ConfigError("posthoc_feedback.api_key_file must be a project-relative path")
+    _require_number(posthoc["timeout_seconds"], "posthoc_feedback.timeout_seconds", 1.0)
+    posthoc_retries = posthoc["max_retries"]
+    if isinstance(posthoc_retries, bool) or not isinstance(posthoc_retries, int) or not 0 <= posthoc_retries <= 5:
+        raise ConfigError("posthoc_feedback.max_retries must be an integer from 0 to 5")
+    _require_number(posthoc["temperature"], "posthoc_feedback.temperature", 0.0, 2.0)
+    posthoc_tokens = posthoc["max_tokens"]
+    if isinstance(posthoc_tokens, bool) or not isinstance(posthoc_tokens, int) or not 128 <= posthoc_tokens <= 8192:
+        raise ConfigError("posthoc_feedback.max_tokens must be an integer from 128 to 8192")
+    posthoc_input = posthoc["max_input_chars"]
+    if isinstance(posthoc_input, bool) or not isinstance(posthoc_input, int) or not 1024 <= posthoc_input <= 262144:
+        raise ConfigError("posthoc_feedback.max_input_chars must be an integer from 1024 to 262144")
+    reflection_limit = posthoc["max_reflection_chars"]
+    if isinstance(reflection_limit, bool) or not isinstance(reflection_limit, int) or not 128 <= reflection_limit <= 16384:
+        raise ConfigError("posthoc_feedback.max_reflection_chars must be an integer from 128 to 16384")
+    candidate_limit = posthoc["max_candidates_per_direction"]
+    if isinstance(candidate_limit, bool) or not isinstance(candidate_limit, int) or not 1 <= candidate_limit <= 20:
+        raise ConfigError("posthoc_feedback.max_candidates_per_direction must be an integer from 1 to 20")
+    applied_limit = posthoc["max_applied_per_direction"]
+    if isinstance(applied_limit, bool) or not isinstance(applied_limit, int) or not 1 <= applied_limit <= candidate_limit:
+        raise ConfigError("posthoc_feedback.max_applied_per_direction must be an integer from 1 to max_candidates_per_direction")
+    _require_number(posthoc["min_confidence"], "posthoc_feedback.min_confidence", 0.0, 1.0)
+    if posthoc["enabled"] and (not policy["enabled"] or policy["runtime"] != "remote_online_rl"):
+        raise ConfigError("posthoc_feedback.enabled requires policy.enabled with policy.runtime=remote_online_rl")
 
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")

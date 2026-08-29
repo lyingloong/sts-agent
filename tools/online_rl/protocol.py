@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,39 @@ def validate_episode_payload(value: Any) -> dict[str, Any]:
             }
         )
     terminal_state = require_object(payload.get("terminal_state"), "episode.terminal_state")
+    attributions = payload.get("attributions", [])
+    if not isinstance(attributions, list):
+        raise ProtocolError("episode.attributions must be a list")
+    normalized_attributions: list[dict[str, Any]] = []
+    attributed_steps: set[int] = set()
+    for index, attribution in enumerate(attributions):
+        item = require_object(attribution, f"episode.attributions[{index}]")
+        step_id = item.get("step_id")
+        if isinstance(step_id, bool) or not isinstance(step_id, int) or step_id not in seen_steps:
+            raise ProtocolError(f"episode.attributions[{index}].step_id must identify a sampled step")
+        if step_id in attributed_steps:
+            raise ProtocolError(f"episode.attributions[{index}].step_id is duplicated")
+        attributed_steps.add(step_id)
+        direction = item.get("direction")
+        if direction not in {"reinforce", "weaken"}:
+            raise ProtocolError(f"episode.attributions[{index}].direction must be reinforce or weaken")
+        confidence = item.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)):
+            raise ProtocolError(f"episode.attributions[{index}].confidence must be finite")
+        confidence = float(confidence)
+        if not 0.0 <= confidence <= 1.0:
+            raise ProtocolError(f"episode.attributions[{index}].confidence must be within [0, 1]")
+        severity = item.get("severity")
+        if isinstance(severity, bool) or not isinstance(severity, int) or severity not in {1, 2, 3}:
+            raise ProtocolError(f"episode.attributions[{index}].severity must be 1, 2, or 3")
+        normalized_attributions.append(
+            {
+                "step_id": step_id,
+                "direction": direction,
+                "confidence": confidence,
+                "severity": severity,
+            }
+        )
     return {
         "episode_id": episode_id,
         "group_id": group_id,
@@ -84,6 +118,7 @@ def validate_episode_payload(value: Any) -> dict[str, Any]:
         "run_config": key,
         "steps": normalized_steps,
         "terminal_state": terminal_state,
+        "attributions": normalized_attributions,
     }
 
 

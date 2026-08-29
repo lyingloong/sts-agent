@@ -27,6 +27,8 @@ data/raw/
 data/trajectories/
 data/datasets/
 data/transfer/
+data/reflections/
+data/attributions/
 data/fixtures/generated/
 data/runtime/
 models/

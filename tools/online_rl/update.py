@@ -189,18 +189,81 @@ class TrainableAliasPolicy:
             for alias, value in zip(aliases, values.tolist())
         ]
 
-    def update(self, episodes: list[dict[str, Any]], rewards: list[float], sampling_temperature: float = 1.0) -> dict[str, Any]:
+    def update(
+        self,
+        episodes: list[dict[str, Any]],
+        rewards: list[float],
+        sampling_temperature: float = 1.0,
+        *,
+        attribution_enabled: bool = False,
+        max_abs_advantage: float = 2.0,
+    ) -> dict[str, Any]:
         if len(episodes) != len(rewards) or len(episodes) < 2:
             raise ValueError("a group-relative update requires at least two rewarded episodes")
         if sampling_temperature <= 0:
             raise ValueError("sampling_temperature must be positive")
+        if max_abs_advantage <= 0:
+            raise ValueError("max_abs_advantage must be positive")
         mean = sum(rewards) / len(rewards)
         variance = sum((reward - mean) ** 2 for reward in rewards) / len(rewards)
         scale = math.sqrt(variance)
         advantages = [0.0 if scale < 1e-8 else (reward - mean) / (scale + 1e-8) for reward in rewards]
-        step_count = sum(len(episode["steps"]) for episode in episodes)
-        if step_count < 1:
+        all_step_count = sum(len(episode["steps"]) for episode in episodes)
+        if all_step_count < 1:
             raise ValueError("rollout group has no steps")
+
+        weighted_steps: list[tuple[dict[str, Any], float, float]] = []
+        reinforce_steps = 0
+        weaken_steps = 0
+        if attribution_enabled:
+            for episode, advantage in zip(episodes, advantages):
+                by_step_id = {int(step["step_id"]): step for step in episode["steps"]}
+                # Human direction always controls the sign. Group-relative
+                # reward supplies only update strength, preventing a negative
+                # note in a low-reward rollout from being accidentally
+                # reinforced by a double-negative sign flip.
+                magnitude = min(abs(advantage), max_abs_advantage)
+                for attribution in episode.get("attributions", []):
+                    step = by_step_id.get(int(attribution["step_id"]))
+                    if step is None:
+                        raise ValueError("attribution references an unknown sampled step")
+                    weight = float(attribution["confidence"]) * (float(attribution["severity"]) / 3.0)
+                    if weight <= 0 or magnitude <= 0:
+                        continue
+                    signed_advantage = magnitude if attribution["direction"] == "reinforce" else -magnitude
+                    weighted_steps.append((step, signed_advantage, weight))
+                    if attribution["direction"] == "reinforce":
+                        reinforce_steps += 1
+                    else:
+                        weaken_steps += 1
+        else:
+            for episode, advantage in zip(episodes, advantages):
+                weighted_steps.extend((step, advantage, 1.0) for step in episode["steps"])
+
+        total_weight = sum(weight for _, _, weight in weighted_steps)
+        base_result: dict[str, Any] = {
+            "algorithm": "signed_masked_episode_grpo" if attribution_enabled else "episode_group_relative_ppo",
+            "rewards": rewards,
+            "advantages": advantages,
+            "mean_reward": mean,
+            "reward_std": scale,
+            "steps": len(weighted_steps),
+            "available_steps": all_step_count,
+            "sampling_temperature": sampling_temperature,
+            "attribution": {
+                "enabled": attribution_enabled,
+                "reinforce_steps": reinforce_steps,
+                "weaken_steps": weaken_steps,
+                "weight_sum": total_weight,
+                "max_abs_advantage": max_abs_advantage,
+            },
+        }
+        if not weighted_steps:
+            return base_result | {
+                "updated": False,
+                "skip_reason": "zero_group_reward_std" if scale < 1e-8 else "no_effective_attributions",
+                "losses": [],
+            }
 
         self.model.train()
         self.model.config.use_cache = False
@@ -211,47 +274,36 @@ class TrainableAliasPolicy:
         for _ in range(self.config.update_epochs):
             self.optimizer.zero_grad(set_to_none=True)
             epoch_loss = 0.0
-            for episode, advantage in zip(episodes, advantages):
-                for step in episode["steps"]:
-                    aliases, raw_logprobs = self.action_logprobs(
-                        step["observation"],
-                        step["legal_actions"],
-                        use_cache=False,
-                    )
-                    try:
-                        selected_index = aliases.index(step["selected_alias"])
-                    except ValueError as exc:
-                        raise ValueError("selected alias disappeared from an online RL step") from exc
-                    # The stored behavior logprob includes the rollout
-                    # temperature, so apply that same distribution here.
-                    current_logprob = self.torch.log_softmax(raw_logprobs / sampling_temperature, dim=0)[selected_index]
-                    old_logprob = float(step["old_logprob"])
-                    ratio = self.torch.exp(current_logprob - old_logprob)
-                    unclipped = ratio * advantage
-                    clipped = self.torch.clamp(ratio, 1.0 - self.config.clip_range, 1.0 + self.config.clip_range) * advantage
-                    loss = -self.torch.minimum(unclipped, clipped) / step_count
-                    loss.backward()
-                    epoch_loss += float(loss.detach())
-                    if self.config.empty_cache_between_steps and self.torch.cuda.is_available():
-                        # Each action has an independently-sized observation.
-                        # Returning freed blocks to CUDA prevents a long map
-                        # prompt from fragmenting the later update steps.
-                        self.torch.cuda.empty_cache()
+            for step, advantage, weight in weighted_steps:
+                aliases, raw_logprobs = self.action_logprobs(
+                    step["observation"],
+                    step["legal_actions"],
+                    use_cache=False,
+                )
+                try:
+                    selected_index = aliases.index(step["selected_alias"])
+                except ValueError as exc:
+                    raise ValueError("selected alias disappeared from an online RL step") from exc
+                # The stored behavior logprob includes the rollout
+                # temperature, so apply that same distribution here.
+                current_logprob = self.torch.log_softmax(raw_logprobs / sampling_temperature, dim=0)[selected_index]
+                old_logprob = float(step["old_logprob"])
+                ratio = self.torch.exp(current_logprob - old_logprob)
+                unclipped = ratio * advantage
+                clipped = self.torch.clamp(ratio, 1.0 - self.config.clip_range, 1.0 + self.config.clip_range) * advantage
+                loss = -weight * self.torch.minimum(unclipped, clipped) / total_weight
+                loss.backward()
+                epoch_loss += float(loss.detach())
+                if self.config.empty_cache_between_steps and self.torch.cuda.is_available():
+                    # Each action has an independently-sized observation.
+                    # Returning freed blocks to CUDA prevents a long map
+                    # prompt from fragmenting the later update steps.
+                    self.torch.cuda.empty_cache()
             grad_norm = float(self.torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm))
             self.optimizer.step()
             losses.append(epoch_loss)
         self.model.eval()
-        result = {
-            "algorithm": "episode_group_relative_ppo",
-            "rewards": rewards,
-            "advantages": advantages,
-            "mean_reward": mean,
-            "reward_std": scale,
-            "steps": step_count,
-            "losses": losses,
-            "grad_norm": grad_norm,
-            "sampling_temperature": sampling_temperature,
-        }
+        result = base_result | {"updated": True, "losses": losses, "grad_norm": grad_norm}
         if self.torch.cuda.is_available():
             result["peak_memory_mib"] = round(
                 self.torch.cuda.max_memory_allocated(self.device) / (1024 * 1024),

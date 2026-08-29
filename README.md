@@ -72,6 +72,7 @@ tools/                  controller、知识库、导出与客户端工具
 - [在线纠正式模仿学习设计参考](doc/ONLINE_DAGGER.md)
 - [教师场景化提示词说明](doc/TEACHER_PROMPTS.md)
 - [远程推理与单 GPU 在线 RL](doc/REMOTE_ONLINE_RL.md)
+- [终局人类反思归因 GRPO](doc/POSTHOC_ATTRIBUTION_GRPO.md)
 - [数据目录和保留策略](data/README.md)
 
 ## 验证
