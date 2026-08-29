@@ -84,6 +84,55 @@ def terminal_summary(terminal_state: dict[str, Any]) -> dict[str, Any]:
     return {key: terminal_state.get(key) for key in fields if key in terminal_state}
 
 
+def action_review_from_trace(trace_path: Path) -> list[dict[str, Any]]:
+    """Build a compact chronological review from every accepted trace action.
+
+    Unlike the policy ledger, this includes controller-owned environment actions
+    so the human can understand reward/shop transitions while reflecting on a
+    full game.  It deliberately excludes observations and legal-action sets.
+    """
+
+    source_labels = {
+        "online_policy_sample": "模型",
+        "environment_auto": "自动",
+        "teacher_auto": "教师",
+        "model_auto": "模型",
+        "human_override": "人工",
+    }
+    result: list[dict[str, Any]] = []
+    with trace_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or record.get("accepted") is not True:
+                continue
+            action = record.get("action")
+            action = action if isinstance(action, dict) else {}
+            decision = record.get("decision")
+            decision = decision if isinstance(decision, dict) else {}
+            state = record.get("pre_state")
+            state = state if isinstance(state, dict) else {}
+            raw_source = str(decision.get("source") or "")
+            result.append(
+                {
+                    "step_id": record.get("step_id"),
+                    "act": state.get("act"),
+                    "floor": state.get("floor"),
+                    "screen_type": record.get("screen_type") or state.get("screen_type"),
+                    "source": source_labels.get(raw_source, "其他"),
+                    "action": compact_text(
+                        action.get("label") or action.get("command") or action.get("id") or "未知动作",
+                        300,
+                    ),
+                }
+            )
+    return result
+
+
 def action_ledger(episode: dict[str, Any]) -> list[dict[str, Any]]:
     """Make teacher-visible, stable references to sampled policy actions."""
 

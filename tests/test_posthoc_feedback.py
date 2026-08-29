@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -37,6 +39,35 @@ class PosthocFeedbackTests(unittest.TestCase):
         self.assertEqual([item["step_id"] for item in ledger], [3, 4])
         self.assertEqual(ledger[0]["selected_action"]["label"], "出牌 打击")
         self.assertNotIn("A2", str(ledger))
+
+    def test_trace_action_review_preserves_model_and_automatic_actions(self) -> None:
+        records = [
+            {
+                "step_id": 1,
+                "accepted": True,
+                "screen_type": "COMBAT_REWARD",
+                "pre_state": {"act": 1, "floor": 3},
+                "decision": {"source": "environment_auto"},
+                "action": {"label": "自动拾取金币 25"},
+            },
+            {
+                "step_id": 2,
+                "accepted": True,
+                "screen_type": "NONE",
+                "pre_state": {"act": 1, "floor": 4},
+                "decision": {"source": "online_policy_sample"},
+                "action": {"label": "出牌 打击 -> 敌人 0"},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in records) + "\n", encoding="utf-8")
+            review = posthoc_feedback.action_review_from_trace(path)
+        self.assertEqual(len(review), 2)
+        self.assertEqual(review[0]["source"], "自动")
+        self.assertEqual(review[0]["action"], "自动拾取金币 25")
+        self.assertEqual(review[1]["source"], "模型")
+        self.assertEqual(review[1]["floor"], 4)
 
     def test_validation_filters_low_confidence_and_conflicts(self) -> None:
         result = posthoc_feedback.validate_attributions(

@@ -107,6 +107,18 @@ def read_posthoc_reflection(packet: dict, use_color: bool) -> dict:
     act = terminal.get("act", "?")
     floor = terminal.get("floor", "?")
     print(f"\n本局结束：{outcome} | Act {act} Floor {floor}")
+    action_review = packet.get("action_review")
+    if isinstance(action_review, list) and action_review:
+        print("\n本局动作复盘")
+        for index, item in enumerate(action_review, start=1):
+            if not isinstance(item, dict):
+                continue
+            step = item.get("step_id")
+            step_text = f"#{step}" if isinstance(step, int) else f"#{index}"
+            action = str(item.get("action") or "未知动作")
+            source = str(item.get("source") or "其他")
+            screen = str(item.get("screen_type") or "?")
+            print(f"{step_text}  {screen}  [{source}] {action}")
     print("填写本局可强化与应弱化的关键操作；两项均留空即跳过。")
     try:
         reinforce = input("可强化> ").strip()

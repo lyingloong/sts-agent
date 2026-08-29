@@ -30,6 +30,7 @@ from posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
     PosthocFeedbackError,
+    action_review_from_trace,
     now_utc as posthoc_now_utc,
     terminal_summary as posthoc_terminal_summary,
     write_artifact as write_posthoc_artifact,
@@ -2524,6 +2525,7 @@ def request_posthoc_reflection(
     bridge: TerminalBridge,
     run_id: str,
     terminal_state: dict[str, Any],
+    action_review: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Request short positive/negative feedback after a complete RL rollout.
 
@@ -2538,6 +2540,7 @@ def request_posthoc_reflection(
                 "type": "posthoc_reflection_request",
                 "run_id": run_id,
                 "terminal_state": posthoc_terminal_summary(terminal_state),
+                "action_review": action_review,
             }
         )
     except OSError:
@@ -3346,6 +3349,7 @@ def main() -> int:
                                     bridge,
                                     run_id,
                                     online_episode["terminal_state"],
+                                    action_review_from_trace(trace_path),
                                 )
                                 reflection = posthoc.normalize_reflection(
                                     raw_reflection.get("reinforce"),

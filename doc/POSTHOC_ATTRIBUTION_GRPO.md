@@ -52,7 +52,7 @@
 
 1. 正常以 `policy.runtime: "remote_online_rl"` 启动游戏与 Overlay。
 2. 每个 rollout 的策略动作仍由冻结的远端 adapter 自动采样和执行。
-3. `GAME_OVER` 或 `VICTORY` 后，Overlay 弹出 `ROLLOUT REFLECTION`。两栏均可留空；点击“跳过本局”也可继续。
+3. `GAME_OVER` 或 `VICTORY` 后，Overlay 弹出 `ROLLOUT REFLECTION`，其中按时间顺序显示本局全部已确认动作（`step_id`、Act-Floor、场景、模型/自动来源和动作语义）。两栏均可留空；点击“跳过本局”也可继续。
 4. controller 保存人类文字，然后使用 DeepSeek 生成每个方向至多 10 个候选归因。
 5. 本地校验 `step_id`、方向、置信度、严重度和冲突；仅保留每方向最高置信度的 8 个、且 `confidence >= 0.75` 的动作。
 6. 完整 episode 与筛选后的归因上传。第 4 局结束时，同一远端 GPU 进行一次 QLoRA 更新并保存新版本。

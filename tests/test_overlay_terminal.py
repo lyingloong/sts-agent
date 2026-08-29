@@ -107,6 +107,30 @@ class OverlayFormattingTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "GAME_OVER  |  Act 2 Floor 24  |  HP 0/88")
 
+    def test_posthoc_action_review_lists_all_actions_with_context(self) -> None:
+        rendered = overlay_terminal.action_review_text(
+            [
+                {
+                    "step_id": 1,
+                    "act": 1,
+                    "floor": 3,
+                    "screen_type": "COMBAT_REWARD",
+                    "source": "自动",
+                    "action": "自动拾取金币 25",
+                },
+                {
+                    "step_id": 2,
+                    "act": 1,
+                    "floor": 4,
+                    "screen_type": "NONE",
+                    "source": "模型",
+                    "action": "出牌 打击 -> 敌人 0",
+                },
+            ]
+        )
+        self.assertIn("#1  A1 F3  COMBAT_REWARD  [自动] 自动拾取金币 25", rendered)
+        self.assertIn("#2  A1 F4  NONE  [模型] 出牌 打击 -> 敌人 0", rendered)
+
     def test_teacher_panel_uses_thinking_and_final_output(self) -> None:
         rendered = overlay_terminal.teacher_panel_text(
             {

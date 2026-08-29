@@ -253,6 +253,27 @@ def posthoc_reflection_text(packet: dict[str, Any]) -> str:
     return "  |  ".join(details)
 
 
+def action_review_text(value: Any) -> str:
+    """Render the full, compact chronological action list for reflection."""
+
+    if not isinstance(value, list) or not value:
+        return "本局没有可复盘的已确认动作。"
+    lines: list[str] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        step = item.get("step_id")
+        step_text = f"#{step}" if isinstance(step, int) else f"#{index}"
+        act = item.get("act")
+        floor = item.get("floor")
+        location = f"A{act} F{floor}" if isinstance(act, int) and isinstance(floor, int) else "A? F?"
+        screen = table_cell(item.get("screen_type") or "?")
+        source = table_cell(item.get("source") or "其他")
+        action = table_cell(item.get("action") or "未知动作")
+        lines.append(f"{step_text}  {location}  {screen}  [{source}] {action}")
+    return "\n".join(lines) if lines else "本局没有可复盘的已确认动作。"
+
+
 def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     """Render the remote teacher's thinking/output without showing candidates."""
     if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
@@ -1116,8 +1137,8 @@ class OverlayTerminal:
         dialog = tk.Toplevel(self.control)
         self.reflection_dialog = dialog
         dialog.title("StS Agent - Rollout Reflection")
-        dialog.geometry("620x500+600+180")
-        dialog.minsize(460, 360)
+        dialog.geometry("780x760+540+120")
+        dialog.minsize(580, 540)
         dialog.configure(background=BACKGROUND)
         dialog.attributes("-topmost", self.always_on_top)
         dialog.transient(self.control)
@@ -1127,8 +1148,9 @@ class OverlayTerminal:
         dialog.grid_rowconfigure(0, weight=1)
         dialog.grid_columnconfigure(0, weight=1)
         outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(3, weight=1)
+        outer.grid_rowconfigure(3, weight=3)
         outer.grid_rowconfigure(5, weight=1)
+        outer.grid_rowconfigure(7, weight=1)
         tk.Label(
             outer,
             text="ROLLOUT REFLECTION",
@@ -1145,11 +1167,49 @@ class OverlayTerminal:
         ).grid(row=1, column=0, sticky="w", pady=(3, 12))
         tk.Label(
             outer,
+            text="本局动作复盘",
+            foreground=TEXT,
+            background=BACKGROUND,
+            font=(self.ui_font, 10, "bold"),
+        ).grid(row=2, column=0, sticky="w", pady=(0, 4))
+        review_frame = tk.Frame(outer, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
+        review_frame.grid(row=3, column=0, sticky="nsew")
+        review_frame.grid_rowconfigure(0, weight=1)
+        review_frame.grid_columnconfigure(0, weight=1)
+        review = tk.Text(
+            review_frame,
+            wrap="word",
+            state="normal",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=9,
+            pady=7,
+            font=(self.data_font, 9),
+        )
+        review.grid(row=0, column=0, sticky="nsew")
+        review.insert("1.0", action_review_text(packet.get("action_review")))
+        review.configure(state="disabled")
+        review_scroll = tk.Scrollbar(
+            review_frame,
+            command=review.yview,
+            relief="flat",
+            borderwidth=0,
+            background=BUTTON,
+            activebackground=BUTTON_ACTIVE,
+            troughcolor=FIELD,
+        )
+        review_scroll.grid(row=0, column=1, sticky="ns")
+        review.configure(yscrollcommand=review_scroll.set)
+        tk.Label(
+            outer,
             text="可强化之处",
             foreground=ACCENT,
             background=BACKGROUND,
             font=(self.ui_font, 10, "bold"),
-        ).grid(row=2, column=0, sticky="w", pady=(0, 4))
+        ).grid(row=4, column=0, sticky="w", pady=(10, 4))
         reinforce = tk.Text(
             outer,
             height=6,
@@ -1163,14 +1223,14 @@ class OverlayTerminal:
             pady=7,
             font=(self.data_font, 10),
         )
-        reinforce.grid(row=3, column=0, sticky="nsew")
+        reinforce.grid(row=5, column=0, sticky="nsew")
         tk.Label(
             outer,
             text="应弱化之处",
             foreground=WARNING,
             background=BACKGROUND,
             font=(self.ui_font, 10, "bold"),
-        ).grid(row=4, column=0, sticky="w", pady=(10, 4))
+        ).grid(row=6, column=0, sticky="w", pady=(10, 4))
         weaken = tk.Text(
             outer,
             height=6,
@@ -1184,9 +1244,9 @@ class OverlayTerminal:
             pady=7,
             font=(self.data_font, 10),
         )
-        weaken.grid(row=5, column=0, sticky="nsew")
+        weaken.grid(row=7, column=0, sticky="nsew")
         buttons = tk.Frame(outer, background=BACKGROUND)
-        buttons.grid(row=6, column=0, sticky="e", pady=(12, 0))
+        buttons.grid(row=8, column=0, sticky="e", pady=(12, 0))
 
         def finish(skip: bool) -> None:
             if self.reflection_dialog is not dialog:
