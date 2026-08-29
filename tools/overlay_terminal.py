@@ -114,7 +114,9 @@ def history_line(item: dict[str, Any]) -> str:
     """Render one compact accepted-action history entry for the state window."""
     action = table_cell(item.get("action") or item.get("action_id") or "未知动作")
     step = item.get("step_id")
-    return f"#{step} {action}" if step is not None else action
+    prefix = "[自动] " if item.get("source") == "environment_auto" else ""
+    text = prefix + action
+    return f"#{step} {text}" if step is not None else text
 
 
 def state_panel_text(overlay: Any, divider_columns: int = 36) -> str:
@@ -978,6 +980,7 @@ class OverlayTerminal:
         self._clear_candidate_actions()
         teacher_mode = isinstance(decision, dict) and decision.get("mode") == "teacher_collection"
         online_rl_mode = isinstance(decision, dict) and decision.get("mode") == "remote_online_rl"
+        environment_mode = isinstance(decision, dict) and decision.get("mode") == "environment_automation"
         if online_rl_mode:
             self._set_online_rl_panel(decision.get("online_rl"), decision.get("model_id"))
         if teacher_mode:
@@ -1032,9 +1035,19 @@ class OverlayTerminal:
                     fallback.grid(row=1, column=0, sticky="ew", pady=(0, 5), padx=7)
                     self.candidate_buttons.append(fallback)
             else:
-                self.candidate_title.configure(text="模型候选")
-                meta = "正在计算" if packet.get("model_pending") or status == "请求中" else f"{count} 个选项"
-                self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
+                if environment_mode:
+                    environment = decision.get("environment") if isinstance(decision, dict) else {}
+                    reason = table_cell(environment.get("reason") if isinstance(environment, dict) else "推进界面")
+                    self.candidate_title.configure(text="环境自动推进")
+                    self.candidate_meta.configure(text="Controller  ·  已自动执行")
+                    automatic = self._button(self.candidate_frame, reason, lambda: None, compact=True)
+                    automatic.configure(anchor="w", padx=10, state="disabled", disabledforeground=TEXT)
+                    automatic.grid(row=1, column=0, sticky="ew", pady=(0, 5), padx=7)
+                    self.candidate_buttons.append(automatic)
+                else:
+                    self.candidate_title.configure(text="模型候选")
+                    meta = "正在计算" if packet.get("model_pending") or status == "请求中" else f"{count} 个选项"
+                    self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
             if not online_rl_mode and isinstance(candidates, list):
                 for index, candidate in enumerate(candidates, start=1):
                     if not isinstance(candidate, dict):
@@ -1057,7 +1070,13 @@ class OverlayTerminal:
         elif packet.get("auto_execute"):
             self.pending_view = False
             self._set_controls_enabled(False)
-            prefix = "在线策略已执行" if online_rl_mode else "教师已自动执行"
+            prefix = (
+                "在线策略已执行"
+                if online_rl_mode
+                else "环境已自动执行"
+                if environment_mode
+                else "教师已自动执行"
+            )
             self._set_connection(prefix + "：" + str(decision.get("model_action", "-")), ACCENT)
         else:
             self._set_controls_enabled(True)

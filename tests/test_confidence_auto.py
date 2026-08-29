@@ -107,7 +107,95 @@ def combat_reward_message() -> dict:
     }
 
 
+def full_combat_reward_message() -> dict:
+    return {
+        "in_game": True,
+        "available_commands": ["choose", "proceed"],
+        "game_state": {
+            "screen_type": "COMBAT_REWARD",
+            "room_phase": "COMPLETE",
+            "act": 1,
+            "floor": 3,
+            "choice_list": ["gold", "card", "potion", "relic"],
+            "screen_state": {
+                "rewards": [
+                    {"reward_type": "GOLD", "gold": 19},
+                    {"reward_type": "CARD"},
+                    {"reward_type": "POTION", "potion": {"id": "DexterityPotion", "name": "敏捷药水"}},
+                    {"reward_type": "RELIC", "relic": {"id": "Anchor", "name": "锚"}},
+                ]
+            },
+        },
+    }
+
+
+def shop_room_message() -> dict:
+    return {
+        "in_game": True,
+        "available_commands": ["choose", "proceed"],
+        "game_state": {
+            "screen_type": "SHOP_ROOM",
+            "room_phase": "COMPLETE",
+            "choice_list": ["merchant", "leave"],
+        },
+    }
+
+
 class ConfidenceAutoTests(unittest.TestCase):
+    def test_environment_automation_collects_combat_rewards_in_order(self) -> None:
+        message = full_combat_reward_message()
+        result = controller.environment_auto_action(message, controller.semantic_actions(message))
+        self.assertIsNotNone(result)
+        assert result is not None
+        action, detail = result
+        self.assertEqual(action["command"], "CHOOSE 3")
+        self.assertEqual(detail["reward_type"], "RELIC")
+        self.assertEqual(action["label"], "自动拾取遗物 锚")
+
+    def test_environment_automation_skips_full_potion_and_opens_card_reward(self) -> None:
+        message = full_combat_reward_message()
+        message["game_state"]["potions"] = [
+            {"id": "StrengthPotion"},
+            {"id": "DexterityPotion"},
+            {"id": "FirePotion"},
+        ]
+        message["game_state"]["screen_state"]["rewards"] = [
+            {"reward_type": "POTION", "potion": {"id": "FruitJuice"}},
+            {"reward_type": "CARD"},
+        ]
+        message["game_state"]["choice_list"] = ["potion", "card"]
+        result = controller.environment_auto_action(message, controller.semantic_actions(message))
+        self.assertIsNotNone(result)
+        assert result is not None
+        action, detail = result
+        self.assertEqual(action["command"], "CHOOSE 1")
+        self.assertEqual(detail["reward_type"], "CARD")
+
+    def test_environment_automation_opens_shop_before_policy(self) -> None:
+        command, action, decision = controller.ask_action(NoBridge(), shop_room_message(), "run-1", policy=FakePolicy({}))
+        self.assertEqual(command, "CHOOSE 0")
+        self.assertEqual(action["label"], "自动打开商人界面")
+        assert decision is not None
+        self.assertEqual(decision["source"], "environment_auto")
+        self.assertEqual(decision["environment"]["rule"], "shop_open_merchant")
+
+    def test_environment_automation_is_in_recent_action_history(self) -> None:
+        message = full_combat_reward_message()
+        result = controller.environment_auto_action(message, controller.semantic_actions(message))
+        assert result is not None
+        action, detail = result
+        pending = controller.make_pending(
+            message,
+            "run-1",
+            None,
+            2,
+            action,
+            controller.environment_auto_decision(action, detail),
+        )
+        history = controller.accepted_action_history_item(pending, {"game_state": {"screen_type": "COMBAT_REWARD"}})
+        self.assertEqual(history["source"], "environment_auto")
+        self.assertEqual(controller.recent_action_summary([history])[0]["source"], "environment_auto")
+
     def test_detects_smoke_bomb_from_pending_pre_action_inventory(self) -> None:
         message = combat_message()
         message["available_commands"] = ["potion"]

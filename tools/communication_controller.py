@@ -170,6 +170,119 @@ def game_state(message: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+REWARD_AUTOMATION_ORDER = ("RELIC", "GOLD", "POTION", "CARD")
+
+
+def combat_reward_entries(message: dict[str, Any]) -> list[tuple[int, str, dict[str, Any]]]:
+    """Return visible CombatRewardScreen entries with their choice indices.
+
+    CommunicationMod exposes one parent-screen choice per entry in ``rewards``.
+    Do not infer reward types from arbitrary text: a missing or malformed entry
+    simply remains a model decision instead of risking a wrong automatic pick.
+    """
+    state = game_state(message)
+    if str(state.get("screen_type") or "").upper() != "COMBAT_REWARD":
+        return []
+    choices = state.get("choice_list")
+    screen_state = state.get("screen_state")
+    rewards = screen_state.get("rewards") if isinstance(screen_state, dict) else None
+    if not isinstance(choices, list) or not isinstance(rewards, list):
+        return []
+    result: list[tuple[int, str, dict[str, Any]]] = []
+    for index, reward in enumerate(rewards):
+        if index >= len(choices) or not isinstance(reward, dict):
+            continue
+        reward_type = str(reward.get("reward_type") or "").upper()
+        if reward_type in REWARD_AUTOMATION_ORDER:
+            result.append((index, reward_type, reward))
+    return result
+
+
+def reward_automation_label(reward_type: str, reward: dict[str, Any]) -> str:
+    """Describe a controller-owned parent reward action for history and trace."""
+    if reward_type == "RELIC":
+        relic = reward.get("relic") if isinstance(reward.get("relic"), dict) else reward
+        return f"自动拾取遗物 {relic.get('name') or relic.get('id') or ''}".strip()
+    if reward_type == "GOLD":
+        gold = reward.get("gold")
+        return f"自动拾取金币 {gold}" if gold is not None else "自动拾取金币"
+    if reward_type == "POTION":
+        potion = reward.get("potion") if isinstance(reward.get("potion"), dict) else reward
+        return f"自动拾取药水 {potion.get('name') or potion.get('id') or ''}".strip()
+    return "自动查看卡牌奖励"
+
+
+def environment_auto_action(
+    message: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Choose one non-strategic progress action before calling a policy.
+
+    The controller owns only actions with no strategic trade-off: a visible
+    combat reward relic/gold, a potion when an inventory slot is free, opening
+    a visible card reward, and entering a just-reached shop. Card selection,
+    boss relics, purchases, purge decisions, and full-inventory potion choices
+    remain policy actions.
+    """
+    state = game_state(message)
+    screen_type = str(state.get("screen_type") or "").upper()
+    actions_by_id = {str(action.get("id")): action for action in actions}
+
+    if screen_type == "COMBAT_REWARD":
+        for reward_type in REWARD_AUTOMATION_ORDER:
+            for index, entry_type, reward in combat_reward_entries(message):
+                if entry_type != reward_type:
+                    continue
+                if reward_type == "POTION" and potion_inventory_full(state):
+                    continue
+                action = actions_by_id.get(f"CHOOSE:index={index}")
+                if action is None:
+                    # A full inventory masks the potion action; continue with
+                    # later safe entries such as CARD.
+                    continue
+                action = dict(action)
+                action["label"] = reward_automation_label(reward_type, reward)
+                return action, {
+                    "rule": f"combat_reward_{reward_type.lower()}",
+                    "reason": action["label"],
+                    "reward_type": reward_type,
+                }
+
+    if screen_type == "SHOP_ROOM":
+        choices = state.get("choice_list")
+        if isinstance(choices, list):
+            for index, choice in enumerate(choices):
+                normalized = "".join(str(choice).casefold().split())
+                if normalized not in {"merchant", "shop", "entershop", "商人", "商店", "进入商店"}:
+                    continue
+                action = actions_by_id.get(f"CHOOSE:index={index}")
+                if action is None:
+                    continue
+                action = dict(action)
+                action["label"] = "自动打开商人界面"
+                return action, {
+                    "rule": "shop_open_merchant",
+                    "reason": "自动打开商人界面",
+                }
+    return None
+
+
+def environment_auto_decision(action: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    """Make controller progress actions durable and distinct from policy actions."""
+    action_id = str(action.get("id") or "")
+    return {
+        "mode": "environment_automation",
+        "model_id": "controller",
+        "candidate_source": "environment_guard",
+        "model_action": action_id,
+        "model_candidates": [],
+        "environment": detail,
+        "executed_action": action_id,
+        "source": "environment_auto",
+        "overridden": False,
+    }
+
+
 CARD_MODEL_FIELDS = (
     "id",
     "name",
@@ -369,7 +482,7 @@ def recent_action_summary(history: list[dict[str, Any]] | None) -> list[dict[str
         if not isinstance(item, dict):
             continue
         compact: dict[str, Any] = {}
-        for key in ("step_id", "screen_before", "action_kind", "action_id", "action", "screen_after"):
+        for key in ("step_id", "screen_before", "action_kind", "action_id", "action", "screen_after", "source"):
             value = item.get(key)
             if isinstance(value, (str, int, float, bool)) or value is None:
                 compact[key] = value
@@ -560,6 +673,9 @@ def accepted_action_history_item(pending: dict[str, Any], message: dict[str, Any
         "action": action.get("label") or action.get("command"),
         "screen_after": state.get("screen_type"),
     }
+    decision = pending.get("decision")
+    if isinstance(decision, dict) and isinstance(decision.get("source"), str):
+        result["source"] = decision["source"]
     before = event_snapshot(pending.get("pre_state"))
     after = event_snapshot(normalize_state(message))
     if before is not None:
@@ -1485,6 +1601,9 @@ def format_view(
             f"margin={float(confidence.get('margin', 0.0)):.1%} "
             f"entropy={float(confidence.get('entropy', 0.0)):.3f}；{route}"
         )
+    environment = decision.get("environment") if isinstance(decision, dict) else None
+    if isinstance(environment, dict):
+        lines.append(f"环境自动执行：{environment.get('reason') or environment.get('rule') or '推进界面'}")
     if decision and decision.get("model_candidates"):
         lines.append("模型候选（输入 a 接受第一项，或输入 pick 1/2/3 选择；也可直接手动输入动作）：")
         for item in decision["model_candidates"]:
@@ -2705,11 +2824,6 @@ def ask_action(
     declined_card_reward_keys: set[tuple[int, int]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
     actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
-    teacher_active = (
-        teacher is not None
-        and bool(getattr(teacher, "enabled", False))
-        and candidate_assist_allowed(message, teacher.screens)
-    )
 
     def send_model_update(
         decision_update: dict[str, Any],
@@ -2736,6 +2850,27 @@ def ask_action(
             # The game action can still be executed if the optional UI closes
             # during a long streaming request.
             return
+
+    # Do this before contacting a teacher or policy. It keeps reward handling
+    # deterministic and avoids spending an inference call on a non-decision.
+    if not error:
+        environment_action = environment_auto_action(message, actions)
+        if environment_action is not None:
+            action, detail = environment_action
+            decision = environment_auto_decision(action, detail)
+            send_model_update(decision, auto_execute=True)
+            print(
+                f"environment auto: {action.get('id')} rule={detail.get('rule')}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return str(action["command"]), action, decision
+
+    teacher_active = (
+        teacher is not None
+        and bool(getattr(teacher, "enabled", False))
+        and candidate_assist_allowed(message, teacher.screens)
+    )
 
     def send_teacher_update(decision_update: dict[str, Any]) -> None:
         send_model_update(decision_update, auto_execute=True)

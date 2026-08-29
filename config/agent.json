@@ -6,7 +6,7 @@
   },
   "policy": {
     "enabled": true,
-    "runtime": "remote_inference",
+    "runtime": "remote_online_rl",
     "model": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
     "adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r002-e10",
     "endpoint": "https://hf-mirror.com",
