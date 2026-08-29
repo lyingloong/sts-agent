@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_config import ConfigError, load_agent_config
+from gpu_selection import select_configured_gpu
 
 
 def configure_jsonl_stdio() -> None:
@@ -25,6 +26,30 @@ def configure_jsonl_stdio() -> None:
     for stream in (sys.stdin, sys.stdout):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="strict")
+
+
+def parse_gpu_device(value: str) -> str | int:
+    if value == "auto":
+        return value
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("gpu device must be 'auto' or a non-negative integer") from exc
+    if result < 0:
+        raise argparse.ArgumentTypeError("gpu device must be 'auto' or a non-negative integer")
+    return result
+
+
+def configure_inference_gpu(device: str | int, minimum_free_memory_mib: int) -> dict[str, int] | None:
+    """Restrict model loading to one selected GPU before importing Torch."""
+
+    if device == "visible":
+        return None
+    if minimum_free_memory_mib < 1:
+        raise ValueError("minimum_free_memory_mib must be positive")
+    selected = select_configured_gpu(device, minimum_free_memory_mib)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(selected["index"])
+    return selected
 
 
 def compact_json(value: Any, limit: int = 7000) -> str:
@@ -372,6 +397,11 @@ def serve(args: argparse.Namespace) -> int:
     # Hugging Face libraries read this process-local setting. The user-facing
     # source of truth remains config/agent.json or an explicit CLI override.
     os.environ["HF_ENDPOINT"] = args.endpoint
+    try:
+        selected_gpu = configure_inference_gpu(args.gpu_device, args.minimum_free_memory_mib)
+    except Exception as exc:
+        print(f"policy server GPU selection failed: {exc}", file=sys.stderr, flush=True)
+        return 2
     ranker: MockRanker | QwenRanker
     if args.mock:
         ranker = MockRanker()
@@ -388,7 +418,7 @@ def serve(args: argparse.Namespace) -> int:
 
     print(
         json.dumps(
-            {"type": "ready", "model_id": model_id, "endpoint": args.endpoint},
+            {"type": "ready", "model_id": model_id, "endpoint": args.endpoint, "gpu": selected_gpu},
             ensure_ascii=False,
         ),
         flush=True,
@@ -449,6 +479,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", default=policy["adapter"], help="local LoRA adapter directory to attach to the base model")
     parser.add_argument("--endpoint", default=policy["endpoint"])
     parser.add_argument("--top-k", type=int, default=policy["top_k"])
+    parser.add_argument(
+        "--gpu-device",
+        type=parse_gpu_device,
+        default="visible",
+        help="auto or physical GPU index; visible leaves CUDA_VISIBLE_DEVICES unchanged",
+    )
+    parser.add_argument("--minimum-free-memory-mib", type=int, default=1)
     parser.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--local-files-only",

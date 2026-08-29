@@ -55,6 +55,15 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(config["overlay"]["always_on_top"])
         self.assertTrue(config["overlay"]["frameless"])
         self.assertEqual(config["overlay"]["status"]["divider_columns"], 36)
+        self.assertEqual(config["policy"]["remote"]["inference_gpu"]["device"], "auto")
+
+    def test_remote_inference_gpu_selector_is_validated(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"policy": {"remote": {"inference_gpu": {"device": -1}}}},
+        )
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(config)
 
 
 if __name__ == "__main__":

@@ -1890,6 +1890,7 @@ class PolicyClient:
         else:
             remote_root = str(self.remote["project_root"])
             if self.runtime == "remote_inference":
+                inference_gpu = self.remote["inference_gpu"]
                 remote_command = [
                     str(self.remote["python"]),
                     "tools/policy_server.py",
@@ -1900,6 +1901,10 @@ class PolicyClient:
                     "--top-k",
                     str(self.top_k),
                     "--local-files-only",
+                    "--gpu-device",
+                    str(inference_gpu["device"]),
+                    "--minimum-free-memory-mib",
+                    str(inference_gpu["minimum_free_memory_mib"]),
                 ]
                 if self.adapter:
                     remote_command.extend(["--adapter", self.adapter])

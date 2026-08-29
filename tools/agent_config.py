@@ -36,6 +36,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "online_config": "config/online_rl.json",
             "connect_timeout_seconds": 30.0,
             "update_timeout_seconds": 1800.0,
+            "inference_gpu": {
+                "device": "auto",
+                "minimum_free_memory_mib": 6000,
+            },
         },
         "confidence_auto": {
             "enabled": True,
@@ -169,6 +173,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("policy.remote.online_config must be a relative remote path")
     _require_number(remote["connect_timeout_seconds"], "policy.remote.connect_timeout_seconds", 1.0, 300.0)
     _require_number(remote["update_timeout_seconds"], "policy.remote.update_timeout_seconds", 30.0, 7200.0)
+    inference_gpu = remote["inference_gpu"]
+    device = inference_gpu["device"]
+    if device != "auto" and (isinstance(device, bool) or not isinstance(device, int) or device < 0):
+        raise ConfigError("policy.remote.inference_gpu.device must be 'auto' or a non-negative integer")
+    minimum_memory = inference_gpu["minimum_free_memory_mib"]
+    if isinstance(minimum_memory, bool) or not isinstance(minimum_memory, int) or minimum_memory < 1:
+        raise ConfigError("policy.remote.inference_gpu.minimum_free_memory_mib must be a positive integer")
     screens = policy["screens"]
     if not isinstance(screens, list) or not screens or not all(isinstance(item, str) for item in screens):
         raise ConfigError("policy.screens must be a non-empty list of strings")

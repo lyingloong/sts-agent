@@ -14,6 +14,7 @@ from online_rl.protocol import ProtocolError, validate_episode_payload  # noqa: 
 from online_rl.rewards import episode_reward  # noqa: E402
 from online_rl.rollout_store import RolloutStore  # noqa: E402
 from online_rl_worker import OnlineWorker, load_config, normalize_scores, select_gpu  # noqa: E402
+from policy_server import configure_inference_gpu, parse_gpu_device  # noqa: E402
 import communication_controller as controller  # noqa: E402
 
 
@@ -133,6 +134,15 @@ class OnlineRlTests(unittest.TestCase):
         )
         self.assertAlmostEqual(sum(item["probability"] for item in values), 1.0)
         self.assertGreater(values[0]["probability"], values[1]["probability"])
+
+    def test_inference_gpu_argument_parser_rejects_invalid_indexes(self) -> None:
+        self.assertEqual(parse_gpu_device("auto"), "auto")
+        self.assertEqual(parse_gpu_device("3"), 3)
+        with self.assertRaises(Exception):
+            parse_gpu_device("-1")
+
+    def test_visible_inference_gpu_does_not_query_cuda(self) -> None:
+        self.assertIsNone(configure_inference_gpu("visible", 1))
 
     def test_trace_rebuilds_only_remote_sampled_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -74,6 +74,13 @@ request types, so setting `confidence_auto.enabled` keeps its normal meaning.
 The remote process only loads the base model and specified adapter; it never
 writes model weights and it cannot update the policy.
 
+Remote inference selects one physical GPU before importing Torch. Its selector
+is configured in `policy.remote.inference_gpu`: `device: auto` requires at
+least 6000 MiB free VRAM, then selects the lowest-utilization eligible GPU,
+breaking ties by more free memory. Set `device` to a physical index to pin a
+known-safe GPU. This avoids Transformers `device_map=auto` attempting to
+map a small inference model across busy cards.
+
 ## Online RL execution
 
 Set `runtime` to `remote_online_rl`. This mode always samples and auto-executes
