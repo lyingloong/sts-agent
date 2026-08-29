@@ -475,10 +475,14 @@ def parse_args() -> argparse.Namespace:
     except ConfigError as exc:
         raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="Qwen ranker for StS Candidate Assist")
-    parser.add_argument("--model", default=policy["model"])
-    parser.add_argument("--adapter", default=policy["adapter"], help="local LoRA adapter directory to attach to the base model")
-    parser.add_argument("--endpoint", default=policy["endpoint"])
-    parser.add_argument("--top-k", type=int, default=policy["top_k"])
+    parser.add_argument("--model", default=policy["model"]["base"])
+    parser.add_argument(
+        "--adapter",
+        default=policy["model"]["initial_adapter"],
+        help="local LoRA adapter directory to attach to the base model",
+    )
+    parser.add_argument("--endpoint", default=policy["model"]["hub_endpoint"])
+    parser.add_argument("--top-k", type=int, default=policy["request"]["top_k"])
     parser.add_argument(
         "--gpu-device",
         type=parse_gpu_device,
@@ -493,8 +497,18 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="默认只从本地 Hugging Face 缓存加载；请先运行 download_qwen.py",
     )
-    parser.add_argument("--mock", action=argparse.BooleanOptionalAction, default=policy["mock"], help="不加载模型，用于测试协议和终端交互")
-    parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=policy["debug"], help="将模型服务异常完整写入 stderr")
+    parser.add_argument(
+        "--mock",
+        action=argparse.BooleanOptionalAction,
+        default=policy["development"]["mock"],
+        help="不加载模型，用于测试协议和终端交互",
+    )
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=policy["development"]["debug"],
+        help="将模型服务异常完整写入 stderr",
+    )
     return parser.parse_args()
 
 

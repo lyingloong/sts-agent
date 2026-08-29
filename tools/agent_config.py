@@ -19,27 +19,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "policy": {
         "enabled": True,
         "runtime": "local",
-        "model": "Qwen/Qwen3-0.6B",
-        "adapter": "",
-        "endpoint": "https://huggingface.co",
-        "top_k": 3,
-        "timeout_seconds": 8.0,
-        "start_timeout_seconds": 300.0,
-        "screens": ["ALL"],
-        "python": "auto",
-        "mock": False,
-        "debug": False,
+        "model": {
+            "base": "Qwen/Qwen3-0.6B",
+            "initial_adapter": "",
+            "initial_policy_version": "sft-v0",
+            "hub_endpoint": "https://huggingface.co",
+        },
+        "request": {
+            "top_k": 3,
+            "response_timeout_seconds": 8.0,
+            "startup_timeout_seconds": 300.0,
+            "screens": ["ALL"],
+        },
+        "local": {
+            "python": "auto",
+        },
         "remote": {
             "ssh_host": "linke84090",
             "project_root": "/data/wanghao/sts-agent",
             "python": ".venv/bin/python",
-            "online_config": "config/online_rl.json",
+            "online_rl_config": "config/online_rl.json",
             "connect_timeout_seconds": 30.0,
             "update_timeout_seconds": 1800.0,
             "inference_gpu": {
                 "device": "auto",
                 "minimum_free_memory_mib": 6000,
             },
+        },
+        "development": {
+            "mock": False,
+            "debug": False,
         },
         "confidence_auto": {
             "enabled": True,
@@ -152,6 +161,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     policy = config["policy"]
     teacher = config["teacher"]
     posthoc = config["posthoc_feedback"]
+    model = policy["model"]
+    request = policy["request"]
+    local = policy["local"]
+    development = policy["development"]
     confidence = policy["confidence_auto"]
     overlay = config["overlay"]
 
@@ -163,30 +176,39 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _require_bool(policy["enabled"], "policy.enabled")
     if policy["runtime"] not in {"local", "remote_inference", "remote_online_rl"}:
         raise ConfigError("policy.runtime must be local, remote_inference, or remote_online_rl")
-    _require_string(policy["model"], "policy.model")
-    if not isinstance(policy["adapter"], str):
-        raise ConfigError("policy.adapter must be a string")
-    _require_string(policy["endpoint"], "policy.endpoint")
-    if not str(policy["endpoint"]).startswith(("https://", "http://")):
-        raise ConfigError("policy.endpoint must start with http:// or https://")
-    top_k = policy["top_k"]
+    _require_string(model["base"], "policy.model.base")
+    if not isinstance(model["initial_adapter"], str):
+        raise ConfigError("policy.model.initial_adapter must be a string")
+    _require_string(model["initial_policy_version"], "policy.model.initial_policy_version")
+    _require_string(model["hub_endpoint"], "policy.model.hub_endpoint")
+    if not str(model["hub_endpoint"]).startswith(("https://", "http://")):
+        raise ConfigError("policy.model.hub_endpoint must start with http:// or https://")
+    if policy["runtime"] == "remote_online_rl" and not model["initial_adapter"].strip() and not development["mock"]:
+        raise ConfigError("policy.model.initial_adapter is required for policy.runtime=remote_online_rl")
+    top_k = request["top_k"]
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
-        raise ConfigError("policy.top_k must be an integer >= 1")
-    _require_number(policy["timeout_seconds"], "policy.timeout_seconds", 0.1)
-    _require_number(policy["start_timeout_seconds"], "policy.start_timeout_seconds", 1.0)
-    _require_string(policy["python"], "policy.python")
-    _require_bool(policy["mock"], "policy.mock")
-    _require_bool(policy["debug"], "policy.debug")
+        raise ConfigError("policy.request.top_k must be an integer >= 1")
+    _require_number(request["response_timeout_seconds"], "policy.request.response_timeout_seconds", 0.1)
+    _require_number(request["startup_timeout_seconds"], "policy.request.startup_timeout_seconds", 1.0)
+    screens = request["screens"]
+    if not isinstance(screens, list) or not screens or not all(isinstance(item, str) for item in screens):
+        raise ConfigError("policy.request.screens must be a non-empty list of strings")
+    unknown_screens = {item.strip().upper() for item in screens} - {"ALL", "COMBAT"}
+    if unknown_screens:
+        raise ConfigError(f"policy.request.screens contains unsupported values: {', '.join(sorted(unknown_screens))}")
+    _require_string(local["python"], "policy.local.python")
+    _require_bool(development["mock"], "policy.development.mock")
+    _require_bool(development["debug"], "policy.development.debug")
     remote = policy["remote"]
     _require_string(remote["ssh_host"], "policy.remote.ssh_host")
     _require_string(remote["project_root"], "policy.remote.project_root")
     if not str(remote["project_root"]).startswith("/"):
         raise ConfigError("policy.remote.project_root must be an absolute remote POSIX path")
     _require_string(remote["python"], "policy.remote.python")
-    _require_string(remote["online_config"], "policy.remote.online_config")
-    online_config = Path(str(remote["online_config"]))
+    _require_string(remote["online_rl_config"], "policy.remote.online_rl_config")
+    online_config = Path(str(remote["online_rl_config"]))
     if online_config.is_absolute() or ".." in online_config.parts:
-        raise ConfigError("policy.remote.online_config must be a relative remote path")
+        raise ConfigError("policy.remote.online_rl_config must be a relative remote path")
     _require_number(remote["connect_timeout_seconds"], "policy.remote.connect_timeout_seconds", 1.0, 300.0)
     _require_number(remote["update_timeout_seconds"], "policy.remote.update_timeout_seconds", 30.0, 7200.0)
     inference_gpu = remote["inference_gpu"]
@@ -196,12 +218,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     minimum_memory = inference_gpu["minimum_free_memory_mib"]
     if isinstance(minimum_memory, bool) or not isinstance(minimum_memory, int) or minimum_memory < 1:
         raise ConfigError("policy.remote.inference_gpu.minimum_free_memory_mib must be a positive integer")
-    screens = policy["screens"]
-    if not isinstance(screens, list) or not screens or not all(isinstance(item, str) for item in screens):
-        raise ConfigError("policy.screens must be a non-empty list of strings")
-    unknown_screens = {item.strip().upper() for item in screens} - {"ALL", "COMBAT"}
-    if unknown_screens:
-        raise ConfigError(f"policy.screens contains unsupported values: {', '.join(sorted(unknown_screens))}")
     _require_bool(confidence["enabled"], "policy.confidence_auto.enabled")
     _require_number(confidence["min_probability"], "policy.confidence_auto.min_probability", 0.0, 1.0)
 

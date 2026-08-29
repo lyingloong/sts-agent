@@ -1816,21 +1816,26 @@ class PolicyClient:
     def __init__(self, project_root: Path, config: dict[str, Any]) -> None:
         self.project_root = project_root
         policy_config = config["policy"]
+        model_config = policy_config["model"]
+        request_config = policy_config["request"]
+        local_config = policy_config["local"]
+        development_config = policy_config["development"]
         confidence_config = policy_config["confidence_auto"]
         self.enabled = policy_config["enabled"]
         self.runtime = policy_config["runtime"]
-        self.model = policy_config["model"]
-        self.adapter = policy_config["adapter"]
-        self.endpoint = policy_config["endpoint"]
-        self.top_k = policy_config["top_k"]
-        self.screens = tuple(item.strip().upper() for item in policy_config["screens"])
+        self.model = model_config["base"]
+        self.initial_adapter = model_config["initial_adapter"]
+        self.initial_policy_version = model_config["initial_policy_version"]
+        self.endpoint = model_config["hub_endpoint"]
+        self.top_k = request_config["top_k"]
+        self.screens = tuple(item.strip().upper() for item in request_config["screens"])
         self.confidence_auto = confidence_config["enabled"]
         self.auto_min_probability = confidence_config["min_probability"]
-        self.timeout = float(policy_config["timeout_seconds"])
-        self.start_timeout = float(policy_config["start_timeout_seconds"])
-        self.python = policy_config["python"]
-        self.mock = policy_config["mock"]
-        self.debug = policy_config["debug"]
+        self.timeout = float(request_config["response_timeout_seconds"])
+        self.start_timeout = float(request_config["startup_timeout_seconds"])
+        self.python = local_config["python"]
+        self.mock = development_config["mock"]
+        self.debug = development_config["debug"]
         self.remote = policy_config["remote"]
         self.process: subprocess.Popen[str] | None = None
         self.request_id = 0
@@ -2018,8 +2023,8 @@ class PolicyClient:
                 # weights is an explicit preparation step handled elsewhere.
                 "--local-files-only",
             ]
-            if self.adapter:
-                command.extend(["--adapter", self.adapter])
+            if self.initial_adapter:
+                command.extend(["--adapter", self.initial_adapter])
             if self.mock:
                 command.append("--mock")
             if self.debug:
@@ -2043,8 +2048,10 @@ class PolicyClient:
                     "--minimum-free-memory-mib",
                     str(inference_gpu["minimum_free_memory_mib"]),
                 ]
-                if self.adapter:
-                    remote_command.extend(["--adapter", self.adapter])
+                if self.initial_adapter:
+                    remote_command.extend(["--adapter", self.initial_adapter])
+                if self.mock:
+                    remote_command.append("--mock")
                 if self.debug:
                     remote_command.append("--debug")
             else:
@@ -2052,8 +2059,16 @@ class PolicyClient:
                     str(self.remote["python"]),
                     "tools/online_rl_worker.py",
                     "--config",
-                    str(self.remote["online_config"]),
+                    str(self.remote["online_rl_config"]),
+                    "--model",
+                    self.model,
+                    "--initial-adapter",
+                    self.initial_adapter,
+                    "--initial-policy-version",
+                    self.initial_policy_version,
                 ]
+                if self.mock:
+                    remote_command.append("--mock")
                 if self.debug:
                     remote_command.append("--debug")
             remote_shell = f"cd {shlex.quote(remote_root)} && exec {shlex.join(remote_command)}"

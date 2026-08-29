@@ -25,10 +25,14 @@ cd /data/wanghao/sts-agent
 cp config/online_rl.example.json config/online_rl.json
 ```
 
-Edit only the absolute paths in `config/online_rl.json`. It is ignored by Git.
-`initial_adapter` must point at a completed SFT adapter directory, not a
-`checkpoint-*` directory. The first run uses `initial_policy_version`; each
-completed group creates `output_root/versions/v000001/`, then `v000002/`, etc.
+`config/online_rl.json` is ignored by Git and now contains only remote rollout,
+GPU, reward and update parameters. Do not add `model`, `initial_adapter` or
+`initial_policy_version`: they have one source of truth in the local tracked
+`config/agent.json`, and the controller passes them to the worker over SSH.
+`policy.model.initial_adapter` must point at a completed SFT adapter directory,
+not a `checkpoint-*` directory. A fresh `output_root` starts at
+`policy.model.initial_policy_version`; each completed group creates
+`output_root/versions/v000001/`, then `v000002/`, etc.
 
 The example uses `gpu.device: "auto"`. At worker startup it queries
 `nvidia-smi`, filters GPUs with at least `minimum_free_memory_mib` free (12 GiB
@@ -49,13 +53,17 @@ the relevant mode:
 "policy": {
   "enabled": true,
   "runtime": "remote_inference",
-  "model": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
-  "adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
+  "model": {
+    "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+    "initial_adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
+    "initial_policy_version": "sft-v0-r001",
+    "hub_endpoint": "https://huggingface.co"
+  },
   "remote": {
     "ssh_host": "linke84090",
     "project_root": "/data/wanghao/sts-agent",
     "python": ".venv/bin/python",
-    "online_config": "config/online_rl.json",
+    "online_rl_config": "config/online_rl.json",
     "connect_timeout_seconds": 30.0,
     "update_timeout_seconds": 1800.0
   }
@@ -180,7 +188,9 @@ allocating a GPU:
 ```bash
 cd /data/wanghao/sts-agent
 cp config/online_rl.example.json /tmp/sts-online-mock.json
-.venv/bin/python tools/online_rl_worker.py --config /tmp/sts-online-mock.json --mock
+.venv/bin/python tools/online_rl_worker.py \
+  --config /tmp/sts-online-mock.json \
+  --model mock --initial-adapter '' --initial-policy-version mock --mock
 ```
 
 The process prints a `ready` object. Send a `sample` JSON request on one line;

@@ -52,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     except ConfigError as exc:
         raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="从 Hugging Face 官方预下载 Candidate Assist 使用的 Qwen 模型")
-    parser.add_argument("--model", default=policy["model"])
-    parser.add_argument("--endpoint", default=policy["endpoint"])
+    parser.add_argument("--model", default=policy["model"]["base"])
+    parser.add_argument("--endpoint", default=policy["model"]["hub_endpoint"])
     parser.add_argument("--force", action="store_true", help="重新检查并下载缺失/更新文件")
     return parser.parse_args()
 

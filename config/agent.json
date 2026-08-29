@@ -7,27 +7,36 @@
   "policy": {
     "enabled": true,
     "runtime": "remote_online_rl",
-    "model": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
-    "adapter": "/data/wanghao/sts-agent/outputs/online_rl/posthoc-r001/versions/v000002",
-    "endpoint": "https://hf-mirror.com",
-    "top_k": 3,
-    "timeout_seconds": 90.0,
-    "start_timeout_seconds": 200.0,
-    "screens": ["ALL"],
-    "python": "auto",
-    "mock": false,
-    "debug": false,
+    "model": {
+      "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+      "initial_adapter": "/data/wanghao/sts-agent/outputs/online_rl/posthoc-r001/versions/v000002",
+      "initial_policy_version": "rl-001",
+      "hub_endpoint": "https://huggingface.co"
+    },
+    "request": {
+      "top_k": 3,
+      "response_timeout_seconds": 90.0,
+      "startup_timeout_seconds": 200.0,
+      "screens": ["ALL"]
+    },
+    "local": {
+      "python": "auto"
+    },
     "remote": {
       "ssh_host": "linke84090",
       "project_root": "/data/wanghao/sts-agent",
       "python": ".venv/bin/python",
-      "online_config": "config/online_rl.json",
+      "online_rl_config": "config/online_rl.json",
       "connect_timeout_seconds": 30.0,
       "update_timeout_seconds": 1800.0,
       "inference_gpu": {
         "device": "auto",
         "minimum_free_memory_mib": 6000
       }
+    },
+    "development": {
+      "mock": false,
+      "debug": false
     },
     "confidence_auto": {
       "enabled": false,

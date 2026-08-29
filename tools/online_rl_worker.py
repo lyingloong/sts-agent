@@ -29,9 +29,6 @@ from online_rl.update import TrainableAliasPolicy, UpdateConfig
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": 1,
-    "model": "Qwen/Qwen3-0.6B",
-    "initial_adapter": "",
-    "initial_policy_version": "sft-v0",
     "output_root": "outputs/online_rl/default",
     "group_size": 4,
     "seed": 20260826,
@@ -87,7 +84,15 @@ def merge(default: dict[str, Any], supplied: dict[str, Any], location: str = "")
     return result
 
 
-def load_config(path: Path) -> dict[str, Any]:
+def load_config(
+    path: Path,
+    *,
+    model: str,
+    initial_adapter: str,
+    initial_policy_version: str,
+    mock: bool = False,
+) -> dict[str, Any]:
+    """Load worker-only settings and inject the controller-owned policy identity."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -97,6 +102,24 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("online RL config must be an object")
     config = merge(DEFAULT_CONFIG, raw)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("--model must be a non-empty string")
+    if not isinstance(initial_policy_version, str) or not initial_policy_version.strip():
+        raise ValueError("--initial-policy-version must be a non-empty string")
+    if not isinstance(initial_adapter, str):
+        raise ValueError("--initial-adapter must be a string")
+    if not mock and not initial_adapter.strip():
+        raise ValueError("--initial-adapter is required unless --mock is used")
+    # Model identity belongs to config/agent.json, which is the one source of
+    # truth for every policy runtime. Keep it on the resolved worker config so
+    # the rollout store and update code can remain self-contained.
+    config.update(
+        {
+            "model": model,
+            "initial_adapter": initial_adapter,
+            "initial_policy_version": initial_policy_version,
+        }
+    )
     if config["schema_version"] != 1:
         raise ValueError("online RL schema_version must be 1")
     if not isinstance(config["group_size"], int) or config["group_size"] < 2:
@@ -380,6 +403,9 @@ def serve(config: dict[str, Any], mock: bool, debug: bool) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Single-GPU StS online rollout and update worker")
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--model", required=True, help="base model path or Hugging Face ID from config/agent.json")
+    parser.add_argument("--initial-adapter", required=True, help="initial LoRA adapter path from config/agent.json")
+    parser.add_argument("--initial-policy-version", required=True, help="version label for a fresh output_root")
     parser.add_argument("--mock", action="store_true", help="protocol-only worker without a model or update")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
@@ -388,7 +414,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        return serve(load_config(args.config), mock=args.mock, debug=args.debug)
+        config = load_config(
+            args.config,
+            model=args.model,
+            initial_adapter=args.initial_adapter,
+            initial_policy_version=args.initial_policy_version,
+            mock=args.mock,
+        )
+        return serve(config, mock=args.mock, debug=args.debug)
     except (OSError, RuntimeError, ValueError, ProtocolError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

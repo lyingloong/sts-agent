@@ -52,7 +52,13 @@ class AgentConfigTests(unittest.TestCase):
     def test_posthoc_feedback_is_valid_for_remote_online_rl(self) -> None:
         config = agent_config._merge(
             agent_config.DEFAULT_CONFIG,
-            {"policy": {"runtime": "remote_online_rl"}, "posthoc_feedback": {"enabled": True}},
+            {
+                "policy": {
+                    "runtime": "remote_online_rl",
+                    "model": {"initial_adapter": "outputs/sft/example"},
+                },
+                "posthoc_feedback": {"enabled": True},
+            },
         )
         validated = agent_config.validate_config(config)
         self.assertTrue(validated["posthoc_feedback"]["enabled"])
@@ -66,7 +72,8 @@ class AgentConfigTests(unittest.TestCase):
     def test_current_project_file_is_valid(self) -> None:
         config = agent_config.load_agent_config(TOOLS_DIR.parent)
         self.assertEqual(config["server"]["port"], 8765)
-        self.assertEqual(config["policy"]["screens"], ["ALL"])
+        self.assertEqual(config["policy"]["request"]["screens"], ["ALL"])
+        self.assertEqual(config["policy"]["model"]["initial_policy_version"], "rl-001")
         self.assertTrue(config["overlay"]["always_on_top"])
         self.assertFalse(config["overlay"]["frameless"])
         self.assertEqual(config["overlay"]["status"]["divider_columns"], 36)
@@ -79,6 +86,20 @@ class AgentConfigTests(unittest.TestCase):
         )
         with self.assertRaises(agent_config.ConfigError):
             agent_config.validate_config(config)
+
+    def test_online_rl_requires_one_initial_adapter_unless_mocked(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"policy": {"runtime": "remote_online_rl"}},
+        )
+        with self.assertRaisesRegex(agent_config.ConfigError, "initial_adapter"):
+            agent_config.validate_config(config)
+
+        mocked = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"policy": {"runtime": "remote_online_rl", "development": {"mock": True}}},
+        )
+        self.assertTrue(agent_config.validate_config(mocked)["policy"]["development"]["mock"])
 
 
 if __name__ == "__main__":

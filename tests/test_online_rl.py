@@ -37,6 +37,16 @@ def episode_payload(episode_id: str, group_id: str = "g-000001", version: str = 
     }
 
 
+def load_mock_worker_config(path: Path) -> dict:
+    return load_config(
+        path,
+        model="unused",
+        initial_adapter="",
+        initial_policy_version="sft-v0",
+        mock=True,
+    )
+
+
 class OnlineRlTests(unittest.TestCase):
     def test_episode_requires_selected_alias_to_be_legal(self) -> None:
         payload = episode_payload("e-1")
@@ -84,6 +94,28 @@ class OnlineRlTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "at least 12000 MiB"):
             select_gpu([{"index": 0, "free_memory_mib": 11999, "utilization_percent": 0}], 12000)
 
+    def test_worker_model_identity_is_supplied_by_controller_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "online.json"
+            config_path.write_text(json.dumps({"output_root": str(root / "output")}), encoding="utf-8")
+            config = load_config(
+                config_path,
+                model="/models/Qwen3-0.6B",
+                initial_adapter="/models/sft-v1",
+                initial_policy_version="sft-v1",
+            )
+            self.assertEqual(config["model"], "/models/Qwen3-0.6B")
+            self.assertEqual(config["initial_adapter"], "/models/sft-v1")
+            self.assertEqual(config["initial_policy_version"], "sft-v1")
+
+    def test_worker_rejects_duplicated_model_identity_in_remote_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "online.json"
+            config_path.write_text(json.dumps({"model": "should-not-be-here"}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown online RL configuration field: model"):
+                load_mock_worker_config(config_path)
+
     def test_store_refuses_mixed_initial_conditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RolloutStore(Path(directory), group_size=4, initial_policy_version="sft-v0")
@@ -99,15 +131,13 @@ class OnlineRlTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
-                        "model": "unused",
-                        "initial_adapter": str(root / "adapter"),
                         "output_root": str(root / "output"),
                         "group_size": 2,
                     }
                 ),
                 encoding="utf-8",
             )
-            worker = OnlineWorker(load_config(config_path), mock=True)
+            worker = OnlineWorker(load_mock_worker_config(config_path), mock=True)
             self.assertTrue(worker.config["update"]["gradient_checkpointing"])
             self.assertTrue(worker.config["update"]["empty_cache_between_steps"])
             request = {
@@ -143,8 +173,6 @@ class OnlineRlTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
-                        "model": "unused",
-                        "initial_adapter": str(root / "adapter"),
                         "output_root": str(root / "output"),
                         "group_size": 2,
                         "attribution": {"enabled": True},
@@ -152,7 +180,7 @@ class OnlineRlTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            worker = OnlineWorker(load_config(config_path), mock=True)
+            worker = OnlineWorker(load_mock_worker_config(config_path), mock=True)
             request = {
                 "request_id": 1,
                 "episode_id": "e-1",
@@ -175,8 +203,6 @@ class OnlineRlTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
-                        "model": "unused",
-                        "initial_adapter": str(root / "adapter"),
                         "output_root": str(root / "output"),
                         "group_size": 2,
                         "attribution": {"enabled": True},
@@ -184,7 +210,7 @@ class OnlineRlTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            worker = OnlineWorker(load_config(config_path), mock=True)
+            worker = OnlineWorker(load_mock_worker_config(config_path), mock=True)
             request = {
                 "request_id": 1,
                 "episode_id": "e-1",

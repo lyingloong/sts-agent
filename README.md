@@ -35,7 +35,7 @@ python tools\overlay_terminal.py
 
 3. 在主菜单输入 `s [character] [ascension] [seed]`，例如 `s IRONCLAD 0 4QTKQ7VBMFX47`。游戏内输入 `h` 查看动作帮助。
 
-`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。配置位于 [config/agent.json](config/agent.json)，API 密钥只放在被忽略的 `*_api.txt` 文件中。
+`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。配置位于 [config/agent.json](config/agent.json)，完整字段说明和远端在线 RL 配置归属见[配置指南](config/README.md)。API 密钥只放在被忽略的 `*_api.txt` 文件中。
 
 ### 导出与迁移训练数据
 

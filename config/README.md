@@ -1,0 +1,92 @@
+# 运行配置
+
+所有 JSON 文件使用严格 schema：未知字段会直接报错，避免拼写错误静默改变实验。JSON 不支持注释，本文件是每个字段的说明与运行边界。
+
+## 配置归属
+
+`agent.json` 是所有运行模式唯一的策略身份来源。`policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 只能在这里设置一次；本机推理、远端固定推理、远端在线 RL 都使用同一组值。
+
+远端被忽略的 `online_rl.json` 只描述一次在线训练如何执行，不能包含 `model`、`initial_adapter` 或 `initial_policy_version`。controller 通过 SSH 启动 worker 时显式传入这三个值，因此远端文件不能覆盖本机选择的初始策略。
+
+如果需要换一套初始权重，请同时修改 `initial_adapter` 和 `initial_policy_version`，并为该实验使用新的 `online_rl.output_root`。已有 `output_root/state.json` 会优先恢复其记录的当前版本，修改初始 adapter 不会替换已开始实验的策略。
+
+## `agent.json`
+
+| 字段 | 含义 | 适用范围 |
+| --- | --- | --- |
+| `schema_version` | 当前配置格式，固定为 `1`。 | 全部 |
+| `server.host` / `server.port` | CommunicationMod controller 的本机监听地址与端口。 | 全部 |
+| `policy.enabled` | 是否启动 Qwen 策略。教师采集时必须为 `false`。 | 全部 |
+| `policy.runtime` | `local` 本机推理；`remote_inference` 远端只推理；`remote_online_rl` 远端采样并更新。 | 全部 |
+| `policy.model.base` | Qwen 基座的本机路径、远端绝对路径或 Hugging Face ID；路径必须对当前 runtime 实际可见。 | 全部 |
+| `policy.model.initial_adapter` | 唯一的初始 LoRA adapter。可为空以运行未微调的固定推理；真实在线 RL 必须是完整 adapter 目录。 | 全部，在线 RL 必填 |
+| `policy.model.initial_policy_version` | 新建在线 RL `output_root` 的初始版本标签，例如 `sft-v1`。 | 在线 RL |
+| `policy.model.hub_endpoint` | 下载基座模型时使用的 Hugging Face 端点；游戏运行不会联网下载。 | `local`、`remote_inference` |
+| `policy.request.top_k` | Overlay 显示的候选数；在线 RL 同时限制展示的策略候选数。 | 全部 |
+| `policy.request.response_timeout_seconds` | 每个动作请求最多等待秒数。 | 全部 |
+| `policy.request.startup_timeout_seconds` | controller 预热本机/远端 worker 的最多等待秒数。 | 全部 |
+| `policy.request.screens` | 请求策略的场景，`["ALL"]` 或 `["COMBAT"]`。 | 全部 |
+| `policy.local.python` | `local` 模式启动 policy server 的解释器；`auto` 优先项目 `.venv`。 | `local` |
+| `policy.remote.ssh_host` | Windows SSH config 中的主机别名。 | 两个远端模式 |
+| `policy.remote.project_root` | 远端仓库绝对路径。 | 两个远端模式 |
+| `policy.remote.python` | 远端项目内 Python 命令。 | 两个远端模式 |
+| `policy.remote.online_rl_config` | 相对远端项目根目录的、被忽略的在线 RL 运行配置。 | `remote_online_rl` |
+| `policy.remote.connect_timeout_seconds` | 建立 SSH 连接的最多等待秒数。 | 两个远端模式 |
+| `policy.remote.update_timeout_seconds` | 终局上传与第 K 局参数更新的最多等待秒数。 | `remote_online_rl` |
+| `policy.remote.inference_gpu.device` | 远端固定推理卡，物理序号或 `"auto"`。 | `remote_inference` |
+| `policy.remote.inference_gpu.minimum_free_memory_mib` | `device: "auto"` 时所需的最低可用显存。 | `remote_inference` |
+| `policy.development.mock` | 不加载真实模型，仅测试 controller/JSONL 协议。不能用于训练结果。 | 开发测试 |
+| `policy.development.debug` | 将完整异常写到 controller/worker 的 stderr。 | 排错 |
+| `policy.confidence_auto.enabled` | 固定推理时满足阈值则自动执行首选；在线 RL 忽略此项并始终采样。 | `local`、`remote_inference` |
+| `policy.confidence_auto.min_probability` | 自动执行所需的首选动作归一化概率。 | `local`、`remote_inference` |
+
+### 教师与归因
+
+`teacher` 用于远程教师 SFT 采集，`posthoc_feedback` 用于在线 RL 终局的人类反思归因。两组都使用 OpenAI 兼容 API。
+
+| 字段 | 含义 |
+| --- | --- |
+| `<group>.enabled` | 是否启用该功能；`teacher` 与 `policy` 不能同时启用，`posthoc_feedback` 仅允许在线 RL。 |
+| `<group>.base_url` / `<group>.model` | API 根地址与模型 ID。 |
+| `<group>.api_key_file` | 相对项目根目录的密钥文件，必须被 Git 忽略。 |
+| `<group>.timeout_seconds` / `max_retries` | 单次 API 请求超时和重试次数。 |
+| `<group>.temperature` / `max_tokens` | 教师/归因模型生成温度与最大输出 token。 |
+| `teacher.max_input_chars` / `teacher.screens` | 教师单步上下文的最大字符数，以及请求教师的场景。 |
+| `teacher.thinking` / `json_mode` / `streaming` | 是否请求思考、结构化 JSON 和流式展示。 |
+| `posthoc_feedback.max_input_chars` | 单局归因上下文最大字符数；动态状态和全动作列表会优先保留。 |
+| `posthoc_feedback.max_reflection_chars` | 玩家正/负反思文本的最大字符数。 |
+| `posthoc_feedback.max_candidates_per_direction` | 教师每个方向可提出的候选步骤数。 |
+| `posthoc_feedback.max_applied_per_direction` | 本地校验后每个方向实际送入更新的最多步骤数。 |
+| `posthoc_feedback.min_confidence` | 接受教师归因步骤的最低置信度。 |
+
+### Overlay
+
+`overlay.always_on_top` 控制窗口置顶；`frameless` 控制是否移除系统标题栏。`status`、`control`、`online_rl` 的 `geometry` 使用 `宽x高+X+Y`，`opacity` 是 `0.2` 到 `1.0` 的透明度；`status.divider_columns` 是状态窗口分隔线宽度。
+
+## `online_rl.json`
+
+此文件仅存于训练机并被 Git 忽略。可以从 `online_rl.example.json` 复制。所有字段都在以下范围内：
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version` | 当前在线 RL 配置格式，固定为 `1`。 |
+| `output_root` | 本次实验的远端输出根目录，保存 group、版本 adapter 与 `state.json`。每个独立实验必须不同。 |
+| `group_size` | 同一冻结策略的完整 rollout 数，当前推荐 `4`。 |
+| `seed` | worker 自身的随机采样种子，不是游戏显示 seed。 |
+| `sampling.temperature` | 动作 logprob 除以前的采样温度；更高更多样，更新时使用相同值重算 ratio。 |
+| `reward.version` | 记录用的奖励定义版本。 |
+| `reward.weights.victory` / `heart` / `act` / `floor` / `hp_fraction` | 终局奖励权重，分别对应胜利、心脏、层数、楼层和 HP 比例。 |
+| `gpu.device` | 更新 worker 使用的远端物理 GPU 序号，或 `"auto"`。 |
+| `gpu.minimum_free_memory_mib` | `auto` 选择 GPU 时所需最低可用显存。 |
+| `attribution.enabled` | 是否只更新人类反思教师选中的步骤；必须和本机 `posthoc_feedback.enabled` 同时开关。 |
+| `attribution.max_abs_advantage` | 归因更新中优势值的绝对值裁剪上限。 |
+| `update.max_length` | 更新时每个动作 observation 的最大 token 长度。 |
+| `update.learning_rate` | LoRA 更新学习率。 |
+| `update.clip_range` | PPO ratio 裁剪范围。 |
+| `update.update_epochs` | 每个 K 条完整轨迹上的优化轮数。 |
+| `update.max_grad_norm` | 梯度范数裁剪上限。 |
+| `update.load_in_4bit` | 以 4-bit 量化加载基座以降低显存。 |
+| `update.gradient_checkpointing` | 用重算激活降低反向传播显存。 |
+| `update.empty_cache_between_steps` | 变长动作更新间归还空闲 CUDA 缓存，降低碎片化。 |
+
+远端同步迁移见 [远程推理与在线 RL](../doc/REMOTE_ONLINE_RL.md)。
