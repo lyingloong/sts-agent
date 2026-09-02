@@ -17,7 +17,7 @@ from typing import Any
 from teacher_client import RemoteTeacherClient, TeacherError, compact_json
 
 
-PROMPT_VERSION = "posthoc-attribution-v2"
+PROMPT_VERSION = "posthoc-attribution-v3"
 SCHEMA_VERSION = "sts-posthoc-attribution-0.1"
 
 # Observations have already been normalized to public game data before this
@@ -228,20 +228,44 @@ def build_prompt(
 ) -> list[dict[str, str]]:
     """Build a direction-only post-hoc attribution request in Chinese."""
 
+    feedback_mode = str(reflection.get("mode") or "human").strip().lower()
+    if feedback_mode not in {"human", "auto"}:
+        feedback_mode = "human"
+    direction_source = (
+        "当前为自动归因模式。终局死亡、低楼层、胜利或奖励数值本身不是任何单步的正负证据，"
+        "不得把整局结果平均归因给前面的动作。先从账本找出存在明确局部反事实的少数步骤："
+        "所选动作与当时其他合法动作相比，能从公开状态直接看出更差或更好的即时后果、不可逆后果，"
+        "或对紧接着的战斗/路线产生明确影响。"
+        "弱化动作必须在 evidence 中指出一个当时合法的替代动作或明确违反的约束；"
+        "强化动作必须指出所选动作带来的已记录收益或避免的具体风险。"
+        "不因动作名字、稀有度、一般攻略、事后随机结果，或单纯出现 END_TURN/SKIP/删牌/拿牌而归因。"
+        "不要凑满名额：通常每个方向 0-3 条；只有相互独立、证据同样明确的重复错误才可更多。"
+        "confidence>=0.90 仅用于状态直接矛盾或替代关系明确的步骤；0.75-0.89 用于证据强但仍有不确定性的步骤；"
+        "低于 0.75 的候选不要返回。severity=3 仅用于濒死、明显可避免的大额掉血、不可逆关键选择或明确改变近期通关机会的步骤。"
+        if feedback_mode == "auto"
+        else "人类复盘是唯一的价值方向：只在其明确授权的方向中定位关键动作；"
+        "证据仍必须锚定当时的公开状态和动作账本，不能用终局结果替代具体因果。"
+    )
     system = (
-        "你是《杀戮尖塔》策略训练的事后归因标注器。人类的复盘是唯一的价值方向："
+        "你是《杀戮尖塔》策略训练的事后归因标注器。"
+        f"{direction_source}"
         "只定位日志中已经执行的模型动作，不要自行编造动作、奖励或隐藏状态。"
         "每个步骤都给出了所选动作、当时全部合法动作和该步动态公开状态；"
         "state 中不包含静态知识库的卡牌、遗物、药水或能力描述。"
         "请分别找出值得强化和应当弱化的关键动作；同一步不得同时出现在两类。"
-        "证据只写简短可审计事实，不输出推理过程、长篇攻略或 Markdown。"
+        "将一次战斗、地图选择、商店/奖励、事件或不可逆选牌分别评估；"
+        "对战斗动作优先核对当回合能量、敌方可见意图、血量/格挡、手牌与结束回合后的风险；"
+        "对非战斗动作优先核对可见奖励、金币、牌组、路线、首领和 decision_constraints。"
+        "evidence 必须是简短可审计事实，最好包含“所选动作 + 当时状态/合法替代 + 可观察后果”；"
+        "不输出推理过程、长篇攻略或 Markdown。"
         "严格返回一个 JSON 对象："
         '{"reinforce":[{"step_id":12,"confidence":0.86,"severity":2,"evidence":"..."}],'
         '"weaken":[{"step_id":18,"confidence":0.91,"severity":3,"evidence":"..."}]}'
         ". confidence 在 0 到 1；severity 为 1、2 或 3；每个数组最多 "
-        f"{max_candidates_per_direction} 项。人类某一栏为空时，对应数组可以为空。"
+        f"{max_candidates_per_direction} 项。human 模式中人类某一栏为空时，对应数组应为空；auto 模式可独立判断两类。"
     )
     user_value = {
+        "feedback_mode": feedback_mode,
         "human_reflection": {
             "reinforce": reflection.get("reinforce", ""),
             "weaken": reflection.get("weaken", ""),
@@ -398,6 +422,7 @@ class PosthocFeedbackClient:
 
     def __init__(self, project_root: Path, config: dict[str, Any]) -> None:
         self.enabled = bool(config["enabled"])
+        self.mode = str(config["mode"])
         self.max_reflection_chars = int(config["max_reflection_chars"])
         self.max_candidates_per_direction = int(config["max_candidates_per_direction"])
         self.max_applied_per_direction = int(config["max_applied_per_direction"])
@@ -423,9 +448,20 @@ class PosthocFeedbackClient:
         positive = compact_text(reinforce, self.max_reflection_chars)
         negative = compact_text(weaken, self.max_reflection_chars)
         return {
+            "mode": "human",
             "reinforce": positive,
             "weaken": negative,
             "skipped": not positive and not negative,
+        }
+
+    def automatic_reflection(self) -> dict[str, Any]:
+        """Describe a no-human-input attribution pass without fabricating text."""
+        return {
+            "mode": "auto",
+            "reinforce": "",
+            "weaken": "",
+            "skipped": False,
+            "reason": "teacher_auto",
         }
 
     def annotate(self, reflection: dict[str, Any], episode: dict[str, Any]) -> dict[str, Any]:
@@ -433,6 +469,9 @@ class PosthocFeedbackClient:
             return {"status": "disabled", "applied": [], "rejected": []}
         if reflection.get("skipped"):
             return {"status": "human_skipped", "applied": [], "rejected": []}
+        feedback_mode = str(reflection.get("mode") or "human").strip().lower()
+        if feedback_mode not in {"human", "auto"}:
+            raise PosthocFeedbackError("feedback mode must be human or auto")
         messages = build_prompt(
             reflection,
             episode,
@@ -453,18 +492,23 @@ class PosthocFeedbackClient:
                 episode,
                 min_confidence=self.min_confidence,
                 max_applied_per_direction=self.max_applied_per_direction,
-                allowed_directions={
-                    direction
-                    for direction in ("reinforce", "weaken")
-                    if str(reflection.get(direction) or "").strip()
-                },
+                allowed_directions=(
+                    None
+                    if feedback_mode == "auto"
+                    else {
+                        direction
+                        for direction in ("reinforce", "weaken")
+                        if str(reflection.get(direction) or "").strip()
+                    }
+                ),
             )
         except TeacherError as exc:
             self.last_error = str(exc)
             raise PosthocFeedbackError(str(exc)) from exc
         self.last_error = None
         return {
-            "status": "annotated",
+            "status": "annotated_auto" if feedback_mode == "auto" else "annotated",
+            "feedback_mode": feedback_mode,
             "model_id": response["model_id"],
             "prompt_version": response["prompt_version"],
             "latency_ms": response["latency_ms"],

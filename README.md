@@ -26,16 +26,22 @@ runAtGameStart=true
 maxInitializationTimeout=300
 ```
 
+要使用某个模式，把配置参数同时加到 controller 和客户端命令，例如：
+
+```properties
+command=D\:/miniconda3/python.exe D\:/Code/spire-mod/sts-agent/tools/communication_controller.py --config D\:/Code/spire-mod/sts-agent/config/modes/candidate_assist.json
+```
+
 2. 启动游戏后运行一个控制客户端：
 
 ```powershell
-python tools\overlay_terminal.py
-# 或 python tools\human_terminal.py
+python tools\overlay_terminal.py --config config\modes\candidate_assist.json
+# 或 python tools\human_terminal.py --config config\modes\candidate_assist.json
 ```
 
-3. 在主菜单输入 `s [character] [ascension] [seed]`，例如 `s IRONCLAD 0 4QTKQ7VBMFX47`。游戏内输入 `h` 查看动作帮助。
+3. 在主菜单输入 `s [character] [ascension] [seed]`，例如 `s IRONCLAD 0 4QTKQ7VBMFX47`；Prompt Evolution 模式首次也可以省略 seed，让游戏生成随机种子。游戏内输入 `h` 查看动作帮助。
 
-`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。配置位于 [config/agent.json](config/agent.json)，完整字段说明和远端在线 RL 配置归属见[配置指南](config/README.md)。API 密钥只放在被忽略的 `*_api.txt` 文件中。
+`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。新实验建议从 [config/modes](config/modes/README.md) 选择模式，并让 controller 与客户端使用同一个 `--config`；不带参数时仍读取 [config/agent.json](config/agent.json)。完整字段说明和远端在线 RL 配置归属见[配置指南](config/README.md)。API 密钥只放在被忽略的 `*_api.txt` 文件中。
 
 ### 导出与迁移训练数据
 
@@ -72,6 +78,8 @@ tools/                  controller、知识库、导出与客户端工具
 - [在线纠正式模仿学习设计参考](doc/ONLINE_DAGGER.md)
 - [教师场景化提示词说明](doc/TEACHER_PROMPTS.md)
 - [远程推理与单 GPU 在线 RL](doc/REMOTE_ONLINE_RL.md)
+- [固定种子 Prompt 演化](doc/PROMPT_EVOLUTION.md)
+- [按模式运行配置](config/modes/README.md)
 - [终局人类反思归因 GRPO](doc/POSTHOC_ATTRIBUTION_GRPO.md)
 - [数据目录和保留策略](data/README.md)
 

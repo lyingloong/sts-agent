@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "enabled": true,
+    "runtime": "local",
+    "confidence_auto": {
+      "enabled": true,
+      "min_probability": 0.85
+    }
+  },
+  "teacher": {
+    "enabled": false
+  },
+  "posthoc_feedback": {
+    "enabled": false
+  },
+  "prompt_evolution": {
+    "enabled": false
+  }
+}

@@ -29,6 +29,7 @@ data/datasets/
 data/transfer/
 data/reflections/
 data/attributions/
+data/prompt_evolution/
 data/fixtures/generated/
 data/runtime/
 models/

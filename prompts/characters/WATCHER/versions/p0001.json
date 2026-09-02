@@ -1,0 +1,8 @@
+{
+  "schema_version": "sts-prompt-evolution-0.1",
+  "version": "p0001",
+  "character": "WATCHER",
+  "parent_version": null,
+  "skills": {},
+  "change": {"kind": "baseline", "description": "Watcher character prompt before human-gated evolution."}
+}

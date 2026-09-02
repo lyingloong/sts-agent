@@ -152,6 +152,31 @@ class PosthocFeedbackTests(unittest.TestCase):
         self.assertIn("sampled_action_ledger", messages[1]["content"])
         self.assertIn("保留格挡", messages[1]["content"])
 
+    def test_auto_prompt_allows_teacher_to_choose_both_directions(self) -> None:
+        messages = posthoc_feedback.build_prompt(
+            {"mode": "auto", "reinforce": "", "weaken": ""},
+            episode(),
+            max_candidates_per_direction=10,
+            max_input_chars=20000,
+        )
+        self.assertIn("自动归因模式", messages[0]["content"])
+        self.assertIn("终局死亡、低楼层、胜利或奖励数值本身不是任何单步的正负证据", messages[0]["content"])
+        self.assertIn("当时合法的替代动作", messages[0]["content"])
+        self.assertIn("通常每个方向 0-3 条", messages[0]["content"])
+        self.assertIn('"feedback_mode":"auto"', messages[1]["content"])
+        client = object.__new__(posthoc_feedback.PosthocFeedbackClient)
+        self.assertEqual(client.automatic_reflection()["reason"], "teacher_auto")
+
+    def test_human_prompt_keeps_human_direction_authoritative(self) -> None:
+        messages = posthoc_feedback.build_prompt(
+            {"mode": "human", "reinforce": "合理防御", "weaken": ""},
+            episode(),
+            max_candidates_per_direction=10,
+            max_input_chars=20000,
+        )
+        self.assertIn("人类复盘是唯一的价值方向", messages[0]["content"])
+        self.assertNotIn("通常每个方向 0-3 条", messages[0]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

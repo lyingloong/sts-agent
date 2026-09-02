@@ -1,6 +1,6 @@
-# 终局人类反思归因 GRPO
+# 终局反思归因 GRPO
 
-该模式用于在线 RL 的第二阶段：每局游戏结束后，人类只写两段简短自然语言复盘，强教师把复盘定位到少量已经执行的模型动作，远端只对这些动作更新 LoRA。它不替代现有的终局奖励，也不把教师思考过程写入训练数据。
+该模式用于在线 RL 的第二阶段：每局游戏结束后，人类可写两段简短自然语言复盘，或让强教师基于完整动作账本自行复盘；教师把结论定位到少量已经执行的模型动作，远端只对这些动作更新 LoRA。它不替代现有的终局奖励，也不把教师思考过程写入训练数据。
 
 ## 目标与边界
 
@@ -22,6 +22,7 @@
 ```json
 "posthoc_feedback": {
   "enabled": true,
+  "mode": "human",
   "base_url": "https://.../compatible-mode/v1",
   "model": "deepseek-v4-pro",
   "api_key_file": "ali_api.txt",
@@ -53,20 +54,22 @@
 
 1. 正常以 `policy.runtime: "remote_online_rl"` 启动游戏与 Overlay。
 2. 每个 rollout 的策略动作仍由冻结的远端 adapter 自动采样和执行。
-3. `GAME_OVER` 或 `VICTORY` 后，Overlay 弹出 `ROLLOUT REFLECTION`，其中按时间顺序显示本局全部已确认动作（`step_id`、Act-Floor、场景、模型/自动来源和动作语义）。两栏均可留空；点击“跳过本局”也可继续。
-4. controller 保存人类文字，然后使用 DeepSeek 生成每个方向至多 10 个候选归因。
+3. `mode="human"` 时，`GAME_OVER` 或 `VICTORY` 后 Overlay 弹出 `ROLLOUT REFLECTION`，其中按时间顺序显示本局全部已确认动作（`step_id`、Act-Floor、场景、模型/自动来源和动作语义）。两栏均可留空；点击“跳过本局”也可继续。`mode="auto"` 时不弹窗，教师直接根据终局状态、完整动作账本和各步骤公开动态状态独立生成双向归因。
+4. controller 保存人工文字或自动复盘标记，然后使用 DeepSeek 生成每个方向至多 10 个候选归因。
 5. 本地校验 `step_id`、方向、置信度、严重度和冲突；仅保留每方向最高置信度的 8 个、且 `confidence >= 0.75` 的动作。
 6. 完整 episode 与筛选后的归因上传。第 4 局结束时，同一远端 GPU 进行一次 QLoRA 更新并保存新版本。
 
 教师返回后，Overlay 会显示一个非阻塞的 `TEACHER ATTRIBUTION` 窗口，其中列出实际通过校验、会参与更新的动作（`step_id`、动作、置信度、严重度和简短证据），以及过滤数量和原因摘要。它不显示教师思考或原始响应。
 
-若人类只填写其中一栏，该栏是唯一允许的归因方向；教师在空栏方向给出的候选会被拒绝，不能凭自身判断补出正或负反馈。
+`mode="human"` 下，若人类只填写其中一栏，该栏是唯一允许的归因方向；教师在空栏方向给出的候选会被拒绝，不能凭自身判断补出正或负反馈。`mode="auto"` 下没有这一限制，教师可在严格置信度过滤前分别提出正、负候选；这不是独立真值，建议每组定期人工审计 artifact，避免教师和策略共同偏差被自我强化。
+
+自动模式的教师提示还要求将终局结果只作为复盘范围而非逐步标签：候选必须给出当时合法替代动作或公开状态中的直接后果，不能仅因整局死亡、低楼层、`END_TURN`、`SKIP` 或牌的名称归因。它通常每个方向只返回 0-3 条；`max_candidates_per_direction` 仍是硬上限，只有多个相互独立且证据明确的问题才应超过该数量。
 
 文本客户端也支持该流程：终局时依次输入 `可强化>` 和 `应弱化>`；两行都为空即跳过。
 
 ### 教师归因输入
 
-`posthoc-attribution-v2` 对每个 `online_policy_sample` 步骤发送所选 alias/动作标签、该步完整 alias 合法动作表，以及动态公开状态。战斗状态包括手牌的 `id/name/type/cost/upgrades/is_playable`、能量/格挡/Power、敌人血量/格挡/意图/Power、牌堆计数和最近动作；非战斗状态保留公开的选项、奖励、商店、事件历史和牌组信息。地图图结构每个 Act 只完整发送一次，后续地图步骤通过 `map_id` 引用并保留当前位置和可达节点。
+`posthoc-attribution-v3` 对每个 `online_policy_sample` 步骤发送所选 alias/动作标签、该步完整 alias 合法动作表，以及动态公开状态。战斗状态包括手牌的 `id/name/type/cost/upgrades/is_playable`、能量/格挡/Power、敌人血量/格挡/意图/Power、牌堆计数和最近动作；非战斗状态保留公开的选项、奖励、商店、事件历史和牌组信息。首领档案与遗物造成的决策约束也随动态状态发送；地图图结构每个 Act 只完整发送一次，后续地图步骤通过 `map_id` 引用并保留当前位置和可达节点。
 
 卡牌、药水、遗物和 Power 的 `description`、flavor/effect 等由本地静态知识库补全的字段不会发送。这避免跨步骤重复静态文本，同时不损失归因所需的实时数值与可选动作。默认 `max_input_chars=96000`；达到上限时仍可在本机配置中提高，配置校验允许至 `262144`。
 
@@ -80,7 +83,7 @@ data/attributions/attribution-<run_id>.json
 data/trajectories/action-trace-<run_id>....jsonl
 ```
 
-`reflection` 文件保存人类两段文字、终局摘要和提交时间。`attribution` 文件保存教师模型/延迟/用量元数据、已应用与被拒绝的候选和拒绝原因。两类文件都不保存教师原始 completion、思考内容或链式推理。远端 episode 只带如下最小更新字段：
+`reflection` 文件保存人类两段文字或 `mode="auto"` 自动复盘标记、终局摘要和提交时间。`attribution` 文件保存教师模型/延迟/用量元数据、已应用与被拒绝的候选和拒绝原因。两类文件都不保存教师原始 completion、思考内容或链式推理。远端 episode 只带如下最小更新字段：
 
 ```json
 {

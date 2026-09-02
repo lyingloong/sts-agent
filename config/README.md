@@ -4,7 +4,16 @@
 
 ## 配置归属
 
-`agent.json` 是所有运行模式唯一的策略身份来源。`policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 只能在这里设置一次；本机推理、远端固定推理、远端在线 RL 都使用同一组值。
+配置加载器以 `tools/agent_config.py` 的默认值为基线，对所选 JSON 做严格稀疏合并。推荐按模式使用 `config/modes/*.json`，每次启动 controller、Overlay、终端时传入同一个 `--config`；这样一个模式只维护自己的开关与关键参数。`config/agent.json` 仍保留，用于兼容不带参数的旧命令。
+
+例如：
+
+```powershell
+python tools\communication_controller.py --config config\modes\prompt_evolution.json
+python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
+```
+
+`policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 在所选模式配置中只设置一次。本机推理、远端固定推理、远端在线 RL 不会再从多个配置段重复读取同一 adapter。
 
 远端被忽略的 `online_rl.json` 只描述一次在线训练如何执行，不能包含 `model`、`initial_adapter` 或 `initial_policy_version`。controller 通过 SSH 启动 worker 时显式传入这三个值，因此远端文件不能覆盖本机选择的初始策略。
 
@@ -42,11 +51,12 @@
 
 ### 教师与归因
 
-`teacher` 用于远程教师 SFT 采集，`posthoc_feedback` 用于在线 RL 终局的人类反思归因。两组都使用 OpenAI 兼容 API。
+`teacher` 用于远程教师 SFT 采集和 Prompt 演化中的实际决策/策略分析，`posthoc_feedback` 用于在线 RL 终局归因。后者可由人类反思定向，也可由教师自动复盘；这些功能都使用 OpenAI 兼容 API。
 
 | 字段 | 含义 |
 | --- | --- |
 | `<group>.enabled` | 是否启用该功能；`teacher` 与 `policy` 不能同时启用，`posthoc_feedback` 仅允许在线 RL。 |
+| `posthoc_feedback.mode` | `human`（默认，终局显示正/负人工反思框）或 `auto`（不请求人工输入，教师根据终局与完整动作账本自行做双向归因）。自动模式只适合探索，建议定期审计归因 artifact。 |
 | `<group>.base_url` / `<group>.model` | API 根地址与模型 ID。 |
 | `<group>.api_key_file` | 相对项目根目录的密钥文件，必须被 Git 忽略。 |
 | `<group>.timeout_seconds` / `max_retries` | 单次 API 请求超时和重试次数。 |
@@ -58,6 +68,20 @@
 | `posthoc_feedback.max_candidates_per_direction` | 教师每个方向可提出的候选步骤数。 |
 | `posthoc_feedback.max_applied_per_direction` | 本地校验后每个方向实际送入更新的最多步骤数。 |
 | `posthoc_feedback.min_confidence` | 接受教师归因步骤的最低置信度。 |
+
+### Prompt 演化
+
+`prompt_evolution` 是固定角色、进阶和游戏种子的人工审核式策略迭代模式。它与 `policy`、`posthoc_feedback` 互斥，使用同一份 `teacher` USTC API：教师只提出一个场景或角色 skill 的小型替换，候选策略在同一种子上重跑后交给人工审核。首次 incumbent 可以使用随机种子，观察到游戏返回的真实种子后才建立候选复跑锚点。只有接受才会写入当前角色目录下 Git 跟踪的 `prompts/characters/<角色>/versions/pNNNN.json` 并更新 manifest；候选、轨迹、拒绝理由和 session 状态写入被忽略的 `data/prompt_evolution/`。
+
+| 字段 | 含义 |
+| --- | --- |
+| `prompt_evolution.enabled` | 启用固定种子 prompt 演化；需 `teacher.enabled=true`、`policy.enabled=false`、`posthoc_feedback.enabled=false`。 |
+| `policy_dir` | 角色 Prompt 库的项目相对目录；运行时使用其下的 `<角色>/manifest.json` 和 `versions/`。 |
+| `output_dir` | 候选、重跑轨迹和审核状态的本地实验目录。 |
+| `max_skill_chars` | 单个场景补充策略的最大字符数；防止候选变成长篇新 prompt。 |
+| `max_analysis_input_chars` / `max_analysis_tokens` | 发送给 USTC 演化教师的完整动作账本输入和输出上限。 |
+| `max_revisions_per_cycle` | 同一候选被拒绝后最多自动重写次数。 |
+| `auto_continue` | 接受候选后是否立即以新版本作为 incumbent 继续下一轮；关闭则停在接受结果等待手动开始。 |
 
 ### Overlay
 

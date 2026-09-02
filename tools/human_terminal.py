@@ -156,25 +156,47 @@ def print_posthoc_attribution(packet: dict) -> None:
                 print(f"    {evidence}")
 
 
-def main() -> int:
+def read_prompt_evolution_review(packet: dict) -> dict:
+    review = packet.get("review") if isinstance(packet.get("review"), dict) else {}
+    print("\n" + str(review.get("comparison", {})))
+    print("请审核候选 prompt：accept 接受，reject 拒绝并重写，abandon 放弃本次。")
     try:
-        config = load_agent_config()
+        verdict = input("审核> ").strip().lower()
+        reason = input("理由（拒绝时必填）> ").strip() if verdict == "reject" else ""
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return {"type": "prompt_evolution_review", "verdict": "abandon", "reason": "terminal interrupted"}
+    if verdict in {"a", "accept", "y", "yes"}:
+        verdict = "accept"
+    elif verdict in {"r", "reject", "n", "no"}:
+        verdict = "reject"
+    else:
+        verdict = "abandon"
+    return {"type": "prompt_evolution_review", "verdict": verdict, "reason": reason}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Terminal UI for the StS CommunicationMod controller")
+    parser.add_argument("--config", default="config/agent.json", help="项目根目录下的配置文件路径")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--no-clear", action="store_true", help="不要在刷新时清空终端")
+    parser.add_argument("--no-color", action="store_true", help="禁用终端颜色")
+    try:
+        args = parser.parse_args()
+        config = load_agent_config(config_file=args.config)
     except ConfigError as exc:
         print(f"配置文件错误：{exc}", file=sys.stderr)
         return 2
-    parser = argparse.ArgumentParser(description="Terminal UI for the StS CommunicationMod controller")
-    parser.add_argument("--host", default=config["server"]["host"])
-    parser.add_argument("--port", type=int, default=config["server"]["port"])
-    parser.add_argument("--no-clear", action="store_true", help="不要在刷新时清空终端")
-    parser.add_argument("--no-color", action="store_true", help="禁用终端颜色")
-    args = parser.parse_args()
+    host = args.host or config["server"]["host"]
+    port = args.port or config["server"]["port"]
     clear = not args.no_clear
     use_color = not args.no_color and sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
     try:
-        connection = socket.create_connection((args.host, args.port), timeout=30)
+        connection = socket.create_connection((host, port), timeout=30)
     except OSError as exc:
-        print(f"无法连接 controller {args.host}:{args.port}: {exc}", file=sys.stderr)
+        print(f"无法连接 controller {host}:{port}: {exc}", file=sys.stderr)
         print("请先启动带 communication_controller.py 的游戏。", file=sys.stderr)
         return 1
 
@@ -184,7 +206,7 @@ def main() -> int:
     with connection:
         reader = connection.makefile("r", encoding="utf-8", newline="\n")
         writer = connection.makefile("w", encoding="utf-8", newline="\n")
-        print(f"已连接到 StS controller {args.host}:{args.port}", flush=True)
+        print(f"已连接到 StS controller {host}:{port}", flush=True)
         for line in reader:
             try:
                 packet = json.loads(line)
@@ -208,6 +230,10 @@ def main() -> int:
                 writer.flush()
             elif packet_type == "posthoc_attribution_result":
                 print_posthoc_attribution(packet)
+            elif packet_type == "prompt_evolution_review_request":
+                response = read_prompt_evolution_review(packet)
+                writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                writer.flush()
             elif packet_type == "shutdown":
                 print(packet.get("message", "controller stopped"), flush=True)
                 break

@@ -211,6 +211,72 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(action["command"], "CHOOSE 1")
         self.assertEqual(detail["reward_type"], "CARD")
 
+    def test_sozu_masks_potion_rewards_and_shop_potions(self) -> None:
+        message = full_combat_reward_message()
+        message["game_state"]["relics"] = [{"id": "Sozu", "name": "Sozu"}]
+        message["game_state"]["screen_state"]["rewards"] = [
+            {"reward_type": "POTION", "potion": {"id": "DexterityPotion", "name": "敏捷药水"}},
+            {"reward_type": "CARD"},
+        ]
+        message["game_state"]["choice_list"] = ["potion", "card"]
+        self.assertEqual(
+            [action["id"] for action in controller.semantic_actions(message)],
+            ["CHOOSE:index=1", "PROCEED"],
+        )
+        _, _, error = controller.parse_human_input("0", message)
+        self.assertIn("苏祖", error or "")
+
+        shop = {
+            "in_game": True,
+            "available_commands": ["choose", "proceed"],
+            "game_state": {
+                "screen_type": "SHOP_SCREEN",
+                "choice_list": ["敏捷药水 50", "打击"],
+                "relics": [{"id": "Sozu", "name": "Sozu"}],
+                "screen_state": {"potions": [{"id": "DexterityPotion", "name": "敏捷药水"}]},
+            },
+        }
+        self.assertEqual(
+            [action["id"] for action in controller.semantic_actions(shop)],
+            ["CHOOSE:index=1", "PROCEED"],
+        )
+
+    def test_ectoplasm_masks_gold_reward_and_automation_skips_it(self) -> None:
+        message = combat_reward_message()
+        message["game_state"]["relics"] = [{"id": "Ectoplasm", "name": "灵体外质"}]
+        actions = controller.semantic_actions(message)
+        self.assertEqual([action["id"] for action in actions], ["CHOOSE:index=1", "PROCEED"])
+        result = controller.environment_auto_action(message, actions)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result[0]["command"], "CHOOSE 1")
+        _, _, error = controller.parse_human_input("0", message)
+        self.assertIn("灵体外质", error or "")
+
+    def test_boss_profile_and_relic_constraints_are_model_visible(self) -> None:
+        message = combat_message()
+        message["game_state"]["act_boss"] = "Hexaghost"
+        message["game_state"]["relics"] = [{"id": "Velvet Choker", "name": "添水"}]
+        history = [
+            {"action_kind": "play"},
+            {"action_kind": "play"},
+        ]
+        observation = controller.policy_observation(message, action_history=history)
+        self.assertEqual(observation["act_boss_profile"]["id"], "HEXAGHOST")
+        choker = next(item for item in observation["decision_constraints"] if item["kind"] == "CARD_PLAY_LIMIT")
+        self.assertEqual(choker["plays_remaining_this_turn"], 4)
+
+    def test_runic_dome_hides_live_enemy_intents_from_model_and_terminal(self) -> None:
+        message = combat_message()
+        message["game_state"]["relics"] = [{"id": "Runic Dome", "name": "符文圆顶"}]
+        monster = message["game_state"]["combat_state"]["monsters"][0]
+        monster.update({"intent": "ATTACK", "move_base_damage": 8, "move_adjusted_damage": 9, "move_hits": 1})
+        observation = controller.policy_observation(message)
+        model_monster = observation["combat"]["monsters"][0]
+        self.assertNotIn("intent", model_monster)
+        self.assertNotIn("intent_damage", model_monster)
+        self.assertIn("Intent=HIDDEN", controller.format_view(message, "run-1"))
+
     def test_environment_automation_opens_shop_before_policy(self) -> None:
         command, action, decision = controller.ask_action(NoBridge(), shop_room_message(), "run-1", policy=FakePolicy({}))
         self.assertEqual(command, "CHOOSE 0")

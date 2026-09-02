@@ -20,6 +20,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertNotIn("min_margin", confidence)
         self.assertEqual(config["teacher"]["max_input_chars"], 32000)
         self.assertEqual(config["posthoc_feedback"]["max_input_chars"], 96000)
+        self.assertEqual(config["posthoc_feedback"]["mode"], "human")
 
     def test_teacher_input_limit_must_be_a_non_negative_integer(self) -> None:
         config = agent_config._merge(agent_config.DEFAULT_CONFIG, {"teacher": {"max_input_chars": -1}})
@@ -64,6 +65,25 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(validated["posthoc_feedback"]["enabled"])
         self.assertEqual(validated["posthoc_feedback"]["max_candidates_per_direction"], 10)
 
+    def test_posthoc_auto_mode_is_validated(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {
+                "policy": {
+                    "runtime": "remote_online_rl",
+                    "model": {"initial_adapter": "outputs/sft/example"},
+                },
+                "posthoc_feedback": {"enabled": True, "mode": "auto"},
+            },
+        )
+        self.assertEqual(agent_config.validate_config(config)["posthoc_feedback"]["mode"], "auto")
+        invalid = agent_config._merge(agent_config.DEFAULT_CONFIG, {"posthoc_feedback": {"mode": "automatic"}})
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(invalid)
+        malformed = agent_config._merge(agent_config.DEFAULT_CONFIG, {"posthoc_feedback": {"mode": ["auto"]}})
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(malformed)
+
     def test_invalid_overlay_geometry_is_rejected(self) -> None:
         config = agent_config._merge(agent_config.DEFAULT_CONFIG, {"overlay": {"status": {"geometry": "wide"}}})
         with self.assertRaises(agent_config.ConfigError):
@@ -78,6 +98,15 @@ class AgentConfigTests(unittest.TestCase):
         self.assertFalse(config["overlay"]["frameless"])
         self.assertEqual(config["overlay"]["status"]["divider_columns"], 36)
         self.assertEqual(config["policy"]["remote"]["inference_gpu"]["device"], "auto")
+        self.assertEqual(config["posthoc_feedback"]["mode"], "auto")
+
+    def test_mode_profiles_are_valid_sparse_overrides(self) -> None:
+        mode_root = TOOLS_DIR.parent / "config" / "modes"
+        expected = {"manual", "candidate_assist", "teacher_sft", "prompt_evolution", "remote_inference", "remote_online_rl"}
+        self.assertTrue(expected.issubset({path.stem for path in mode_root.glob("*.json")}))
+        for name in expected:
+            config = agent_config.load_agent_config(TOOLS_DIR.parent, mode_root / f"{name}.json")
+            self.assertEqual(config["schema_version"], 1)
 
     def test_remote_inference_gpu_selector_is_validated(self) -> None:
         config = agent_config._merge(
@@ -100,6 +129,25 @@ class AgentConfigTests(unittest.TestCase):
             {"policy": {"runtime": "remote_online_rl", "development": {"mock": True}}},
         )
         self.assertTrue(agent_config.validate_config(mocked)["policy"]["development"]["mock"])
+
+    def test_prompt_evolution_requires_teacher_and_disables_other_runtime_loops(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {
+                "policy": {"enabled": False},
+                "teacher": {"enabled": True},
+                "prompt_evolution": {"enabled": True},
+            },
+        )
+        validated = agent_config.validate_config(config)
+        self.assertTrue(validated["prompt_evolution"]["enabled"])
+
+        invalid = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"prompt_evolution": {"enabled": True}},
+        )
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(invalid)
 
 
 if __name__ == "__main__":

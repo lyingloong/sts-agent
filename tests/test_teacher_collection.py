@@ -52,6 +52,28 @@ class TeacherClientTests(unittest.TestCase):
         self.assertIn("不可逆", prompt)
         self.assertNotIn("【战斗决策】", prompt)
 
+    def test_teacher_prompt_adds_character_specific_guidance(self) -> None:
+        prompt = teacher_prompts.build_system_prompt(
+            {"screen_type": "NONE", "room_phase": "COMBAT", "class": "THE_SILENT"}
+        )
+        self.assertIn("Silent 角色 Prompt", prompt)
+        self.assertIn("毒、刀、弃牌", prompt)
+        self.assertNotIn("力量、单体伤害", prompt)
+
+    def test_each_character_has_an_isolated_prompt_library(self) -> None:
+        expected = {
+            "IRONCLAD": "力量、单体伤害",
+            "THE_SILENT": "毒、刀、弃牌",
+            "DEFECT": "充能球、集中",
+            "WATCHER": "姿态及其进出代价",
+        }
+        for character, marker in expected.items():
+            prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP", "class": character})
+            self.assertIn(marker, prompt)
+            for other, other_marker in expected.items():
+                if other != character:
+                    self.assertNotIn(other_marker, prompt)
+
     def test_teacher_prompt_distinguishes_generated_combat_card_choice(self) -> None:
         prompt = teacher_prompts.build_system_prompt(
             {

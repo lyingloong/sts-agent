@@ -47,11 +47,15 @@ def configure_windows_system_proxy() -> str | None:
 
 
 def parse_args() -> argparse.Namespace:
+    preliminary_parser = argparse.ArgumentParser(add_help=False)
+    preliminary_parser.add_argument("--config", default="config/agent.json")
+    preliminary, _ = preliminary_parser.parse_known_args()
     try:
-        policy = load_agent_config()["policy"]
+        policy = load_agent_config(config_file=preliminary.config)["policy"]
     except ConfigError as exc:
         raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="从 Hugging Face 官方预下载 Candidate Assist 使用的 Qwen 模型")
+    parser.add_argument("--config", default=preliminary.config, help="项目根目录下的配置文件路径")
     parser.add_argument("--model", default=policy["model"]["base"])
     parser.add_argument("--endpoint", default=policy["model"]["hub_endpoint"])
     parser.add_argument("--force", action="store_true", help="重新检查并下载缺失/更新文件")

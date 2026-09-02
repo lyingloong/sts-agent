@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "enabled": false
+  },
+  "teacher": {
+    "enabled": true,
+    "base_url": "https://api.llm.ustc.edu.cn/",
+    "model": "deepseek-v4-pro",
+    "api_key_file": "ustc_api.txt",
+    "thinking": false,
+    "json_mode": true,
+    "streaming": false,
+    "max_tokens": 5200
+  },
+  "posthoc_feedback": {
+    "enabled": false
+  },
+  "prompt_evolution": {
+    "enabled": false
+  }
+}

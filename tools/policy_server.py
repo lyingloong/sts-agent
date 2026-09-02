@@ -94,7 +94,7 @@ def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]
     lines = [
         "You are a Slay the Spire action ranker.",
         "Rank only the supplied legal action IDs. The IDs are short tokens such as A1 and A2; copy them exactly.",
-        "Prefer survival and a strong long-term win chance.",
+        "Prefer survival and a strong long-term win chance. Treat decision_constraints and the visible Act boss as binding strategic context.",
         f"Return exactly one JSON object with at most {top_k} action IDs in descending preference.",
         'Required format: {"ranked_action_ids":["ACTION_ID_1","ACTION_ID_2"]}',
         "Do not include prose, markdown, commands, or action IDs outside the supplied list.",
@@ -108,7 +108,7 @@ def build_scoring_prompt(observation: dict[str, Any], legal_actions: list[dict[s
     """Build a prompt whose next completion is exactly one action alias."""
     lines = [
         "You are a Slay the Spire action selector.",
-        "Choose exactly one supplied legal action ID that maximizes survival and long-term win chance.",
+        "Choose exactly one supplied legal action ID that maximizes survival and long-term win chance. Honor decision_constraints and plan for the visible Act boss.",
         "Output only that exact action ID, followed by a newline. Do not output JSON, prose, or a command.",
     ]
     lines.extend(action_prompt_lines(observation, legal_actions))
@@ -470,11 +470,15 @@ def serve(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
+    preliminary_parser = argparse.ArgumentParser(add_help=False)
+    preliminary_parser.add_argument("--config", default="config/agent.json")
+    preliminary, _ = preliminary_parser.parse_known_args()
     try:
-        policy = load_agent_config()["policy"]
+        policy = load_agent_config(config_file=preliminary.config)["policy"]
     except ConfigError as exc:
         raise SystemExit(f"invalid agent configuration: {exc}") from exc
     parser = argparse.ArgumentParser(description="Qwen ranker for StS Candidate Assist")
+    parser.add_argument("--config", default="config/agent.json", help="项目根目录下的配置文件路径")
     parser.add_argument("--model", default=policy["model"]["base"])
     parser.add_argument(
         "--adapter",

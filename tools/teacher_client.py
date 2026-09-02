@@ -159,13 +159,19 @@ class RemoteTeacherClient:
             self._api_key = read_api_key(self.api_key_path)
         return self._api_key
 
-    def _payload(self, observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    def _payload(
+        self,
+        observation: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": build_system_prompt(observation),
+                    "content": system_prompt or build_system_prompt(observation),
                 },
                 {
                     "role": "user",
@@ -403,12 +409,15 @@ class RemoteTeacherClient:
         observation: dict[str, Any],
         legal_actions: list[dict[str, Any]],
         on_update: TeacherUpdate | None = None,
+        *,
+        system_prompt: str | None = None,
+        prompt_version: str | None = None,
     ) -> dict[str, Any]:
         legal_ids = {action_id(action) for action in legal_actions if action_id(action)}
         if not legal_ids:
             raise TeacherError("teacher called without legal actions")
         self.request_id += 1
-        payload = self._payload(observation, legal_actions)
+        payload = self._payload(observation, legal_actions, system_prompt=system_prompt)
         started = time.monotonic()
         last_error: TeacherError | None = None
         for attempt in range(self.max_retries + 1):
@@ -438,7 +447,7 @@ class RemoteTeacherClient:
                     "action_id": selected,
                     "model_id": str(response.get("model") or self.model),
                     "thinking_enabled": self.thinking,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_version": prompt_version or PROMPT_VERSION,
                     "latency_ms": round((time.monotonic() - started) * 1000),
                     "attempt": attempt + 1,
                     "finish_reason": str(choices[0].get("finish_reason") or ""),

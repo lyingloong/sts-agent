@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "enabled": false
+  },
+  "teacher": {
+    "enabled": true,
+    "base_url": "https://api.llm.ustc.edu.cn/",
+    "model": "deepseek-v4-pro",
+    "api_key_file": "ustc_api.txt",
+    "thinking": false,
+    "json_mode": true,
+    "streaming": false,
+    "max_tokens": 5200
+  },
+  "posthoc_feedback": {
+    "enabled": false
+  },
+  "prompt_evolution": {
+    "enabled": true,
+    "policy_dir": "prompts/characters",
+    "output_dir": "data/prompt_evolution",
+    "max_skill_chars": 2400,
+    "max_analysis_input_chars": 96000,
+    "max_analysis_tokens": 1800,
+    "max_revisions_per_cycle": 3,
+    "auto_continue": true
+  }
+}

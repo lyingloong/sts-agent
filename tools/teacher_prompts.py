@@ -6,15 +6,26 @@ separate from the local policy prompt and from the durable SFT target.
 
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 
-PROMPT_VERSION = "sts1-teacher-zh-v3"
+PROMPT_VERSION = "sts1-teacher-zh-v4"
+CHARACTER_PROMPT_LIBRARY_VERSION = "sts1-character-prompt-library-v1"
+CHARACTER_KEYS = frozenset({"IRONCLAD", "THE_SILENT", "DEFECT", "WATCHER"})
+CHARACTER_ALIASES = {
+    "IRONCLAD": "IRONCLAD",
+    "THE_SILENT": "THE_SILENT",
+    "SILENT": "THE_SILENT",
+    "DEFECT": "DEFECT",
+    "WATCHER": "WATCHER",
+}
 
 COMMON_PROMPT = """你是《杀戮尖塔 1》的远程教师，负责为模仿学习轨迹选择一个动作。
 目标是提高整局通关概率，而不是只追求当前房间的即时收益。只使用观察中明确给出的公开信息；不要臆测没有展示的事件结果、牌堆顺序、敌人意图或物品效果。当前合法动作列表是唯一可执行集合。
 
-做决定时先识别当前场景和不可逆后果，再比较每个合法动作：当前生命和即将受到的伤害、牌组缺口、遗物与药水、金币、当前 Act/Floor、未来地图路线和最近动作。优先选择稳健、能解决当前最紧迫问题且不依赖未经证实假设的动作。不要因为某张牌/遗物稀有就自动选择，也不要为了保留资源而在即将失败时拒绝使用资源。
+做决定时先识别当前场景和不可逆后果，再比较每个合法动作：当前生命和即将受到的伤害、牌组缺口、遗物与药水、金币、当前 Act/Floor、当前 Act 已公开首领、未来地图路线和最近动作。`decision_constraints` 是已持有遗物造成的真实限制或代价，必须服从；不要把已被约束排除的选择当作可行方案。优先选择稳健、能解决当前最紧迫问题且不依赖未经证实假设的动作。不要因为某张牌/遗物稀有就自动选择，也不要为了保留资源而在即将失败时拒绝使用资源。
 
 你可以进行内部推理，但最终只能返回一个 JSON 对象，格式严格为 {\"action_id\":\"A<n>\"}。其中 A<n> 必须来自当前合法动作列表；不要输出解释、Markdown、命令或其他动作 ID。"""
 
@@ -110,6 +121,34 @@ SCENARIO_PROMPTS: dict[str, str] = {
 }
 
 
+def character_key(value: Any) -> str | None:
+    """Normalize controller and game-state character identifiers."""
+
+    normalized = str(value or "").strip().upper().replace(" ", "_")
+    return CHARACTER_ALIASES.get(normalized)
+
+
+@lru_cache(maxsize=len(CHARACTER_KEYS))
+def character_prompt(character: str) -> str:
+    """Read the tracked, stable strategy library for one StS character."""
+
+    normalized = character_key(character)
+    if normalized is None:
+        return ""
+    path = Path(__file__).resolve().parents[1] / "prompts" / "characters" / normalized / "base.md"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return text
+
+
+def character_key_for_observation(observation: dict[str, Any], fallback: Any = None) -> str | None:
+    """Prefer the public game-state class, with run metadata as a fallback."""
+
+    return character_key(observation.get("class")) or character_key(fallback)
+
+
 def scenario_key(observation: dict[str, Any]) -> str:
     """Map normalized public state to a specific teacher strategy prompt."""
     screen = str(observation.get("screen_type") or "").upper()
@@ -146,7 +185,14 @@ def scenario_key(observation: dict[str, Any]) -> str:
     return screen if screen in SCENARIO_PROMPTS else "GENERIC"
 
 
-def build_system_prompt(observation: dict[str, Any]) -> str:
+def build_system_prompt(observation: dict[str, Any], *, character: Any = None) -> str:
     """Return the teacher-only Chinese system prompt for this observation."""
+
     key = scenario_key(observation)
-    return f"{COMMON_PROMPT}\n\n{SCENARIO_PROMPTS[key]}"
+    role = character_key_for_observation(observation, character)
+    role_prompt = character_prompt(role) if role else ""
+    parts = [COMMON_PROMPT]
+    if role_prompt:
+        parts.append(role_prompt)
+    parts.append(SCENARIO_PROMPTS[key])
+    return "\n\n".join(parts)

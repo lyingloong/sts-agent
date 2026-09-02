@@ -323,9 +323,55 @@ def attribution_result_text(packet: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def prompt_evolution_review_text(review: Any) -> str:
+    """Render a compact candidate comparison for the human gate."""
+
+    if not isinstance(review, dict):
+        return "没有可审核的 prompt 候选。"
+    comparison = review.get("comparison") if isinstance(review.get("comparison"), dict) else {}
+    incumbent = comparison.get("incumbent") if isinstance(comparison.get("incumbent"), dict) else {}
+    candidate = comparison.get("candidate") if isinstance(comparison.get("candidate"), dict) else {}
+    left = incumbent.get("metrics") if isinstance(incumbent.get("metrics"), dict) else {}
+    right = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+    change = comparison.get("change_summary") if isinstance(comparison.get("change_summary"), dict) else {}
+    lines = [
+        "PROMPT EVOLUTION REVIEW",
+        f"种子：{table_cell(comparison.get('seed') or '?')}",
+        f"旧版本：{table_cell(incumbent.get('policy_id') or '?')}  |  新版本：{table_cell(candidate.get('policy_id') or '?')}",
+        f"旧结果：{left.get('screen_type', '?')}  Act {left.get('act', '?')} Floor {left.get('floor', '?')}  HP {left.get('current_hp', '?')}/{left.get('max_hp', '?')}  分数 {left.get('score', '?')}",
+        f"新结果：{right.get('screen_type', '?')}  Act {right.get('act', '?')} Floor {right.get('floor', '?')}  HP {right.get('current_hp', '?')}/{right.get('max_hp', '?')}  分数 {right.get('score', '?')}",
+        f"分数变化：{comparison.get('score_delta', '?')}  | 自动判断：{'更好' if comparison.get('automatically_favorable') else '未超过旧版本'}",
+        "",
+        f"修改场景：{table_cell(change.get('target_skill') or '?')}",
+        f"问题诊断：{table_cell(change.get('diagnosis') or '未提供')}",
+        f"预期效果：{table_cell(change.get('expected_effect') or '未提供')}",
+        f"风险：{table_cell(change.get('risk') or '未提供')}",
+        "",
+        "原策略补充：",
+        table_cell(change.get("previous_instruction") or "（无）"),
+        "",
+        "候选策略补充：",
+        table_cell(change.get("instruction") or "（无）"),
+        "",
+        "证据步骤：" + ", ".join(f"#{item}" for item in change.get("evidence_step_ids", []) if isinstance(item, int)),
+    ]
+    evidence = comparison.get("evidence") if isinstance(comparison.get("evidence"), dict) else {}
+    candidate_evidence = evidence.get("candidate") if isinstance(evidence.get("candidate"), list) else []
+    if candidate_evidence:
+        lines.extend(("", "候选版本证据动作："))
+        for item in candidate_evidence:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"#{item.get('step_id', '?')} {table_cell(item.get('screen_type') or '?')} "
+                f"{table_cell(item.get('action') or '?')}"
+            )
+    return "\n".join(lines)
+
+
 def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     """Render the remote teacher's thinking/output without showing candidates."""
-    if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
+    if not isinstance(decision, dict) or decision.get("mode") not in {"teacher_collection", "prompt_evolution"}:
         return ""
     teacher = decision.get("teacher")
     teacher = teacher if isinstance(teacher, dict) else {}
@@ -337,8 +383,9 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     latency_text = f"{latency} ms" if isinstance(latency, (int, float)) else "-"
     thinking_enabled = teacher.get("thinking_enabled", True)
     mode_label = "思考已开启" if thinking_enabled else "快速模式"
+    title = "Prompt 演化教师" if decision.get("mode") == "prompt_evolution" else "远程教师模式"
     lines = [
-        f"远程教师模式 · {mode_label}",
+        f"{title} · {mode_label}",
         f"模型：{model}    状态：{status}",
         f"动作：{action}    延迟：{latency_text}",
     ]
@@ -366,6 +413,7 @@ class OverlayTerminal:
         self.saved_layout = self._load_layout()
         self.actions: queue.Queue[str] = queue.Queue()
         self.reflection_responses: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.prompt_evolution_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self.network_thread: threading.Thread | None = None
         self.closing = False
         self.pending_view = False
@@ -955,7 +1003,7 @@ class OverlayTerminal:
         self._set_online_rl_panel(packet.get("online_rl"), packet.get("model_id"))
 
     def _set_teacher_panel(self, decision: dict[str, Any] | None) -> None:
-        if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
+        if not isinstance(decision, dict) or decision.get("mode") not in {"teacher_collection", "prompt_evolution"}:
             self._set_text(self.teacher_text, teacher_panel_text(decision))
             return
         teacher = decision.get("teacher")
@@ -1166,7 +1214,7 @@ class OverlayTerminal:
             )
         decision = packet.get("decision")
         self._clear_candidate_actions()
-        teacher_mode = isinstance(decision, dict) and decision.get("mode") == "teacher_collection"
+        teacher_mode = isinstance(decision, dict) and decision.get("mode") in {"teacher_collection", "prompt_evolution"}
         online_rl_mode = isinstance(decision, dict) and decision.get("mode") == "remote_online_rl"
         environment_mode = isinstance(decision, dict) and decision.get("mode") == "environment_automation"
         if online_rl_mode:
@@ -1504,6 +1552,122 @@ class OverlayTerminal:
         text.configure(yscrollcommand=scrollbar.set)
         dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_attribution_dialog(dialog))
 
+    def _show_prompt_evolution_review(self, packet: dict[str, Any]) -> None:
+        """Show the fixed-seed candidate gate and return a human verdict."""
+
+        if self.closing:
+            self.prompt_evolution_responses.put({"type": "prompt_evolution_review", "verdict": "abandon"})
+            return
+        if self.reflection_dialog is not None and self.reflection_dialog.winfo_exists():
+            return
+        self.pending_view = False
+        self._set_controls_enabled(False)
+        dialog = tk.Toplevel(self.root)
+        self.reflection_dialog = dialog
+        dialog.title("StS Agent - Prompt Evolution Review")
+        dialog.geometry("820x760+520+100")
+        dialog.minsize(620, 520)
+        dialog.configure(background=BACKGROUND)
+        dialog.attributes("-topmost", self.always_on_top)
+        dialog.grab_set()
+        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
+        outer.grid(sticky="nsew")
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_rowconfigure(3, weight=0)
+        outer.grid_rowconfigure(5, weight=0)
+        outer.grid_columnconfigure(0, weight=1)
+        header = tk.Frame(outer, background=BACKGROUND)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            header,
+            text="PROMPT EVOLUTION REVIEW",
+            foreground=ACCENT,
+            background=BACKGROUND,
+            font=(self.ui_font, 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self._minimize_button(header, dialog, background=BACKGROUND).grid(row=0, column=1, sticky="e")
+        text_frame = tk.Frame(outer, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        text = tk.Text(
+            text_frame,
+            wrap="word",
+            state="disabled",
+            background=FIELD,
+            foreground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=9,
+            font=(self.data_font, 10),
+        )
+        text.grid(row=0, column=0, sticky="nsew")
+        text.configure(state="normal")
+        text.insert("1.0", prompt_evolution_review_text(packet.get("review")))
+        text.configure(state="disabled")
+        scrollbar = tk.Scrollbar(text_frame, command=text.yview, relief="flat", borderwidth=0, background=BUTTON, troughcolor=FIELD)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=scrollbar.set)
+        tk.Label(
+            outer,
+            text="拒绝理由（拒绝时必填；会作为下一轮教师修改依据）",
+            foreground=WARNING,
+            background=BACKGROUND,
+            font=(self.ui_font, 10, "bold"),
+        ).grid(row=2, column=0, sticky="w", pady=(10, 4))
+        reason = tk.Text(
+            outer,
+            height=4,
+            wrap="word",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=9,
+            pady=7,
+            font=(self.data_font, 10),
+        )
+        reason.grid(row=3, column=0, sticky="ew")
+        buttons = tk.Frame(outer, background=BACKGROUND)
+        buttons.grid(row=4, column=0, sticky="e", pady=(12, 0))
+
+        def finish(verdict: str) -> None:
+            if self.reflection_dialog is not dialog:
+                return
+            response = {
+                "type": "prompt_evolution_review",
+                "verdict": verdict,
+                "reason": reason.get("1.0", "end-1c").strip(),
+            }
+            if verdict == "reject" and not response["reason"]:
+                messagebox.showwarning("需要拒绝理由", "拒绝候选时请填写理由。", parent=dialog)
+                return
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.reflection_dialog = None
+            self.prompt_evolution_responses.put(response)
+            self._set_connection("Prompt 候选审核已提交", ACCENT)
+
+        abandon = self._button(buttons, "放弃本次", lambda: finish("abandon"), compact=True)
+        abandon.grid(row=0, column=0, padx=(0, 8))
+        reject = self._button(buttons, "拒绝并重写", lambda: finish("reject"), compact=True)
+        reject.configure(background="#6b4b2d", activebackground="#8a623c")
+        reject.grid(row=0, column=1, padx=(0, 8))
+        accept = self._button(buttons, "接受候选", lambda: finish("accept"), compact=True)
+        accept.configure(background=ACCENT, foreground="#10221f", activebackground="#61ddc2", activeforeground="#10221f", font=(self.ui_font, 9, "bold"))
+        accept.grid(row=0, column=2)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish("abandon"))
+        dialog.lift()
+        text.see("1.0")
+
     def _close_attribution_dialog(self, dialog: tk.Toplevel) -> None:
         if self.attribution_dialog is dialog:
             self.attribution_dialog = None
@@ -1580,6 +1744,11 @@ class OverlayTerminal:
                             writer.flush()
                         elif packet_type == "posthoc_attribution_result":
                             self._post_ui(self._show_attribution_result, packet)
+                        elif packet_type == "prompt_evolution_review_request":
+                            self._post_ui(self._show_prompt_evolution_review, packet)
+                            response = self.prompt_evolution_responses.get()
+                            writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                            writer.flush()
                         elif packet_type == "shutdown":
                             self._post_ui(self._set_connection, str(packet.get("message", "controller 已停止")), ERROR)
                             break
@@ -1666,6 +1835,7 @@ class OverlayTerminal:
         self._topmost_after = None
         self._save_layout()
         self.reflection_responses.put({"type": "posthoc_reflection", "skip": True})
+        self.prompt_evolution_responses.put({"type": "prompt_evolution_review", "verdict": "abandon"})
         self.actions.put("q")
         if self.reflection_dialog is not None:
             try:
@@ -1695,18 +1865,21 @@ class OverlayTerminal:
 
 def main() -> int:
     enable_windows_dpi_awareness()
-    try:
-        config = load_agent_config()
-    except ConfigError as exc:
-        print(f"配置文件错误：{exc}", file=sys.stderr)
-        return 2
     parser = argparse.ArgumentParser(description="Translucent two-window overlay client for the StS controller")
-    parser.add_argument("--host", default=config["server"]["host"])
-    parser.add_argument("--port", type=int, default=config["server"]["port"])
+    parser.add_argument("--config", default="config/agent.json", help="项目根目录下的配置文件路径")
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--no-topmost", action="store_true", help="本次启动不置顶窗口")
     args = parser.parse_args()
     try:
-        app = OverlayTerminal(config, args.host, args.port, config["overlay"]["always_on_top"] and not args.no_topmost)
+        config = load_agent_config(config_file=args.config)
+    except ConfigError as exc:
+        print(f"配置文件错误：{exc}", file=sys.stderr)
+        return 2
+    host = args.host or config["server"]["host"]
+    port = args.port or config["server"]["port"]
+    try:
+        app = OverlayTerminal(config, host, port, config["overlay"]["always_on_top"] and not args.no_topmost)
     except tk.TclError as exc:
         print(f"无法启动 Overlay：{exc}", file=sys.stderr)
         return 2

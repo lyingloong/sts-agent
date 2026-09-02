@@ -1,0 +1,8 @@
+{
+  "schema_version": "sts-prompt-evolution-0.1",
+  "character": "WATCHER",
+  "character_prompt_version": "sts1-character-prompt-library-v1",
+  "base_prompt_version": "sts1-teacher-zh-v4",
+  "active_version": "p0001",
+  "next_version_index": 2
+}

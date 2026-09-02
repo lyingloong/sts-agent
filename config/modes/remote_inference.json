@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "enabled": true,
+    "runtime": "remote_inference",
+    "model": {
+      "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+      "initial_adapter": "",
+      "initial_policy_version": "sft-v0"
+    },
+    "confidence_auto": {
+      "enabled": true,
+      "min_probability": 0.85
+    }
+  },
+  "teacher": {
+    "enabled": false
+  },
+  "posthoc_feedback": {
+    "enabled": false
+  },
+  "prompt_evolution": {
+    "enabled": false
+  }
+}

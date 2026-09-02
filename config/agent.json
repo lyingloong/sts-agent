@@ -5,7 +5,7 @@
     "port": 8765
   },
   "policy": {
-    "enabled": true,
+    "enabled": false,
     "runtime": "remote_online_rl",
     "model": {
       "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
@@ -44,7 +44,8 @@
     }
   },
   "posthoc_feedback": {
-    "enabled": true,
+    "enabled": false,
+    "mode": "auto",
     "base_url": "https://api.llm.ustc.edu.cn/",
     "model": "deepseek-v4-pro",
     "api_key_file": "ustc_api.txt",
@@ -58,8 +59,18 @@
     "max_applied_per_direction": 8,
     "min_confidence": 0.75
   },
+  "prompt_evolution": {
+    "enabled": true,
+    "policy_dir": "prompts/characters",
+    "output_dir": "data/prompt_evolution",
+    "max_skill_chars": 2400,
+    "max_analysis_input_chars": 96000,
+    "max_analysis_tokens": 1800,
+    "max_revisions_per_cycle": 3,
+    "auto_continue": true
+  },
   "teacher": {
-    "enabled": false,
+    "enabled": true,
     "base_url": "https://api.llm.ustc.edu.cn/",
     "model": "deepseek-v4-pro",
     "api_key_file": "ustc_api.txt",

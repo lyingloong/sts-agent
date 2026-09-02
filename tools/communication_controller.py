@@ -9,6 +9,7 @@ for the CommunicationMod protocol.
 from __future__ import annotations
 
 import copy
+import argparse
 import json
 import math
 import os
@@ -26,6 +27,7 @@ from typing import Any, Callable, TextIO
 from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
 from item_knowledge import normalize_item_key, potion_effect, relic_effect
+from monster_knowledge import boss_profile
 from posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
@@ -36,6 +38,7 @@ from posthoc_feedback import (
     write_artifact as write_posthoc_artifact,
 )
 from power_knowledge import power_description
+from prompt_evolution import PromptEvolutionError, PromptEvolutionManager
 from teacher_client import RemoteTeacherClient, TeacherError
 
 
@@ -129,9 +132,9 @@ def potion_inventory_full(state: dict[str, Any]) -> bool:
 
 
 def blocked_potion_reward_indices(message: dict[str, Any]) -> set[int]:
-    """Find reward/shop choices that would silently stall with full potions."""
+    """Find reward/shop choices unavailable from potion capacity or Sozu."""
     state = game_state(message)
-    if not potion_inventory_full(state):
+    if not potion_inventory_full(state) and not has_relic(state, "SOZU"):
         return set()
     screen = str(state.get("screen_type") or "").upper()
     choices = state.get("choice_list")
@@ -156,17 +159,53 @@ def blocked_potion_reward_indices(message: dict[str, Any]) -> set[int]:
         )
     elif screen == "SHOP_SCREEN":
         potion_names = {
-            str(item.get("name"))
+            str(item.get("name")).strip().casefold()
             for item in screen_state.get("potions", [])
             if isinstance(item, dict) and item.get("name")
         }
-        blocked.update(index for index, label in enumerate(choices) if str(label) in potion_names)
+        blocked.update(
+            index
+            for index, label in enumerate(choices)
+            if any(name and name in str(label).strip().casefold() for name in potion_names)
+        )
     return blocked
 
 
 def blocked_potion_choice_error(message: dict[str, Any], index: int) -> str | None:
     if index in blocked_potion_reward_indices(message):
+        if has_relic(game_state(message), "SOZU"):
+            return "持有苏祖（Sozu），不能再获得或购买药水；请改选其他选项。"
         return "药水栏已满，不能拾取或购买药水；请改选其他奖励，或先丢弃一瓶药水。"
+    return None
+
+
+def blocked_gold_reward_indices(message: dict[str, Any]) -> set[int]:
+    """Find CombatReward gold choices made invalid by Ectoplasm."""
+    state = game_state(message)
+    if not has_relic(state, "ECTOPLASM") or str(state.get("screen_type") or "").upper() != "COMBAT_REWARD":
+        return set()
+    choices = state.get("choice_list")
+    if not isinstance(choices, list):
+        return set()
+    screen_state = state.get("screen_state")
+    rewards = screen_state.get("rewards") if isinstance(screen_state, dict) else None
+    blocked = {
+        index
+        for index, reward in enumerate(rewards)
+        if isinstance(reward, dict) and str(reward.get("reward_type") or "").upper() == "GOLD"
+    } if isinstance(rewards, list) else set()
+    # Older CommunicationMod versions sometimes expose only a generic label.
+    blocked.update(
+        index
+        for index, label in enumerate(choices)
+        if str(label).strip().casefold() in {"gold", "金币"}
+    )
+    return blocked
+
+
+def blocked_gold_choice_error(message: dict[str, Any], index: int) -> str | None:
+    if index in blocked_gold_reward_indices(message):
+        return "持有灵体外质（Ectoplasm），不能再获得金币；请改选其他奖励。"
     return None
 
 
@@ -242,7 +281,9 @@ def environment_auto_action(
             for index, entry_type, reward in combat_reward_entries(message):
                 if entry_type != reward_type:
                     continue
-                if reward_type == "POTION" and potion_inventory_full(state):
+                if reward_type == "POTION" and (potion_inventory_full(state) or has_relic(state, "SOZU")):
+                    continue
+                if reward_type == "GOLD" and has_relic(state, "ECTOPLASM"):
                     continue
                 action = actions_by_id.get(f"CHOOSE:index={index}")
                 if action is None:
@@ -455,6 +496,94 @@ def visible_relic(relic: dict[str, Any]) -> dict[str, Any]:
 def relic_identity(relic: dict[str, Any]) -> str:
     """Return one stable static-knowledge key for a public relic instance."""
     return normalize_item_key(relic.get("id")) or normalize_item_key(relic.get("name"))
+
+
+RELIC_DECISION_RULES = {
+    "SOZU": {
+        "kind": "NO_POTION_GAIN",
+        "instruction": "持有苏祖（Sozu）：不能再获得或购买药水。",
+    },
+    "ECTOPLASM": {
+        "kind": "NO_GOLD_GAIN",
+        "instruction": "持有灵体外质（Ectoplasm）：不能再获得金币。",
+    },
+    "RUNICDOME": {
+        "kind": "HIDDEN_ENEMY_INTENTS",
+        "instruction": "持有符文圆顶（Runic Dome）：敌人意图在战斗中不可见。",
+    },
+    "VELVETCHOKER": {
+        "kind": "CARD_PLAY_LIMIT",
+        "instruction": "持有添水（Velvet Choker）：每回合最多打出 6 张牌。",
+    },
+    "CURSEDKEY": {
+        "kind": "CHEST_ADDS_CURSE",
+        "instruction": "持有诅咒钥匙（Cursed Key）：开启宝箱会获得一张诅咒。",
+    },
+    "COFFEEDRIPPER": {
+        "kind": "NO_REST",
+        "instruction": "持有咖啡滴滤器（Coffee Dripper）：不能在营火休息。",
+    },
+    "FUSIONHAMMER": {
+        "kind": "NO_SMITH",
+        "instruction": "持有融合之锤（Fusion Hammer）：不能在营火锻造。",
+    },
+}
+
+
+def active_relic_keys(state: dict[str, Any]) -> set[str]:
+    relics = state.get("relics")
+    if not isinstance(relics, list):
+        return set()
+    return {
+        relic_identity(relic)
+        for relic in relics
+        if isinstance(relic, dict) and relic_identity(relic)
+    }
+
+
+def has_relic(state: dict[str, Any], relic_key: str) -> bool:
+    return normalize_item_key(relic_key) in active_relic_keys(state)
+
+
+def card_plays_this_turn(action_history: list[dict[str, Any]] | None) -> int:
+    """Count accepted card plays after the most recent end-turn boundary."""
+    count = 0
+    for item in reversed(action_history or []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("action_kind") == "end_turn":
+            break
+        if item.get("action_kind") == "play":
+            count += 1
+    return count
+
+
+def relic_decision_constraints(
+    relics: Any,
+    action_history: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Expose public, persistent relic rules that change future choices."""
+    result: list[dict[str, Any]] = []
+    if not isinstance(relics, list):
+        return result
+    plays_this_turn = card_plays_this_turn(action_history)
+    for relic in relics:
+        if not isinstance(relic, dict):
+            continue
+        key = relic_identity(relic)
+        rule = RELIC_DECISION_RULES.get(key)
+        if rule is None:
+            continue
+        item = {
+            "kind": rule["kind"],
+            "relic": {field: relic.get(field) for field in ("id", "name") if relic.get(field) is not None},
+            "instruction": rule["instruction"],
+        }
+        if key == "VELVETCHOKER":
+            item["plays_this_turn"] = plays_this_turn
+            item["plays_remaining_this_turn"] = max(0, 6 - plays_this_turn)
+        result.append(item)
+    return result
 
 
 def newly_gained_relics(before: Any, after: Any) -> list[dict[str, Any]]:
@@ -789,6 +918,9 @@ def attach_runtime_context(
     """Add bounded cross-step context shared by live prompts and trace records."""
     normalized["recent_actions"] = recent_action_summary(action_history)
     normalized["run_memory"] = run_memory_summary(visited_shop_rooms, declined_card_reward_keys)
+    constraints = relic_decision_constraints(normalized.get("relics"), action_history)
+    if constraints:
+        normalized["decision_constraints"] = constraints
     selection_context = relic_pickup_card_selection_context(normalized, action_history)
     if selection_context is None:
         selection_context = generated_card_choice_context(normalized, action_history)
@@ -880,6 +1012,9 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
         "relics": [visible_relic(item) for item in state.get("relics", []) if isinstance(item, dict)],
         "potions": [visible_potion(item) for item in state.get("potions", []) if isinstance(item, dict)],
     }
+    known_boss = boss_profile(state.get("act_boss"))
+    if known_boss is not None:
+        result["act_boss_profile"] = known_boss
 
     # The generated act map is public in the normal UI. Keep the full graph so
     # route decisions can use future branches, not only the next layer.
@@ -916,7 +1051,7 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
 
     combat = state.get("combat_state")
     if isinstance(combat, dict):
-        result["combat"] = normalize_combat(combat)
+        result["combat"] = normalize_combat(combat, hide_enemy_intents=has_relic(state, "RUNICDOME"))
     return result
 
 
@@ -966,8 +1101,11 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
             "current_hp",
             "max_hp",
             "gold",
+            "act_boss",
+            "act_boss_profile",
             "relics",
             "potions",
+            "decision_constraints",
             "combat",
             "recent_actions",
         )
@@ -1141,27 +1279,31 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
     return result
 
 
-def normalize_combat(combat: dict[str, Any]) -> dict[str, Any]:
+def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False) -> dict[str, Any]:
     player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
     monsters: list[dict[str, Any]] = []
     for monster in combat.get("monsters", []):
         if not isinstance(monster, dict):
             continue
-        monsters.append(
-            {
-                "id": monster.get("id"),
-                "name": monster.get("name"),
-                "current_hp": monster.get("current_hp"),
-                "max_hp": monster.get("max_hp"),
-                "block": monster.get("block"),
-                "intent": monster.get("intent"),
-                "intent_base_damage": monster.get("move_base_damage"),
-                "intent_damage": monster.get("move_adjusted_damage"),
-                "intent_hits": monster.get("move_hits"),
-                "is_gone": monster.get("is_gone"),
-                "powers": powers_summary(monster.get("powers")),
-            }
-        )
+        item = {
+            "id": monster.get("id"),
+            "name": monster.get("name"),
+            "current_hp": monster.get("current_hp"),
+            "max_hp": monster.get("max_hp"),
+            "block": monster.get("block"),
+            "is_gone": monster.get("is_gone"),
+            "powers": powers_summary(monster.get("powers")),
+        }
+        if not hide_enemy_intents:
+            item.update(
+                {
+                    "intent": monster.get("intent"),
+                    "intent_base_damage": monster.get("move_base_damage"),
+                    "intent_damage": monster.get("move_adjusted_damage"),
+                    "intent_hits": monster.get("move_hits"),
+                }
+            )
+        monsters.append(item)
     return {
         "turn": combat.get("turn"),
         "hand": [visible_card(card) for card in combat.get("hand", []) if isinstance(card, dict)],
@@ -1283,7 +1425,7 @@ def semantic_actions(
             result.append({"id": "RETURN", "command": "RETURN", "kind": "return"})
         return result
     if "choose" in commands and isinstance(choices, list) and not shop_reentry_blocked(message, visited_shop_rooms):
-        blocked_indices = blocked_potion_reward_indices(message) | blocked_card_reward_indices(
+        blocked_indices = blocked_potion_reward_indices(message) | blocked_gold_reward_indices(message) | blocked_card_reward_indices(
             message,
             declined_card_reward_keys,
         ) | selected_card_choice_indices(message)
@@ -1558,7 +1700,7 @@ def parse_human_input(
             return None, None, "选项序号必须是整数。"
         if shop_reentry_blocked(message, visited_shop_rooms):
             return None, None, "该商店入口本层已访问，不能再次进入；请输入 c 继续离开。"
-        blocked_error = blocked_potion_choice_error(message, index)
+        blocked_error = blocked_potion_choice_error(message, index) or blocked_gold_choice_error(message, index)
         if blocked_error:
             return None, None, blocked_error
         command = f"CHOOSE {index}"
@@ -1744,6 +1886,8 @@ def format_view(
         f"HP {state.get('current_hp', '?')}/{state.get('max_hp', '?')} "
         f"| Gold {state.get('gold', '?')} | Room {state.get('room_phase', '')}"
     )
+    if state.get("act_boss"):
+        lines.append(f"本层首领：{state.get('act_boss')}")
     confidence = decision.get("confidence") if isinstance(decision, dict) else None
     if isinstance(confidence, dict):
         route = "将自动执行" if confidence.get("route") == "auto_execute" else "等待人工确认"
@@ -1773,21 +1917,23 @@ def format_view(
         lines.append("请先输入 x 关闭设置界面；关闭后会恢复出牌和结束回合动作。")
     elif screen == "NONE" and state.get("room_phase") == "COMBAT" and isinstance(combat, dict):
         player = combat.get("player", {}) if isinstance(combat.get("player"), dict) else {}
+        hide_enemy_intents = has_relic(state, "RUNICDOME")
         lines.append(f"战斗 | Turn {combat.get('turn', '?')} | Energy {player.get('energy', '?')} | Block {player.get('block', '?')}")
         lines.append("敌人")
         for index, monster in enumerate(combat.get("monsters", [])):
             if not isinstance(monster, dict):
                 continue
-            intent_damage = monster.get("move_adjusted_damage")
-            intent_hits = monster.get("move_hits")
+            intent_damage = None if hide_enemy_intents else monster.get("move_adjusted_damage")
+            intent_hits = None if hide_enemy_intents else monster.get("move_hits")
             intent_detail = ""
             if intent_damage is not None and intent_damage != -1:
                 intent_detail = f" dmg={intent_damage}"
                 if intent_hits not in (None, 1):
                     intent_detail += f"x{intent_hits}"
+            intent = "HIDDEN" if hide_enemy_intents else monster.get("intent")
             lines.append(
                 f"  [{index}] {monster.get('name')} HP {monster.get('current_hp')}/{monster.get('max_hp')} "
-                f"Intent={monster.get('intent')}{intent_detail} Block={monster.get('block', 0)} "
+                f"Intent={intent}{intent_detail} Block={monster.get('block', 0)} "
                 f"{'GONE' if monster.get('is_gone') else ''}"
             )
         lines.append("手牌")
@@ -1877,7 +2023,12 @@ def format_view(
         blocked_potions = blocked_potion_reward_indices(message)
         if blocked_potions:
             labels = ", ".join(str(choices[index]) for index in sorted(blocked_potions))
-            lines.append(f"不可选：{labels}（药水栏已满；请改选其他选项或先丢弃药水）")
+            reason = "持有苏祖，不能再获得药水" if has_relic(state, "SOZU") else "药水栏已满；请改选其他选项或先丢弃药水"
+            lines.append(f"不可选：{labels}（{reason}）")
+        blocked_gold = blocked_gold_reward_indices(message)
+        if blocked_gold:
+            labels = ", ".join(str(choices[index]) for index in sorted(blocked_gold))
+            lines.append(f"不可选：{labels}（持有灵体外质，不能再获得金币）")
     if shop_reentry_blocked(message, visited_shop_rooms):
         lines.append("商店入口已在本层访问；不能再次进入。请输入 c 继续离开商店房间。")
     lines.append("合法动作")
@@ -2718,6 +2869,39 @@ def request_posthoc_reflection(
     }
 
 
+def request_prompt_evolution_review(
+    bridge: TerminalBridge,
+    review: dict[str, Any],
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Block at a terminal state until the human accepts, rejects, or abandons.
+
+    Prompt candidates are never promoted merely because their scalar score is
+    higher. A disconnected UI abandons the current candidate so it cannot
+    silently alter the active policy.
+    """
+
+    try:
+        bridge.send(
+            {
+                "type": "prompt_evolution_review_request",
+                "review": review,
+                "error": error,
+            }
+        )
+    except OSError:
+        return {"verdict": "abandon", "reason": "review UI unavailable"}
+    response = bridge.receive()
+    if response is None:
+        return {"verdict": "abandon", "reason": "review UI disconnected"}
+    if response.get("type") != "prompt_evolution_review":
+        return {"verdict": "abandon", "reason": "invalid review response"}
+    return {
+        "verdict": str(response.get("verdict") or "abandon"),
+        "reason": str(response.get("reason") or ""),
+    }
+
+
 class TeacherClient:
     """Remote teacher used only to collect automatically executed SFT labels.
 
@@ -2726,17 +2910,29 @@ class TeacherClient:
     compiler. A failure produces a human fallback for that one decision.
     """
 
-    def __init__(self, project_root: Path, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        config: dict[str, Any],
+        prompt_evolution: PromptEvolutionManager | None = None,
+    ) -> None:
         teacher_config = config["teacher"]
         self.remote = RemoteTeacherClient(project_root, teacher_config)
+        self.prompt_evolution = prompt_evolution
         self.enabled = self.remote.enabled
         self.model = self.remote.model
         self.thinking = self.remote.thinking
         self.screens = self.remote.screens
 
+    @property
+    def mode(self) -> str:
+        if self.prompt_evolution is not None and self.prompt_evolution.enabled:
+            return "prompt_evolution"
+        return "teacher_collection"
+
     def _fallback_decision(self, status: str, reason: str) -> dict[str, Any]:
         return {
-            "mode": "teacher_collection",
+            "mode": self.mode,
             "model_id": self.model,
             "candidate_source": "remote_teacher",
             "model_action": None,
@@ -2788,7 +2984,7 @@ class TeacherClient:
                 return
             on_update(
                 {
-                    "mode": "teacher_collection",
+                    "mode": self.mode,
                     "model_id": self.model,
                     "candidate_source": "remote_teacher",
                     "model_action": None,
@@ -2807,8 +3003,18 @@ class TeacherClient:
                 }
             )
 
+        system_prompt: str | None = None
+        prompt_version: str | None = None
+        if self.prompt_evolution is not None and self.prompt_evolution.enabled:
+            system_prompt, prompt_version = self.prompt_evolution.system_prompt(observation)
         try:
-            selection = self.remote.select(observation, model_actions, on_update=forward_update)
+            selection = self.remote.select(
+                observation,
+                model_actions,
+                on_update=forward_update,
+                system_prompt=system_prompt,
+                prompt_version=prompt_version,
+            )
         except TeacherError as exc:
             return self._fallback_decision("不可用", str(exc))
         alias = str(selection.get("action_id", ""))
@@ -2829,7 +3035,7 @@ class TeacherClient:
             "usage": selection.get("usage"),
         }
         return {
-            "mode": "teacher_collection",
+            "mode": self.mode,
             "model_id": selection.get("model_id", self.model),
             "candidate_source": "remote_teacher",
             "model_action": action.get("id"),
@@ -3088,7 +3294,7 @@ def teacher_action_for_decision(
     actions: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Resolve one remote-teacher action only after the local legality check."""
-    if not isinstance(decision, dict) or decision.get("mode") != "teacher_collection":
+    if not isinstance(decision, dict) or decision.get("mode") not in {"teacher_collection", "prompt_evolution"}:
         return None
     if not decision.get("model_candidates"):
         return None
@@ -3166,7 +3372,7 @@ def ask_action(
     if teacher_active:
         send_teacher_update(
             {
-                "mode": "teacher_collection",
+                "mode": getattr(teacher, "mode", "teacher_collection"),
                 "model_id": teacher.model,
                 "candidate_source": "remote_teacher",
                 "model_action": None,
@@ -3290,10 +3496,13 @@ def ask_action(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="CommunicationMod controller for the StS agent")
+    parser.add_argument("--config", default="config/agent.json", help="项目根目录下的配置文件路径")
+    args = parser.parse_args()
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     project_root = Path(__file__).resolve().parents[1]
     try:
-        config = load_agent_config(project_root)
+        config = load_agent_config(project_root, args.config)
     except ConfigError as exc:
         print(f"invalid agent configuration: {exc}", file=sys.stderr, flush=True)
         return 2
@@ -3306,8 +3515,18 @@ def main() -> int:
     raw_path = raw_dir / f"messages-{session_id}.jsonl"
 
     bridge = TerminalBridge(config["server"]["host"], config["server"]["port"])
+    try:
+        prompt_evolution = PromptEvolutionManager(
+            project_root,
+            config["prompt_evolution"],
+            config["teacher"],
+            session_id,
+        )
+    except PromptEvolutionError as exc:
+        print(f"prompt evolution unavailable: {exc}", file=sys.stderr, flush=True)
+        return 2
     policy = PolicyClient(project_root, config)
-    teacher = TeacherClient(project_root, config)
+    teacher = TeacherClient(project_root, config, prompt_evolution)
     posthoc = PosthocFeedbackClient(project_root, config["posthoc_feedback"])
     pending: dict[str, Any] | None = None
     current_message: dict[str, Any] | None = None
@@ -3321,6 +3540,7 @@ def main() -> int:
     action_history: list[dict[str, Any]] = []
     smoke_bomb_resume_at: float | None = None
     online_restart_config: dict[str, Any] | None = None
+    prompt_evolution_restart_config: dict[str, Any] | None = None
     trace_output: TextIO | None = None
     event_output: TextIO | None = None
     trace_path: Path | None = None
@@ -3369,9 +3589,7 @@ def main() -> int:
         if not message.get("in_game"):
             return {"in_game": False}
         value = normalize_state(message)
-        value["run_memory"] = run_memory_summary(visited_shop_rooms, declined_card_reward_keys)
-        value["recent_actions"] = recent_action_summary(action_history)
-        return value
+        return attach_runtime_context(value, visited_shop_rooms, action_history, declined_card_reward_keys)
 
     def begin_run(action: dict[str, Any], collection_mode: str) -> str:
         """Start a new durable run context for a human or online-RL START."""
@@ -3391,6 +3609,8 @@ def main() -> int:
             "internal_seed": None,
             "collection_mode": collection_mode,
         }
+        if prompt_evolution.enabled:
+            run_config["prompt_evolution"] = prompt_evolution.begin_run(run_config)
         open_run_outputs()
         write_event(
             {
@@ -3406,6 +3626,7 @@ def main() -> int:
     # The game must not expose a start action before local setup has finished.
     # CommunicationMod waits for this stdout handshake.
     teacher.prewarm()
+    prompt_evolution_preflight_error = prompt_evolution.preflight()
     posthoc_preflight_error = posthoc.preflight()
     policy.prewarm()
     if policy.runtime == "remote_online_rl" and policy.enabled and posthoc.enabled != policy.online_rl_attribution_enabled:
@@ -3556,7 +3777,9 @@ def main() -> int:
                             }
                         else:
                             if posthoc.enabled:
-                                reflection_stage = policy.online_rl_status_decision("等待本局终局人工反思")
+                                reflection_stage = policy.online_rl_status_decision(
+                                    "教师正在自动复盘本局" if posthoc.mode == "auto" else "等待本局终局人工反思"
+                                )
                                 try:
                                     bridge.send(
                                         {
@@ -3567,22 +3790,25 @@ def main() -> int:
                                     )
                                 except OSError:
                                     pass
-                                raw_reflection = request_posthoc_reflection(
-                                    bridge,
-                                    run_id,
-                                    online_episode["terminal_state"],
-                                    action_review_from_trace(trace_path),
-                                )
-                                reflection = posthoc.normalize_reflection(
-                                    raw_reflection.get("reinforce"),
-                                    raw_reflection.get("weaken"),
-                                ) | {"reason": raw_reflection.get("reason")}
+                                if posthoc.mode == "auto":
+                                    reflection = posthoc.automatic_reflection()
+                                else:
+                                    raw_reflection = request_posthoc_reflection(
+                                        bridge,
+                                        run_id,
+                                        online_episode["terminal_state"],
+                                        action_review_from_trace(trace_path),
+                                    )
+                                    reflection = posthoc.normalize_reflection(
+                                        raw_reflection.get("reinforce"),
+                                        raw_reflection.get("weaken"),
+                                    ) | {"reason": raw_reflection.get("reason")}
                                 reflection_path = reflection_dir / f"reflection-{run_id}.json"
                                 write_posthoc_artifact(
                                     reflection_path,
                                     {
                                         "schema_version": POSTHOC_SCHEMA_VERSION,
-                                        "kind": "human_reflection",
+                                        "kind": "teacher_auto_review" if posthoc.mode == "auto" else "human_reflection",
                                         "run_id": run_id,
                                         "run_config": run_config,
                                         "terminal_state": posthoc_terminal_summary(online_episode["terminal_state"]),
@@ -3599,7 +3825,11 @@ def main() -> int:
                                         "rejected": [],
                                     }
                                 else:
-                                    annotation_stage = policy.online_rl_status_decision("教师正在定位可强化和应弱化的关键动作")
+                                    annotation_stage = policy.online_rl_status_decision(
+                                        "教师正在自动定位可强化和应弱化的关键动作"
+                                        if posthoc.mode == "auto"
+                                        else "教师正在定位可强化和应弱化的关键动作"
+                                    )
                                     try:
                                         bridge.send(
                                             {
@@ -3711,6 +3941,52 @@ def main() -> int:
                             )
                             if online_result.get("type") in {"episode_queued", "policy_updated", "group_completed_no_update"}:
                                 online_restart_config = run_config.copy()
+                    if (
+                        completed_record["terminal"]
+                        and prompt_evolution.enabled
+                        and run_id is not None
+                        and run_config is not None
+                        and trace_path is not None
+                        and trace_output is not None
+                    ):
+                        trace_output.flush()
+                        if prompt_evolution_preflight_error:
+                            evolution_result: dict[str, Any] = {
+                                "kind": "proposal_error",
+                                "error": prompt_evolution_preflight_error,
+                            }
+                        else:
+                            evolution_result = prompt_evolution.complete_run(
+                                run_id,
+                                run_config,
+                                trace_path,
+                                completed_record["post_state"],
+                            )
+                        if evolution_result.get("kind") == "review":
+                            review = evolution_result["review"]
+                            review_error: str | None = None
+                            while True:
+                                review_response = request_prompt_evolution_review(bridge, review, review_error)
+                                evolution_result = prompt_evolution.handle_review(review_response)
+                                if evolution_result.get("kind") != "error":
+                                    break
+                                review_error = str(evolution_result.get("error") or "审核结果无效")
+                        if evolution_result.get("kind") == "start_candidate":
+                            prompt_evolution_restart_config = dict(evolution_result["run_config"])
+                        write_event(
+                            {
+                                "event": "prompt_evolution_terminal",
+                                "run_id": run_id,
+                                "result": evolution_result,
+                                "at": now_iso(),
+                            }
+                        )
+                        print(
+                            f"prompt evolution: {evolution_result.get('kind')} "
+                            f"policy={prompt_evolution.active_version}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     if smoke_bomb_used:
                         smoke_bomb_resume_at = time.monotonic() + SMOKE_BOMB_ANIMATION_DELAY_SECONDS
                         write_event(
@@ -3783,6 +4059,47 @@ def main() -> int:
                     write_event({"event": "online_rl_auto_restart", "run_id": run_id, "at": now_iso()})
                     print(command, flush=True)
                     continue
+                if prompt_evolution_restart_config is not None:
+                    if message.get("in_game"):
+                        exit_actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
+                        exit_action = next(
+                            (item for item in exit_actions if item.get("kind") == "confirm"),
+                            None,
+                        )
+                        if exit_action is not None:
+                            pending = make_pending(
+                                message,
+                                run_id,
+                                run_config,
+                                step_id,
+                                exit_action,
+                                None,
+                                visited_shop_rooms,
+                                action_history,
+                                declined_card_reward_keys,
+                            )
+                            step_id += 1
+                            print(str(exit_action["command"]), flush=True)
+                            continue
+                        print("prompt evolution waiting for terminal transition", file=sys.stderr, flush=True)
+                        print("STATE", flush=True)
+                        continue
+                    restart_action = {
+                        "id": "START_RUN",
+                        "kind": "start_run",
+                        "character": prompt_evolution_restart_config["character"],
+                        "ascension": prompt_evolution_restart_config["ascension"],
+                        "seed": prompt_evolution_restart_config["seed"],
+                    }
+                    restart_action["command"] = (
+                        f"START {restart_action['character']} {restart_action['ascension']}"
+                        + (f" {restart_action['seed']}" if restart_action["seed"] else "")
+                    )
+                    prompt_evolution_restart_config = None
+                    command = begin_run(restart_action, "prompt_evolution")
+                    write_event({"event": "prompt_evolution_auto_restart", "run_id": run_id, "at": now_iso()})
+                    print(command, flush=True)
+                    continue
                 if run_config is not None and run_config.get("internal_seed") is None and message.get("in_game"):
                     observed_seed = game_state(message).get("seed")
                     if observed_seed is not None:
@@ -3817,9 +4134,9 @@ def main() -> int:
                     return 0
                 command, action, decision = result
                 if action.get("kind") == "start_run":
-                    collection_mode = "teacher_sft" if teacher.enabled else (
+                    collection_mode = "prompt_evolution" if prompt_evolution.enabled else ("teacher_sft" if teacher.enabled else (
                         "remote_online_rl" if policy.runtime == "remote_online_rl" else "interactive"
-                    )
+                    ))
                     print(begin_run(action, collection_mode), flush=True)
                     pending = None
                 elif command == "STATE":

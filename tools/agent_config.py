@@ -72,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "posthoc_feedback": {
         "enabled": False,
+        "mode": "human",
         "base_url": "https://api.llm.ustc.edu.cn/v1",
         "model": "deepseek-v4-pro",
         "api_key_file": "deepseek_api.txt",
@@ -84,6 +85,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_candidates_per_direction": 10,
         "max_applied_per_direction": 8,
         "min_confidence": 0.75,
+    },
+    "prompt_evolution": {
+        "enabled": False,
+        "policy_dir": "prompts/characters",
+        "output_dir": "data/prompt_evolution",
+        "max_skill_chars": 2400,
+        "max_analysis_input_chars": 96000,
+        "max_analysis_tokens": 1800,
+        "max_revisions_per_cycle": 3,
+        "auto_continue": True,
     },
     "overlay": {
         "always_on_top": True,
@@ -115,8 +126,14 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def config_path(root: Path | None = None) -> Path:
-    return (root or project_root()) / "config" / "agent.json"
+def config_path(root: Path | None = None, config_file: str | Path | None = None) -> Path:
+    """Resolve the selected config relative to the project root by default."""
+
+    base = root or project_root()
+    if config_file is None:
+        return base / "config" / "agent.json"
+    path = Path(config_file)
+    return path if path.is_absolute() else base / path
 
 
 def _merge(default: dict[str, Any], provided: dict[str, Any], location: str = "") -> dict[str, Any]:
@@ -161,6 +178,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     policy = config["policy"]
     teacher = config["teacher"]
     posthoc = config["posthoc_feedback"]
+    evolution = config["prompt_evolution"]
     model = policy["model"]
     request = policy["request"]
     local = policy["local"]
@@ -254,6 +272,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("teacher.enabled and policy.enabled cannot both be true; disable local policy for teacher collection")
 
     _require_bool(posthoc["enabled"], "posthoc_feedback.enabled")
+    if not isinstance(posthoc["mode"], str) or posthoc["mode"] not in {"human", "auto"}:
+        raise ConfigError("posthoc_feedback.mode must be 'human' or 'auto'")
     _require_string(posthoc["base_url"], "posthoc_feedback.base_url")
     if not str(posthoc["base_url"]).startswith(("https://", "http://")):
         raise ConfigError("posthoc_feedback.base_url must start with http:// or https://")
@@ -286,6 +306,33 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if posthoc["enabled"] and (not policy["enabled"] or policy["runtime"] != "remote_online_rl"):
         raise ConfigError("posthoc_feedback.enabled requires policy.enabled with policy.runtime=remote_online_rl")
 
+    _require_bool(evolution["enabled"], "prompt_evolution.enabled")
+    for key in ("policy_dir", "output_dir"):
+        _require_string(evolution[key], f"prompt_evolution.{key}")
+        relative_path = Path(str(evolution[key]))
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ConfigError(f"prompt_evolution.{key} must be a project-relative path")
+    for key in ("max_skill_chars", "max_analysis_input_chars", "max_analysis_tokens", "max_revisions_per_cycle"):
+        value = evolution[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"prompt_evolution.{key} must be an integer")
+    if not 128 <= evolution["max_skill_chars"] <= 12000:
+        raise ConfigError("prompt_evolution.max_skill_chars must be from 128 to 12000")
+    if not 4096 <= evolution["max_analysis_input_chars"] <= 262144:
+        raise ConfigError("prompt_evolution.max_analysis_input_chars must be from 4096 to 262144")
+    if not 256 <= evolution["max_analysis_tokens"] <= 8192:
+        raise ConfigError("prompt_evolution.max_analysis_tokens must be from 256 to 8192")
+    if not 0 <= evolution["max_revisions_per_cycle"] <= 12:
+        raise ConfigError("prompt_evolution.max_revisions_per_cycle must be from 0 to 12")
+    _require_bool(evolution["auto_continue"], "prompt_evolution.auto_continue")
+    if evolution["enabled"]:
+        if not teacher["enabled"]:
+            raise ConfigError("prompt_evolution.enabled requires teacher.enabled")
+        if policy["enabled"]:
+            raise ConfigError("prompt_evolution.enabled requires policy.enabled=false")
+        if posthoc["enabled"]:
+            raise ConfigError("prompt_evolution.enabled requires posthoc_feedback.enabled=false")
+
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")
     for name in ("status", "control", "online_rl"):
@@ -300,9 +347,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def load_agent_config(root: Path | None = None) -> dict[str, Any]:
-    """Load config/agent.json with strict keys so typos cannot silently alter runs."""
-    path = config_path(root)
+def load_agent_config(root: Path | None = None, config_file: str | Path | None = None) -> dict[str, Any]:
+    """Load the selected config with strict keys so typos cannot silently alter runs."""
+    path = config_path(root, config_file)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
