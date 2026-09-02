@@ -41,6 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "attribution": {
         "enabled": False,
         "max_abs_advantage": 2.0,
+        "min_tied_advantage": 0.2,
     },
     "update": {
         "max_length": 4096,
@@ -48,6 +49,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "clip_range": 0.2,
         "update_epochs": 1,
         "max_grad_norm": 1.0,
+        "reinforce_ce_weight": 0.25,
+        "weaken_unlikelihood_weight": 0.25,
         "load_in_4bit": True,
         "gradient_checkpointing": True,
         "empty_cache_between_steps": True,
@@ -139,6 +142,9 @@ def load_config(
     for key in ("learning_rate", "clip_range", "max_grad_norm"):
         if not isinstance(config["update"][key], (int, float)) or config["update"][key] <= 0:
             raise ValueError(f"update.{key} must be positive")
+    for key in ("reinforce_ce_weight", "weaken_unlikelihood_weight"):
+        if not isinstance(config["update"][key], (int, float)) or config["update"][key] < 0:
+            raise ValueError(f"update.{key} must be non-negative")
     if not isinstance(config["update"]["load_in_4bit"], bool):
         raise ValueError("update.load_in_4bit must be true or false")
     for key in ("gradient_checkpointing", "empty_cache_between_steps"):
@@ -147,8 +153,11 @@ def load_config(
     attribution = config["attribution"]
     if not isinstance(attribution["enabled"], bool):
         raise ValueError("attribution.enabled must be true or false")
-    if not isinstance(attribution["max_abs_advantage"], (int, float)) or attribution["max_abs_advantage"] <= 0:
-        raise ValueError("attribution.max_abs_advantage must be positive")
+    for key in ("max_abs_advantage", "min_tied_advantage"):
+        if not isinstance(attribution[key], (int, float)) or attribution[key] <= 0:
+            raise ValueError(f"attribution.{key} must be positive")
+    if attribution["min_tied_advantage"] > attribution["max_abs_advantage"]:
+        raise ValueError("attribution.min_tied_advantage must not exceed max_abs_advantage")
     return config
 
 
@@ -189,8 +198,9 @@ class MockOnlinePolicy:
         *,
         attribution_enabled: bool = False,
         max_abs_advantage: float = 2.0,
+        min_tied_advantage: float = 0.2,
     ) -> dict[str, Any]:
-        del sampling_temperature, max_abs_advantage
+        del sampling_temperature, max_abs_advantage, min_tied_advantage
         selected = sum(len(item.get("attributions", [])) for item in episodes) if attribution_enabled else sum(
             len(item["steps"]) for item in episodes
         )
@@ -234,6 +244,8 @@ class OnlineWorker:
                     clip_range=float(update["clip_range"]),
                     update_epochs=int(update["update_epochs"]),
                     max_grad_norm=float(update["max_grad_norm"]),
+                    reinforce_ce_weight=float(update["reinforce_ce_weight"]),
+                    weaken_unlikelihood_weight=float(update["weaken_unlikelihood_weight"]),
                     gradient_checkpointing=bool(update["gradient_checkpointing"]),
                     empty_cache_between_steps=bool(update["empty_cache_between_steps"]),
                 ),
@@ -316,6 +328,7 @@ class OnlineWorker:
             sampling_temperature=float(self.config["sampling"]["temperature"]),
             attribution_enabled=bool(attribution["enabled"]),
             max_abs_advantage=float(attribution["max_abs_advantage"]),
+            min_tied_advantage=float(attribution["min_tied_advantage"]),
         )
         metrics["reward_details"] = reward_details
         metrics["parent_policy_version"] = group["policy_version"]

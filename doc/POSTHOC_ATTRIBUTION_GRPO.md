@@ -42,7 +42,8 @@
 ```json
 "attribution": {
   "enabled": true,
-  "max_abs_advantage": 2.0
+  "max_abs_advantage": 2.0,
+  "min_tied_advantage": 0.2
 }
 ```
 
@@ -101,6 +102,11 @@ g_i = (R_i - mean(R)) / (std(R) + 1e-8)
 m_i = min(abs(g_i), max_abs_advantage)
 ```
 
+如果一组轨迹的终局奖励完全相同，`std(R)` 为零，普通组相对优势没有方向。
+归因模式下，对已经通过校验的教师关键动作使用配置项
+`attribution.min_tied_advantage` 作为 `m_i`；未被归因的动作仍不更新。普通
+（无归因）模式在这种情况下继续跳过更新。
+
 对于 episode `i` 中由人类/教师选中的动作 `t`：
 
 ```text
@@ -115,15 +121,27 @@ L = - sum_t w_t * min(r_t * A_hat_t, clip(r_t, 1-eps, 1+eps) * A_hat_t) / sum_t 
 
 默认 `max_abs_advantage=2.0`，`severity` 取 1/2/3。更新仍使用既有的 PPO clip、学习率、梯度裁剪和单 GPU 4-bit QLoRA 设置。
 
+### 归因纠错项
+
+对通过校验的高置信度归因，worker 还在上述 PPO 项上加入局部纠错损失；这部分不依赖本组终局奖励差异，仍按 `confidence * severity / 3` 加权。动作概率始终在当时完整的合法 alias 集合上归一化，并使用 rollout 的同一采样温度。
+
+```text
+reinforce:  L_ce = -sum_good w * reinforce_ce_weight * log pi(a_good | s) / sum_all w
+weaken:     L_ul = -sum_bad w * weaken_unlikelihood_weight * log(1 - pi(a_bad | s)) / sum_all w
+L_total = L_ppo + L_ce + L_ul
+```
+
+`reinforce` 项提高已执行的好动作。`weaken` 项提高所有其他合法动作的总概率质量，因此即使坏动作已经接近 100% 概率，仍有足够梯度将其压低；若当时只有一个合法动作，则它没有可替代项，unlikelihood 项跳过。默认两个系数均为 `0.25`，可在远端 `online_rl.json` 的 `update` 中分别设为 `0` 关闭。
+
 ## 跳过与失败语义
 
 - 人类跳过、教师请求失败、所有候选低置信度或相互冲突：该 episode 的 `attributions=[]`。
-- 一个完整 K 组没有任何有效归因，或四局终局奖励标准差近零：worker 正常关闭组，但返回 `group_completed_no_update`，不保存 adapter、不递增策略版本；下一组继续使用当前 adapter。
+- 一个完整 K 组没有任何有效归因：worker 正常关闭组并返回 `group_completed_no_update`。普通模式或归因模式下没有有效动作时，终局奖励标准差近零也会跳过；归因模式若有有效动作，即使奖励打平，也只用 `min_tied_advantage` 更新这些动作。
 - 部分 episode 有有效归因：只更新那些动作。人类跳过的 episode 不会获得隐含正/负标签。
 - 远端服务、网络或上传失败：原始 trace、reflection 和 attribution 均保留在本机；controller 不会伪造已完成更新。
 
 ## 观察与调参
 
-先固定角色、进阶和种子，观察至少数个完整 K 组。重点记录每组的 `reward_std`、`steps`、`available_steps`、`reinforce_steps`、`weaken_steps`、`weight_sum` 和 `skip_reason`。初期建议每局只写 1-3 条最关键的正/负问题，即使教师可产生至多 10 条候选，也不要把每一步都标成训练信号。
+先固定角色、进阶和种子，观察至少数个完整 K 组。重点记录每组的 `reward_std`、`steps`、`available_steps`、`reinforce_steps`、`weaken_steps`、`weight_sum`、`skip_reason`，以及 `ppo_losses`、`reinforce_ce_losses`、`weaken_unlikelihood_losses`。初期建议每局只写 1-3 条最关键的正/负问题，即使教师可产生至多 10 条候选，也不要把每一步都标成训练信号。
 
 `max_candidates_per_direction=10` 是教师候选上限，`max_applied_per_direction=8` 是最终更新上限；真正有效数量还会受 `min_confidence` 和冲突校验限制。若教师定位过于宽泛，先提高 `min_confidence` 至 `0.8`，而不是提高更新 epoch 或学习率。

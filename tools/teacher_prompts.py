@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 
-PROMPT_VERSION = "sts1-teacher-zh-v2"
+PROMPT_VERSION = "sts1-teacher-zh-v3"
 
 COMMON_PROMPT = """你是《杀戮尖塔 1》的远程教师，负责为模仿学习轨迹选择一个动作。
 目标是提高整局通关概率，而不是只追求当前房间的即时收益。只使用观察中明确给出的公开信息；不要臆测没有展示的事件结果、牌堆顺序、敌人意图或物品效果。当前合法动作列表是唯一可执行集合。
@@ -74,6 +74,10 @@ SCENARIO_PROMPTS: dict[str, str] = {
     "GRID_SELECT": """【选牌/目标选择决策】
 严格按照当前 selection_instruction、num_cards、selected_cards 和合法动作理解选择目的。只选择能完成当前界面目标的牌，不要把普通选牌、删牌、升级、变化或事件中的待选牌混为一谈。
 如果可以少选或跳过，只有在合法动作明确允许且不会违背当前目标时才这样做。""",
+    "RELIC_PICKUP_CARD_SELECTION": """【遗物触发选牌】
+当前 `selection_context` 明确说明这是刚获得某件遗物后立刻触发的选牌，不是普通卡牌奖励或事件选牌。必须遵守其中的 `source`、`selection_instruction`、`required_cards` 和 `selected_count`：只在合法动作中选择能完成该遗物效果的牌。
+- 瓶装遗物应选择最适合稳定起手的对应类型核心牌；多莉的镜子应复制构筑核心；奥雷里的连续奖励要逐组判断拿牌或跳过。
+- 已选卡已被控制器从合法动作中移除；继续在剩余候选中完成本次遗物要求，不要把这次效果误当作普通删牌、升级或卡牌奖励。""",
     "SHOP_SCREEN": """【商店决策】
 先按当前金币和价格判断真正买得起的选项，再比较购买后的即时收益、未来收益和机会成本。商店购买与删牌通常不可逆，不要因为有余额就消费。
 - 优先处理当前牌组最紧迫的战斗缺口，或购买能与已有牌/遗物形成明确协同的物品。
@@ -117,13 +121,28 @@ def scenario_key(observation: dict[str, Any]) -> str:
         and observation["selection_context"].get("kind") == "COMBAT_GENERATED_CARD_CHOICE"
     ):
         return "COMBAT_CARD_SELECTION"
+    if (
+        screen == "CARD_REWARD"
+        and isinstance(observation.get("selection_context"), dict)
+        and observation["selection_context"].get("kind") == "RELIC_PICKUP_CARD_SELECTION"
+    ):
+        return "RELIC_PICKUP_CARD_SELECTION"
     if screen == "GRID":
         mode = str((observation.get("screen_state") or {}).get("selection_mode") or "").upper()
-        return {
+        specific = {
             "PURGE": "GRID_PURGE",
             "UPGRADE": "GRID_UPGRADE",
             "TRANSFORM": "GRID_TRANSFORM",
-        }.get(mode, "GRID_SELECT")
+            "TRANSFORM_UPGRADE": "GRID_TRANSFORM",
+        }.get(mode)
+        if specific is not None:
+            return specific
+        if (
+            isinstance(observation.get("selection_context"), dict)
+            and observation["selection_context"].get("kind") == "RELIC_PICKUP_CARD_SELECTION"
+        ):
+            return "RELIC_PICKUP_CARD_SELECTION"
+        return "GRID_SELECT"
     return screen if screen in SCENARIO_PROMPTS else "GENERIC"
 
 

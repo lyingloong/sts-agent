@@ -13,6 +13,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 from online_rl.protocol import ProtocolError, validate_episode_payload  # noqa: E402
 from online_rl.rewards import episode_reward  # noqa: E402
 from online_rl.rollout_store import RolloutStore  # noqa: E402
+from online_rl.update import attribution_correction_loss  # noqa: E402
 from online_rl_worker import OnlineWorker, load_config, normalize_scores, select_gpu  # noqa: E402
 from policy_server import configure_inference_gpu, parse_gpu_device  # noqa: E402
 import communication_controller as controller  # noqa: E402
@@ -116,6 +117,89 @@ class OnlineRlTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown online RL configuration field: model"):
                 load_mock_worker_config(config_path)
 
+    def test_worker_rejects_tied_advantage_above_attribution_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "online.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "attribution": {
+                            "max_abs_advantage": 0.1,
+                            "min_tied_advantage": 0.2,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "must not exceed"):
+                load_mock_worker_config(config_path)
+
+    def test_worker_rejects_negative_correction_weight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "online.json"
+            config_path.write_text(
+                json.dumps({"update": {"weaken_unlikelihood_weight": -0.1}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "must be non-negative"):
+                load_mock_worker_config(config_path)
+
+    def test_reinforce_correction_has_strong_gradient_for_low_probability_action(self) -> None:
+        import torch
+
+        scores = torch.tensor([-11.0, 0.0], requires_grad=True)
+        loss, kind = attribution_correction_loss(
+            torch,
+            scores,
+            0,
+            "reinforce",
+            weight=1.0,
+            total_weight=1.0,
+            reinforce_ce_weight=1.0,
+            weaken_unlikelihood_weight=1.0,
+        )
+        self.assertEqual(kind, "reinforce_ce")
+        self.assertIsNotNone(loss)
+        assert loss is not None
+        loss.backward()
+        self.assertLess(float(scores.grad[0]), -0.99)
+
+    def test_weaken_unlikelihood_has_strong_gradient_for_saturated_action(self) -> None:
+        import torch
+
+        scores = torch.tensor([11.0, 0.0], requires_grad=True)
+        loss, kind = attribution_correction_loss(
+            torch,
+            scores,
+            0,
+            "weaken",
+            weight=1.0,
+            total_weight=1.0,
+            reinforce_ce_weight=1.0,
+            weaken_unlikelihood_weight=1.0,
+        )
+        self.assertEqual(kind, "weaken_unlikelihood")
+        self.assertIsNotNone(loss)
+        assert loss is not None
+        loss.backward()
+        self.assertGreater(float(scores.grad[0]), 0.99)
+
+    def test_weaken_unlikelihood_skips_a_forced_action(self) -> None:
+        import torch
+
+        loss, kind = attribution_correction_loss(
+            torch,
+            torch.tensor([0.0], requires_grad=True),
+            0,
+            "weaken",
+            weight=1.0,
+            total_weight=1.0,
+            reinforce_ce_weight=1.0,
+            weaken_unlikelihood_weight=1.0,
+        )
+        self.assertIsNone(loss)
+        self.assertIsNone(kind)
+
     def test_store_refuses_mixed_initial_conditions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RolloutStore(Path(directory), group_size=4, initial_policy_version="sft-v0")
@@ -140,6 +224,9 @@ class OnlineRlTests(unittest.TestCase):
             worker = OnlineWorker(load_mock_worker_config(config_path), mock=True)
             self.assertTrue(worker.config["update"]["gradient_checkpointing"])
             self.assertTrue(worker.config["update"]["empty_cache_between_steps"])
+            self.assertEqual(worker.config["attribution"]["min_tied_advantage"], 0.2)
+            self.assertEqual(worker.config["update"]["reinforce_ce_weight"], 0.25)
+            self.assertEqual(worker.config["update"]["weaken_unlikelihood_weight"], 0.25)
             request = {
                 "request_id": 1,
                 "episode_id": "e-1",

@@ -80,11 +80,14 @@
 | `gpu.minimum_free_memory_mib` | `auto` 选择 GPU 时所需最低可用显存。 |
 | `attribution.enabled` | 是否只更新人类反思教师选中的步骤；必须和本机 `posthoc_feedback.enabled` 同时开关。 |
 | `attribution.max_abs_advantage` | 归因更新中优势值的绝对值裁剪上限。 |
+| `attribution.min_tied_advantage` | 组内终局奖励完全相同时，归因动作使用的最小优势绝对值；只对已归因动作生效，避免把整局动作一并强化。 |
 | `update.max_length` | 更新时每个动作 observation 的最大 token 长度。 |
 | `update.learning_rate` | LoRA 更新学习率。 |
 | `update.clip_range` | PPO ratio 裁剪范围。 |
 | `update.update_epochs` | 每个 K 条完整轨迹上的优化轮数。 |
 | `update.max_grad_norm` | 梯度范数裁剪上限。 |
+| `update.reinforce_ce_weight` | 归因 `reinforce` 动作的局部交叉熵纠错系数；`0` 可关闭该附加项。 |
+| `update.weaken_unlikelihood_weight` | 归因 `weaken` 动作的 unlikelihood 纠错系数；只有存在其他合法动作时生效，`0` 可关闭。 |
 | `update.load_in_4bit` | 以 4-bit 量化加载基座以降低显存。 |
 | `update.gradient_checkpointing` | 用重算激活降低反向传播显存。 |
 | `update.empty_cache_between_steps` | 变长动作更新间归还空闲 CUDA 缓存，降低碎片化。 |

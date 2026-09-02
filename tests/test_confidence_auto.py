@@ -129,6 +129,46 @@ def full_combat_reward_message() -> dict:
     }
 
 
+def grid_selection_message() -> dict:
+    cards = [
+        {"id": "Strike_R", "name": "Strike", "upgrades": 0, "uuid": "strike-a"},
+        {"id": "Strike_R", "name": "Strike", "upgrades": 0, "uuid": "strike-b"},
+        {"id": "Bash", "name": "Bash", "upgrades": 0, "uuid": "bash-a"},
+    ]
+    return {
+        "in_game": True,
+        "available_commands": ["choose"],
+        "game_state": {
+            "screen_type": "GRID",
+            "choice_list": ["Strike", "Strike", "Bash"],
+            "screen_state": {
+                "cards": cards,
+                "selected_cards": [cards[1]],
+                "num_cards": 3,
+            },
+        },
+    }
+
+
+def relic_pickup_grid_message(relic_id: str, relic_name: str) -> dict:
+    message = grid_selection_message()
+    message["game_state"]["relics"] = [{"id": relic_id, "name": relic_name}]
+    message["game_state"]["screen_state"]["selected_cards"] = []
+    return message
+
+
+def relic_pickup_pending() -> dict:
+    return {
+        "step_id": 4,
+        "screen_type": "BOSS_REWARD",
+        "pre_state": {
+            "screen_type": "BOSS_REWARD",
+            "relics": [{"id": "Burning Blood", "name": "Burning Blood"}],
+        },
+        "action": {"id": "CHOOSE:index=0", "kind": "choose", "label": "领取遗物"},
+    }
+
+
 def shop_room_message() -> dict:
     return {
         "in_game": True,
@@ -405,6 +445,54 @@ class ConfidenceAutoTests(unittest.TestCase):
         screen_state = controller.normalize_state(message)["screen_state"]
         self.assertEqual(screen_state["selection_mode"], "PURGE")
         self.assertEqual(screen_state["selection_instruction"], "选择 1 张牌移除")
+
+    def test_grid_selection_hides_exact_selected_card_instance(self) -> None:
+        message = grid_selection_message()
+        actions = controller.semantic_actions(message)
+        self.assertEqual(
+            [action["id"] for action in actions],
+            ["CHOOSE:index=0", "CHOOSE:index=2"],
+        )
+        command, action, error = controller.parse_human_input("1", message)
+        self.assertIsNone(command)
+        self.assertIsNone(action)
+        self.assertEqual(error, "该选项当前不可选择。")
+
+    def test_hand_selection_hides_exact_selected_card_instance(self) -> None:
+        message = grid_selection_message()
+        cards = message["game_state"]["screen_state"].pop("cards")
+        message["game_state"]["screen_type"] = "HAND_SELECT"
+        message["game_state"]["screen_state"] = {"hand": cards, "selected": [cards[1]], "max_cards": 3}
+        self.assertEqual(
+            [action["id"] for action in controller.semantic_actions(message)],
+            ["CHOOSE:index=0", "CHOOSE:index=2"],
+        )
+
+    def test_astrolabe_pickup_marks_first_continuous_grid_selection(self) -> None:
+        message = relic_pickup_grid_message("Astrolabe", "Astrolabe")
+        history = [controller.accepted_action_history_item(relic_pickup_pending(), message)]
+        observation = controller.policy_observation(message, action_history=history)
+        context = observation["selection_context"]
+        self.assertEqual(context["kind"], "RELIC_PICKUP_CARD_SELECTION")
+        self.assertEqual(context["selection_type"], "ASTROLABE_TRANSFORM_UPGRADE")
+        self.assertEqual(context["required_cards"], 3)
+        self.assertEqual(observation["screen_state"]["selection_mode"], "TRANSFORM_UPGRADE")
+        self.assertIn("变化为随机牌并升级", observation["screen_state"]["selection_instruction"])
+
+        history.append({"screen_before": "GRID", "screen_after": "GRID"})
+        continued = controller.policy_observation(message, action_history=history)
+        self.assertEqual(continued["selection_context"]["selection_type"], "ASTROLABE_TRANSFORM_UPGRADE")
+
+        history.append({"screen_before": "EVENT", "screen_after": "GRID"})
+        self.assertNotIn("selection_context", controller.policy_observation(message, action_history=history))
+
+    def test_empty_cage_pickup_marks_two_card_purge(self) -> None:
+        message = relic_pickup_grid_message("Empty Cage", "Empty Cage")
+        history = [controller.accepted_action_history_item(relic_pickup_pending(), message)]
+        observation = controller.policy_observation(message, action_history=history)
+        self.assertEqual(observation["selection_context"]["selection_type"], "EMPTY_CAGE_PURGE")
+        self.assertEqual(observation["screen_state"]["selection_mode"], "PURGE")
+        self.assertEqual(observation["selection_context"]["required_cards"], 2)
 
     def test_recent_action_summary_is_bounded_and_keeps_semantics(self) -> None:
         history = [

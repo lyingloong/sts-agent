@@ -25,7 +25,7 @@ from typing import Any, Callable, TextIO
 
 from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
-from item_knowledge import potion_effect, relic_effect
+from item_knowledge import normalize_item_key, potion_effect, relic_effect
 from posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
@@ -312,6 +312,63 @@ RELIC_MODEL_FIELDS = ("id", "name", "description", "counter")
 _MISSING = object()
 
 
+# These are the relics whose static knowledge says that picking them up opens
+# a player-directed card selection. Effects such as Pandora's Box, War Paint,
+# and Whetstone are deliberately absent because their card changes are random
+# or automatic rather than a decision screen.
+RELIC_PICKUP_CARD_SELECTIONS: dict[str, dict[str, Any]] = {
+    "ASTROLABE": {
+        "screen_types": ("GRID",),
+        "selection_type": "ASTROLABE_TRANSFORM_UPGRADE",
+        "selection_mode": "TRANSFORM_UPGRADE",
+        "required_cards": 3,
+        "instruction": "星盘：必须选择 3 张不同的当前牌；它们会被变化为随机牌并升级。优先变化重复、低价值或妨碍构筑的牌，避免变化关键牌。",
+    },
+    "EMPTYCAGE": {
+        "screen_types": ("GRID",),
+        "selection_type": "EMPTY_CAGE_PURGE",
+        "selection_mode": "PURGE",
+        "required_cards": 2,
+        "instruction": "空鸟笼：必须选择 2 张不同的当前牌并永久移除。优先移除重复、低价值或妨碍构筑的牌，避免移除关键牌。",
+    },
+    "BOTTLEDFLAME": {
+        "screen_types": ("GRID",),
+        "selection_type": "BOTTLED_FLAME",
+        "selection_mode": "BOTTLE",
+        "required_cards": 1,
+        "instruction": "火焰瓶：选择 1 张攻击牌；之后每场战斗开始时它会进入手牌。优先选择开局就有价值、且不会妨碍起手的攻击牌。",
+    },
+    "BOTTLEDLIGHTNING": {
+        "screen_types": ("GRID",),
+        "selection_type": "BOTTLED_LIGHTNING",
+        "selection_mode": "BOTTLE",
+        "required_cards": 1,
+        "instruction": "闪电瓶：选择 1 张技能牌；之后每场战斗开始时它会进入手牌。优先选择开局就有价值、且不会妨碍起手的技能牌。",
+    },
+    "BOTTLEDTORNADO": {
+        "screen_types": ("GRID",),
+        "selection_type": "BOTTLED_TORNADO",
+        "selection_mode": "BOTTLE",
+        "required_cards": 1,
+        "instruction": "龙卷瓶：选择 1 张能力牌；之后每场战斗开始时它会进入手牌。优先选择能尽早发挥长期价值的能力牌。",
+    },
+    "DOLLYSMIRROR": {
+        "screen_types": ("GRID",),
+        "selection_type": "DOLLYS_MIRROR_COPY",
+        "selection_mode": "COPY",
+        "required_cards": 1,
+        "instruction": "多莉的镜子：选择 1 张当前牌，牌组会获得它的一张额外复制。优先复制当前构筑的核心牌，不要无目的地复制基础牌。",
+    },
+    "ORRERY": {
+        "screen_types": ("CARD_REWARD",),
+        "selection_type": "ORRERY_CARD_REWARDS",
+        "selection_mode": "RELIC_CARD_REWARD",
+        "required_cards": 5,
+        "instruction": "奥雷里：这是获得遗物后触发的连续 5 次卡牌奖励。每一组都依据当前牌组缺口独立决定拿牌或跳过，不要把它当成普通的一次奖励。",
+    },
+}
+
+
 def public_value(source: dict[str, Any], field: str, aliases: tuple[str, ...] = ()) -> Any:
     """Return the first non-null public value for a canonical schema field."""
     for key in (field, *aliases):
@@ -392,6 +449,31 @@ def visible_relic(relic: dict[str, Any]) -> dict[str, Any]:
     # CommunicationMod uses -1 for relics without a meaningful counter.
     if isinstance(result.get("counter"), (int, float)) and not isinstance(result["counter"], bool) and result["counter"] < 0:
         result.pop("counter")
+    return result
+
+
+def relic_identity(relic: dict[str, Any]) -> str:
+    """Return one stable static-knowledge key for a public relic instance."""
+    return normalize_item_key(relic.get("id")) or normalize_item_key(relic.get("name"))
+
+
+def newly_gained_relics(before: Any, after: Any) -> list[dict[str, Any]]:
+    """Preserve relic additions across one accepted action, including swaps."""
+    before_counts = Counter(
+        relic_identity(relic)
+        for relic in before if isinstance(relic, dict) and relic_identity(relic)
+    ) if isinstance(before, list) else Counter()
+    result: list[dict[str, Any]] = []
+    if not isinstance(after, list):
+        return result
+    for relic in after:
+        if not isinstance(relic, dict):
+            continue
+        key = relic_identity(relic)
+        if key and before_counts[key] > 0:
+            before_counts[key] -= 1
+            continue
+        result.append(visible_relic(relic))
     return result
 
 
@@ -650,6 +732,54 @@ def generated_card_choice_context(
     }
 
 
+def relic_pickup_card_selection_context(
+    normalized: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Identify the first continuous card-selection flow caused by a relic.
+
+    The relic persists in the inventory after its pickup effect finishes, so
+    checking the current relic list alone would mislabel unrelated future
+    events. Instead, walk backward through only the current continuous
+    selection screen until the action that added the relic is reached.
+    """
+    screen_type = str(normalized.get("screen_type") or "").upper()
+    if screen_type not in {"GRID", "CARD_REWARD"} or not isinstance(history, list):
+        return None
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        gained = item.get("relics_gained")
+        if isinstance(gained, list):
+            for relic in gained:
+                if not isinstance(relic, dict):
+                    continue
+                specification = RELIC_PICKUP_CARD_SELECTIONS.get(relic_identity(relic))
+                if specification is None or screen_type not in specification["screen_types"]:
+                    continue
+                screen_state = normalized.get("screen_state")
+                selected = []
+                if isinstance(screen_state, dict):
+                    selected = screen_state.get("selected_cards")
+                    if not isinstance(selected, list):
+                        selected = screen_state.get("selected")
+                return {
+                    "kind": "RELIC_PICKUP_CARD_SELECTION",
+                    "selection_type": specification["selection_type"],
+                    "selection_mode": specification["selection_mode"],
+                    "selection_instruction": specification["instruction"],
+                    "required_cards": specification["required_cards"],
+                    "selected_count": len(selected) if isinstance(selected, list) else 0,
+                    "source": visible_relic(relic),
+                }
+            return None
+        before = str(item.get("screen_before") or "").upper()
+        after = str(item.get("screen_after") or "").upper()
+        if before != screen_type or after != screen_type:
+            return None
+    return None
+
+
 def attach_runtime_context(
     normalized: dict[str, Any],
     visited_shop_rooms: set[tuple[int, int]] | None,
@@ -659,9 +789,15 @@ def attach_runtime_context(
     """Add bounded cross-step context shared by live prompts and trace records."""
     normalized["recent_actions"] = recent_action_summary(action_history)
     normalized["run_memory"] = run_memory_summary(visited_shop_rooms, declined_card_reward_keys)
-    selection_context = generated_card_choice_context(normalized, action_history)
+    selection_context = relic_pickup_card_selection_context(normalized, action_history)
+    if selection_context is None:
+        selection_context = generated_card_choice_context(normalized, action_history)
     if selection_context is not None:
         normalized["selection_context"] = selection_context
+        screen_state = normalized.get("screen_state")
+        if isinstance(screen_state, dict) and selection_context.get("kind") == "RELIC_PICKUP_CARD_SELECTION":
+            screen_state["selection_mode"] = selection_context["selection_mode"]
+            screen_state["selection_instruction"] = selection_context["selection_instruction"]
     screen_state = normalized.get("screen_state")
     if str(normalized.get("screen_type") or "").upper() == "EVENT" and isinstance(screen_state, dict):
         event_history = event_history_summary(action_history, screen_state)
@@ -685,8 +821,15 @@ def accepted_action_history_item(pending: dict[str, Any], message: dict[str, Any
     decision = pending.get("decision")
     if isinstance(decision, dict) and isinstance(decision.get("source"), str):
         result["source"] = decision["source"]
+    post_state = normalize_state(message)
+    gained_relics = newly_gained_relics(
+        pending.get("pre_state", {}).get("relics") if isinstance(pending.get("pre_state"), dict) else None,
+        state.get("relics"),
+    )
+    if gained_relics:
+        result["relics_gained"] = gained_relics
     before = event_snapshot(pending.get("pre_state"))
-    after = event_snapshot(normalize_state(message))
+    after = event_snapshot(post_state)
     if before is not None:
         result["event_before"] = before
     if after is not None:
@@ -1143,7 +1286,7 @@ def semantic_actions(
         blocked_indices = blocked_potion_reward_indices(message) | blocked_card_reward_indices(
             message,
             declined_card_reward_keys,
-        )
+        ) | selected_card_choice_indices(message)
         for index, label in enumerate(choices):
             if index in blocked_indices:
                 continue
@@ -2858,6 +3001,70 @@ def blocked_card_reward_indices(
         for index, label in enumerate(choices)
         if str(label).strip().casefold() in {"card", "cards", "card reward", "卡牌", "卡牌奖励"}
     }
+
+
+def selected_card_choice_indices(message: dict[str, Any]) -> set[int]:
+    """Return selected card positions that must not be selected again.
+
+    GRID and HAND_SELECT screens keep every selectable card in a list and
+    highlighted cards in a separate list. Their public UUIDs identify an
+    exact instance, so five same-named Strikes remain distinct. Older protocol
+    variants without UUIDs fall back to one-to-one matching by visible fields.
+    """
+    state = game_state(message)
+    screen_type = str(state.get("screen_type") or "").upper()
+    fields_by_screen = {
+        "GRID": ("cards", "selected_cards"),
+        "HAND_SELECT": ("hand", "selected"),
+    }
+    selection_fields = fields_by_screen.get(screen_type)
+    if selection_fields is None:
+        return set()
+    screen_state = state.get("screen_state")
+    choices = state.get("choice_list")
+    if not isinstance(screen_state, dict) or not isinstance(choices, list):
+        return set()
+    cards = screen_state.get(selection_fields[0])
+    selected_cards = screen_state.get(selection_fields[1])
+    if not isinstance(cards, list) or not isinstance(selected_cards, list):
+        return set()
+
+    available_indices = {
+        index
+        for index, card in enumerate(cards)
+        if index < len(choices) and isinstance(card, dict)
+    }
+    uuid_to_index = {
+        str(card["uuid"]): index
+        for index, card in enumerate(cards)
+        if index in available_indices and isinstance(card, dict) and card.get("uuid") is not None
+    }
+    blocked: set[int] = set()
+    unmatched_selected: list[dict[str, Any]] = []
+    for selected in selected_cards:
+        if not isinstance(selected, dict):
+            continue
+        uuid = selected.get("uuid")
+        index = uuid_to_index.get(str(uuid)) if uuid is not None else None
+        if index is None:
+            unmatched_selected.append(selected)
+        else:
+            blocked.add(index)
+
+    for selected in unmatched_selected:
+        for index in sorted(available_indices - blocked):
+            card = cards[index]
+            if not isinstance(card, dict):
+                continue
+            fields = tuple(
+                key
+                for key in ("id", "upgrades", "name", "cost")
+                if selected.get(key) is not None and card.get(key) is not None
+            )
+            if fields and all(selected[key] == card[key] for key in fields):
+                blocked.add(index)
+                break
+    return blocked
 
 
 def remember_declined_combat_card_reward(

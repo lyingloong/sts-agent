@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "output_root": "/data/wanghao/sts-agent/outputs/online_rl/ironclad-a0",
-  "group_size": 4,
+  "group_size": 2,
   "seed": 20260826,
   "sampling": {
     "temperature": 1.2
@@ -22,14 +22,17 @@
   },
   "attribution": {
     "enabled": true,
-    "max_abs_advantage": 2.0
+    "max_abs_advantage": 2.0,
+    "min_tied_advantage": 0.2
   },
   "update": {
     "max_length": 4096,
     "learning_rate": 1e-5,
     "clip_range": 0.2,
-    "update_epochs": 1,
+    "update_epochs": 3,
     "max_grad_norm": 1.0,
+    "reinforce_ce_weight": 0.25,
+    "weaken_unlikelihood_weight": 0.25,
     "load_in_4bit": true,
     "gradient_checkpointing": true,
     "empty_cache_between_steps": true

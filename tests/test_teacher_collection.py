@@ -63,6 +63,17 @@ class TeacherClientTests(unittest.TestCase):
         self.assertIn("攻击药水", prompt)
         self.assertNotIn("【卡牌奖励决策】", prompt)
 
+    def test_teacher_prompt_uses_relic_pickup_selection_guidance(self) -> None:
+        prompt = teacher_prompts.build_system_prompt(
+            {
+                "screen_type": "GRID",
+                "screen_state": {"selection_mode": "BOTTLE"},
+                "selection_context": {"kind": "RELIC_PICKUP_CARD_SELECTION"},
+            }
+        )
+        self.assertIn("遗物触发选牌", prompt)
+        self.assertIn("瓶装遗物", prompt)
+
     def test_combat_prompt_prioritizes_avoiding_preventable_damage(self) -> None:
         prompt = teacher_prompts.build_system_prompt(
             {"screen_type": "NONE", "room_phase": "COMBAT"}

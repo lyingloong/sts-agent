@@ -23,8 +23,46 @@ class UpdateConfig:
     clip_range: float = 0.2
     update_epochs: int = 1
     max_grad_norm: float = 1.0
+    reinforce_ce_weight: float = 0.25
+    weaken_unlikelihood_weight: float = 0.25
     gradient_checkpointing: bool = True
     empty_cache_between_steps: bool = True
+
+
+def attribution_correction_loss(
+    torch: Any,
+    action_scores: Any,
+    selected_index: int,
+    direction: str | None,
+    *,
+    weight: float,
+    total_weight: float,
+    reinforce_ce_weight: float,
+    weaken_unlikelihood_weight: float,
+) -> tuple[Any | None, str | None]:
+    """Return a stable action-level correction loss for one attributed step.
+
+    Positive feedback is local supervised learning on the sampled good action.
+    Negative feedback is unlikelihood on the sampled bad action. Computing
+    log(1 - p_bad) as the log-sum-exp of legal alternatives remains stable when
+    p_bad is very close to one.
+    """
+
+    if direction not in {"reinforce", "weaken"}:
+        return None, None
+    if total_weight <= 0:
+        raise ValueError("total_weight must be positive")
+    if direction == "reinforce":
+        if reinforce_ce_weight <= 0:
+            return None, None
+        logprob = torch.log_softmax(action_scores, dim=0)[selected_index]
+        return -weight * reinforce_ce_weight * logprob / total_weight, "reinforce_ce"
+    if weaken_unlikelihood_weight <= 0 or int(action_scores.numel()) < 2:
+        return None, None
+    alternatives = torch.ones_like(action_scores, dtype=torch.bool)
+    alternatives[selected_index] = False
+    log_not_selected = torch.logsumexp(action_scores[alternatives], dim=0) - torch.logsumexp(action_scores, dim=0)
+    return -weight * weaken_unlikelihood_weight * log_not_selected / total_weight, "weaken_unlikelihood"
 
 
 class TrainableAliasPolicy:
@@ -197,6 +235,7 @@ class TrainableAliasPolicy:
         *,
         attribution_enabled: bool = False,
         max_abs_advantage: float = 2.0,
+        min_tied_advantage: float = 0.2,
     ) -> dict[str, Any]:
         if len(episodes) != len(rewards) or len(episodes) < 2:
             raise ValueError("a group-relative update requires at least two rewarded episodes")
@@ -204,6 +243,10 @@ class TrainableAliasPolicy:
             raise ValueError("sampling_temperature must be positive")
         if max_abs_advantage <= 0:
             raise ValueError("max_abs_advantage must be positive")
+        if min_tied_advantage <= 0:
+            raise ValueError("min_tied_advantage must be positive")
+        if min_tied_advantage > max_abs_advantage:
+            raise ValueError("min_tied_advantage must not exceed max_abs_advantage")
         mean = sum(rewards) / len(rewards)
         variance = sum((reward - mean) ** 2 for reward in rewards) / len(rewards)
         scale = math.sqrt(variance)
@@ -212,9 +255,10 @@ class TrainableAliasPolicy:
         if all_step_count < 1:
             raise ValueError("rollout group has no steps")
 
-        weighted_steps: list[tuple[dict[str, Any], float, float]] = []
+        weighted_steps: list[tuple[dict[str, Any], float, float, str | None]] = []
         reinforce_steps = 0
         weaken_steps = 0
+        tied_rewards = scale < 1e-8
         if attribution_enabled:
             for episode, advantage in zip(episodes, advantages):
                 by_step_id = {int(step["step_id"]): step for step in episode["steps"]}
@@ -222,7 +266,15 @@ class TrainableAliasPolicy:
                 # reward supplies only update strength, preventing a negative
                 # note in a low-reward rollout from being accidentally
                 # reinforced by a double-negative sign flip.
-                magnitude = min(abs(advantage), max_abs_advantage)
+                # A tied terminal reward has no group-relative direction. In
+                # attribution mode, human direction still provides a usable
+                # sign, so apply a deliberately small floor only to selected
+                # steps. Unselected steps remain untouched.
+                magnitude = (
+                    min_tied_advantage
+                    if tied_rewards
+                    else min(abs(advantage), max_abs_advantage)
+                )
                 for attribution in episode.get("attributions", []):
                     step = by_step_id.get(int(attribution["step_id"]))
                     if step is None:
@@ -231,16 +283,27 @@ class TrainableAliasPolicy:
                     if weight <= 0 or magnitude <= 0:
                         continue
                     signed_advantage = magnitude if attribution["direction"] == "reinforce" else -magnitude
-                    weighted_steps.append((step, signed_advantage, weight))
+                    weighted_steps.append((step, signed_advantage, weight, str(attribution["direction"])))
                     if attribution["direction"] == "reinforce":
                         reinforce_steps += 1
                     else:
                         weaken_steps += 1
         else:
             for episode, advantage in zip(episodes, advantages):
-                weighted_steps.extend((step, advantage, 1.0) for step in episode["steps"])
+                weighted_steps.extend((step, advantage, 1.0, None) for step in episode["steps"])
 
-        total_weight = sum(weight for _, _, weight in weighted_steps)
+        total_weight = sum(weight for _, _, weight, _ in weighted_steps)
+        correction_reinforce_steps = sum(1 for _, _, _, direction in weighted_steps if direction == "reinforce")
+        correction_weaken_steps = sum(
+            1
+            for step, _, _, direction in weighted_steps
+            if direction == "weaken" and len(step["legal_actions"]) >= 2
+        )
+        correction_weaken_unavoidable_steps = sum(
+            1
+            for step, _, _, direction in weighted_steps
+            if direction == "weaken" and len(step["legal_actions"]) < 2
+        )
         base_result: dict[str, Any] = {
             "algorithm": "signed_masked_episode_grpo" if attribution_enabled else "episode_group_relative_ppo",
             "rewards": rewards,
@@ -256,8 +319,24 @@ class TrainableAliasPolicy:
                 "weaken_steps": weaken_steps,
                 "weight_sum": total_weight,
                 "max_abs_advantage": max_abs_advantage,
+                "min_tied_advantage": min_tied_advantage,
+                "tied_rewards": tied_rewards,
+            },
+            "correction": {
+                "enabled": attribution_enabled,
+                "reinforce_ce_weight": self.config.reinforce_ce_weight,
+                "weaken_unlikelihood_weight": self.config.weaken_unlikelihood_weight,
+                "reinforce_ce_steps": correction_reinforce_steps,
+                "weaken_unlikelihood_steps": correction_weaken_steps,
+                "weaken_unavoidable_steps": correction_weaken_unavoidable_steps,
             },
         }
+        if tied_rewards and not attribution_enabled:
+            return base_result | {
+                "updated": False,
+                "skip_reason": "zero_group_reward_std",
+                "losses": [],
+            }
         if not weighted_steps:
             return base_result | {
                 "updated": False,
@@ -271,10 +350,16 @@ class TrainableAliasPolicy:
             self.torch.cuda.empty_cache()
             self.torch.cuda.reset_peak_memory_stats(self.device)
         losses: list[float] = []
+        ppo_losses: list[float] = []
+        reinforce_ce_losses: list[float] = []
+        weaken_unlikelihood_losses: list[float] = []
         for _ in range(self.config.update_epochs):
             self.optimizer.zero_grad(set_to_none=True)
             epoch_loss = 0.0
-            for step, advantage, weight in weighted_steps:
+            epoch_ppo_loss = 0.0
+            epoch_reinforce_ce_loss = 0.0
+            epoch_weaken_unlikelihood_loss = 0.0
+            for step, advantage, weight, direction in weighted_steps:
                 aliases, raw_logprobs = self.action_logprobs(
                     step["observation"],
                     step["legal_actions"],
@@ -286,14 +371,31 @@ class TrainableAliasPolicy:
                     raise ValueError("selected alias disappeared from an online RL step") from exc
                 # The stored behavior logprob includes the rollout
                 # temperature, so apply that same distribution here.
-                current_logprob = self.torch.log_softmax(raw_logprobs / sampling_temperature, dim=0)[selected_index]
+                action_scores = raw_logprobs / sampling_temperature
+                current_logprob = self.torch.log_softmax(action_scores, dim=0)[selected_index]
                 old_logprob = float(step["old_logprob"])
                 ratio = self.torch.exp(current_logprob - old_logprob)
                 unclipped = ratio * advantage
                 clipped = self.torch.clamp(ratio, 1.0 - self.config.clip_range, 1.0 + self.config.clip_range) * advantage
-                loss = -weight * self.torch.minimum(unclipped, clipped) / total_weight
+                ppo_loss = -weight * self.torch.minimum(unclipped, clipped) / total_weight
+                correction_loss, correction_kind = attribution_correction_loss(
+                    self.torch,
+                    action_scores,
+                    selected_index,
+                    direction,
+                    weight=weight,
+                    total_weight=total_weight,
+                    reinforce_ce_weight=self.config.reinforce_ce_weight,
+                    weaken_unlikelihood_weight=self.config.weaken_unlikelihood_weight,
+                )
+                loss = ppo_loss if correction_loss is None else ppo_loss + correction_loss
                 loss.backward()
                 epoch_loss += float(loss.detach())
+                epoch_ppo_loss += float(ppo_loss.detach())
+                if correction_kind == "reinforce_ce" and correction_loss is not None:
+                    epoch_reinforce_ce_loss += float(correction_loss.detach())
+                elif correction_kind == "weaken_unlikelihood" and correction_loss is not None:
+                    epoch_weaken_unlikelihood_loss += float(correction_loss.detach())
                 if self.config.empty_cache_between_steps and self.torch.cuda.is_available():
                     # Each action has an independently-sized observation.
                     # Returning freed blocks to CUDA prevents a long map
@@ -302,8 +404,18 @@ class TrainableAliasPolicy:
             grad_norm = float(self.torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm))
             self.optimizer.step()
             losses.append(epoch_loss)
+            ppo_losses.append(epoch_ppo_loss)
+            reinforce_ce_losses.append(epoch_reinforce_ce_loss)
+            weaken_unlikelihood_losses.append(epoch_weaken_unlikelihood_loss)
         self.model.eval()
-        result = base_result | {"updated": True, "losses": losses, "grad_norm": grad_norm}
+        result = base_result | {
+            "updated": True,
+            "losses": losses,
+            "ppo_losses": ppo_losses,
+            "reinforce_ce_losses": reinforce_ce_losses,
+            "weaken_unlikelihood_losses": weaken_unlikelihood_losses,
+            "grad_norm": grad_norm,
+        }
         if self.torch.cuda.is_available():
             result["peak_memory_mib"] = round(
                 self.torch.cuda.max_memory_allocated(self.device) / (1024 * 1024),
