@@ -11,7 +11,11 @@
     "thinking": false,
     "json_mode": true,
     "streaming": false,
-    "max_tokens": 5200
+    "temperature": 0.0,
+    "max_tokens": 5200,
+    "max_retries": 3,
+    "retry_backoff_seconds": 5.0,
+    "retry_max_backoff_seconds": 30.0
   },
   "posthoc_feedback": {
     "enabled": false

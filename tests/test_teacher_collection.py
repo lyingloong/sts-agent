@@ -33,6 +33,7 @@ class TeacherClientTests(unittest.TestCase):
         )
         self.assertIn('{"action_id":"A1"}', prompt)
         self.assertIn("A2 | Leave", prompt)
+        self.assertNotIn("teacher", prompt.casefold())
 
     def test_prompt_uses_configurable_input_limit(self) -> None:
         observation = {"screen_type": "GRID", "cards": [{"description": "x" * 200}]}
@@ -51,6 +52,14 @@ class TeacherClientTests(unittest.TestCase):
         self.assertIn("删牌决策", prompt)
         self.assertIn("不可逆", prompt)
         self.assertNotIn("【战斗决策】", prompt)
+
+    def test_player_persona_is_used_for_prompt_evolution_actions(self) -> None:
+        teacher_prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP"})
+        player_prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP"}, persona="player")
+        self.assertIn("远程教师", teacher_prompt)
+        self.assertNotIn("远程教师", player_prompt)
+        self.assertIn("正在亲自游玩", player_prompt)
+        self.assertIn("已审核的 skill", player_prompt)
 
     def test_teacher_prompt_adds_character_specific_guidance(self) -> None:
         prompt = teacher_prompts.build_system_prompt(
@@ -103,6 +112,8 @@ class TeacherClientTests(unittest.TestCase):
         self.assertIn("减少本回合及后续几回合可避免掉血", prompt)
         self.assertIn("不是机械地追求每回合零伤害", prompt)
         self.assertIn("把 `END_TURN` 当作最后备选", prompt)
+        self.assertIn("combat.monsters[*].knowledge", prompt)
+        self.assertIn("不代表本回合一定会使用", prompt)
 
     def test_teacher_payload_uses_scenario_system_prompt(self) -> None:
         client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
@@ -119,6 +130,28 @@ class TeacherClientTests(unittest.TestCase):
         )
         self.assertIn("商店决策", payload["messages"][0]["content"])
         self.assertIn("A1 | 购买", payload["messages"][1]["content"])
+
+    def test_select_can_override_temperature_for_deterministic_prompt_evolution(self) -> None:
+        client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
+        client.enabled = True
+        client.model = "deepseek-v4-pro"
+        client.max_retries = 0
+        client.temperature = 0.8
+        client.max_tokens = 512
+        client.max_input_chars = 32000
+        client.thinking = False
+        client.json_mode = True
+        client.streaming = False
+        client.request_id = 0
+        client.last_error = None
+        captured = {}
+        def request(payload, _callback=None):
+            captured.update(payload)
+            return {"model": "deepseek-v4-pro", "choices": [{"message": {"content": '{"action_id":"A1"}'}, "finish_reason": "stop"}]}
+        client._request = request  # type: ignore[method-assign]
+        result = client.select({"screen_type": "MAP"}, [{"id": "A1", "label": "选择"}], temperature=0.0)
+        self.assertEqual(result["action_id"], "A1")
+        self.assertEqual(captured["temperature"], 0.0)
 
     def test_select_extracts_reasoning_content_without_using_it_as_label(self) -> None:
         client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
@@ -151,6 +184,64 @@ class TeacherClientTests(unittest.TestCase):
         self.assertEqual(result["action_id"], "A2")
         self.assertEqual(result["thinking"], "先比较收益，再选择离开。")
         self.assertEqual(result["output"], '{"action_id":"A2"}')
+
+    def test_select_retries_transient_teacher_error_with_backoff(self) -> None:
+        client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
+        client.enabled = True
+        client.model = "deepseek-v4-pro"
+        client.max_retries = 2
+        client.retry_backoff_seconds = 0.0
+        client.retry_max_backoff_seconds = 0.0
+        client.temperature = 0.0
+        client.max_tokens = 512
+        client.max_input_chars = 32000
+        client.thinking = False
+        client.json_mode = True
+        client.streaming = False
+        client.request_id = 0
+        client.last_error = None
+        responses = [
+            {
+                "model": "deepseek-v4-pro",
+                "choices": [{"message": {"content": '{"action_id":"A2"}'}, "finish_reason": "stop"}],
+            },
+        ]
+        attempts = {"count": 0}
+        def request(_payload, _callback=None):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise teacher_client.TeacherError("teacher request failed: temporarily unavailable")
+            return responses.pop(0)
+        client._request = request  # type: ignore[method-assign]
+        updates = []
+        result = client.select(
+            {"screen_type": "EVENT"},
+            [{"id": "A1"}, {"id": "A2"}],
+            on_update=updates.append,
+        )
+        self.assertEqual(result["action_id"], "A2")
+        self.assertEqual(result["attempt"], 2)
+        self.assertTrue(any(item.get("retrying") is True for item in updates))
+
+    def test_select_does_not_retry_non_transient_teacher_error(self) -> None:
+        client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
+        client.enabled = True
+        client.model = "deepseek-v4-pro"
+        client.max_retries = 3
+        client.retry_backoff_seconds = 0.0
+        client.retry_max_backoff_seconds = 0.0
+        client.max_input_chars = 32000
+        client.temperature = 0.0
+        client.max_tokens = 512
+        client.thinking = False
+        client.json_mode = True
+        client.streaming = False
+        client.request_id = 0
+        client._request = lambda _payload, _callback=None: (_ for _ in ()).throw(
+            teacher_client.TeacherError("teacher HTTP 401: unauthorized", retryable=False)
+        )  # type: ignore[method-assign]
+        with self.assertRaises(teacher_client.TeacherError):
+            client.select({"screen_type": "EVENT"}, [{"id": "A1"}])
 
 
 class TeacherSftExportTests(unittest.TestCase):

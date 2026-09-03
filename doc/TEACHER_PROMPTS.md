@@ -1,12 +1,12 @@
-# 教师场景化提示词
+# 场景化动作提示词
 
 更新时间：2026-08-25
 
 ## 目的
 
-远程教师使用 `tools/teacher_prompts.py` 中的中文策略提示词。提示词只进入远程教师请求，不进入本地 Qwen 的 observation、SFT target 或 GRPO 输入。教师仍然只能从 controller 提供的合法动作中选择一个 `A<n>`。
+远程教师和 Prompt 演化动作模型共用 `tools/teacher_prompts.py` 中的中文场景策略。教师 SFT 请求使用“远程教师”身份；Prompt 演化的实际动作请求使用“正在游玩的玩家”身份，并在末尾追加当前角色已接受的 skill。提示词只进入远程请求，不进入本地 Qwen 的 observation、SFT target 或 GRPO 输入；动作模型仍然只能从 controller 提供的合法动作中选择一个 `A<n>`。
 
-当前版本：`sts1-teacher-zh-v2`
+教师 SFT 当前版本：`sts1-teacher-zh-v5`；Prompt 演化动作版本：`sts1-player-zh-v1`。
 
 ## 场景路由
 

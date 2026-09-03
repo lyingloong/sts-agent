@@ -19,11 +19,21 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(confidence["min_probability"], 0.85)
         self.assertNotIn("min_margin", confidence)
         self.assertEqual(config["teacher"]["max_input_chars"], 32000)
+        self.assertEqual(config["teacher"]["max_retries"], 3)
+        self.assertEqual(config["teacher"]["retry_backoff_seconds"], 5.0)
         self.assertEqual(config["posthoc_feedback"]["max_input_chars"], 96000)
         self.assertEqual(config["posthoc_feedback"]["mode"], "human")
 
     def test_teacher_input_limit_must_be_a_non_negative_integer(self) -> None:
         config = agent_config._merge(agent_config.DEFAULT_CONFIG, {"teacher": {"max_input_chars": -1}})
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(config)
+
+    def test_teacher_retry_backoff_must_be_ordered(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"teacher": {"retry_backoff_seconds": 4.0, "retry_max_backoff_seconds": 2.0}},
+        )
         with self.assertRaises(agent_config.ConfigError):
             agent_config.validate_config(config)
 

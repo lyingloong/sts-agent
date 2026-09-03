@@ -1,8 +1,9 @@
 {
-  "schema_version": "sts-prompt-evolution-0.1",
+  "schema_version": "sts-prompt-evolution-0.2",
   "version": "p0001",
   "character": "THE_SILENT",
   "parent_version": null,
-  "skills": {},
+  "role_skill": "",
+  "scene_skills": {},
   "change": {"kind": "baseline", "description": "Silent character prompt before human-gated evolution."}
 }

@@ -21,6 +21,10 @@ from teacher_prompts import PROMPT_VERSION, build_system_prompt
 class TeacherError(RuntimeError):
     """A recoverable remote-teacher error that should fall back to a human."""
 
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
 
 def compact_json(value: Any, limit: int = 32000) -> str:
     """Serialize a public observation, with an optional configured hard cap."""
@@ -43,7 +47,7 @@ def read_api_key(path: Path) -> str:
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise TeacherError(f"cannot read teacher.api_key_file: {path}") from exc
+        raise TeacherError(f"cannot read teacher.api_key_file: {path}", retryable=False) from exc
     for line in raw.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -56,7 +60,7 @@ def read_api_key(path: Path) -> str:
                     return candidate
         elif stripped:
             return stripped
-    raise TeacherError(f"teacher.api_key_file contains no key: {path}")
+    raise TeacherError(f"teacher.api_key_file contains no key: {path}", retryable=False)
 
 
 def build_prompt(
@@ -65,8 +69,7 @@ def build_prompt(
     max_input_chars: int = 32000,
 ) -> str:
     lines = [
-        "You are an expert Slay the Spire teacher producing an imitation-learning action label.",
-        "Choose one action that maximizes long-term win probability from the supplied legal actions.",
+        "Choose one supplied legal action that maximizes long-term win probability.",
         "The observation contains only public game information. recent_actions, event_history, and selection_context are context; the current legal actions are authoritative.",
         'Return exactly one JSON object: {"action_id":"A1"}. Do not include reasoning, prose, markdown, or an action outside the list.',
         "Observation:",
@@ -131,6 +134,8 @@ class RemoteTeacherClient:
         self.api_key_path = project_root / str(config["api_key_file"])
         self.timeout_seconds = float(config["timeout_seconds"])
         self.max_retries = int(config["max_retries"])
+        self.retry_backoff_seconds = float(config.get("retry_backoff_seconds", 2.0))
+        self.retry_max_backoff_seconds = float(config.get("retry_max_backoff_seconds", 8.0))
         self.temperature = float(config["temperature"])
         self.max_tokens = int(config["max_tokens"])
         self.max_input_chars = int(config["max_input_chars"])
@@ -165,6 +170,7 @@ class RemoteTeacherClient:
         legal_actions: list[dict[str, Any]],
         *,
         system_prompt: str | None = None,
+        temperature: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -178,7 +184,7 @@ class RemoteTeacherClient:
                     "content": build_prompt(observation, legal_actions, self.max_input_chars),
                 },
             ],
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature is None else float(temperature),
             "max_tokens": self.max_tokens,
             "stream": self.streaming,
         }
@@ -317,7 +323,8 @@ class RemoteTeacherClient:
                 detail = exc.read().decode("utf-8", errors="replace")[:300]
             except OSError:
                 pass
-            raise TeacherError(f"teacher HTTP {exc.code}: {detail or exc.reason}") from exc
+            retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
+            raise TeacherError(f"teacher HTTP {exc.code}: {detail or exc.reason}", retryable=retryable) from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise TeacherError(f"teacher request failed: {exc}") from exc
         try:
@@ -327,6 +334,42 @@ class RemoteTeacherClient:
         if not isinstance(value, dict):
             raise TeacherError("teacher returned a non-object response")
         return value
+
+    def _retry_delay(self, retry_index: int) -> float:
+        """Return bounded exponential backoff before the next HTTP attempt."""
+
+        base = float(getattr(self, "retry_backoff_seconds", 2.0))
+        maximum = float(getattr(self, "retry_max_backoff_seconds", 8.0))
+        if base <= 0.0:
+            return 0.0
+        return min(
+            maximum,
+            base * (2.0 ** max(0, retry_index)),
+        )
+
+    def _wait_before_retry(
+        self,
+        error: TeacherError,
+        retry_index: int,
+        callback: TeacherUpdate | None,
+    ) -> None:
+        delay = self._retry_delay(retry_index)
+        if callback is not None:
+            callback(
+                {
+                    "thinking": "",
+                    "output": "",
+                    "done": False,
+                    "retrying": True,
+                    "retry_attempt": retry_index + 1,
+                    "retry_delay_seconds": delay,
+                    "retry_reason": str(error),
+                }
+            )
+        # Wait before every retry, including parse/transport failures, so a
+        # transient response or rate-limit error is not immediately retried.
+        if delay > 0.0:
+            time.sleep(delay)
 
     def complete(
         self,
@@ -400,6 +443,9 @@ class RemoteTeacherClient:
                 }
             except TeacherError as exc:
                 last_error = exc
+                if attempt >= self.max_retries or not exc.retryable:
+                    break
+                self._wait_before_retry(exc, attempt, on_update)
         assert last_error is not None
         self.last_error = str(last_error)
         raise last_error
@@ -412,12 +458,18 @@ class RemoteTeacherClient:
         *,
         system_prompt: str | None = None,
         prompt_version: str | None = None,
+        temperature: float | None = None,
     ) -> dict[str, Any]:
         legal_ids = {action_id(action) for action in legal_actions if action_id(action)}
         if not legal_ids:
             raise TeacherError("teacher called without legal actions")
         self.request_id += 1
-        payload = self._payload(observation, legal_actions, system_prompt=system_prompt)
+        payload = self._payload(
+            observation,
+            legal_actions,
+            system_prompt=system_prompt,
+            temperature=temperature,
+        )
         started = time.monotonic()
         last_error: TeacherError | None = None
         for attempt in range(self.max_retries + 1):
@@ -461,6 +513,9 @@ class RemoteTeacherClient:
                 }
             except TeacherError as exc:
                 last_error = exc
+                if attempt >= self.max_retries or not exc.retryable:
+                    break
+                self._wait_before_retry(exc, attempt, on_update)
         assert last_error is not None
         self.last_error = str(last_error)
         raise last_error

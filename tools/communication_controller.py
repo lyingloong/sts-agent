@@ -27,7 +27,7 @@ from typing import Any, Callable, TextIO
 from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
 from item_knowledge import normalize_item_key, potion_effect, relic_effect
-from monster_knowledge import boss_profile
+from monster_knowledge import boss_profile, monster_profile
 from posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
@@ -268,8 +268,11 @@ def environment_auto_action(
 
     The controller owns only actions with no strategic trade-off: a visible
     combat reward relic/gold, a potion when an inventory slot is free, opening
-    a visible card reward, and entering a just-reached shop. Card selection,
-    boss relics, purchases, purge decisions, and full-inventory potion choices
+    a visible card reward, and entering a just-reached shop. It also executes
+    a sole legal action, because there is no remaining choice for a policy to
+    make (for example, ``PROCEED`` after leaving a shop or ``END_TURN`` when a
+    combat hand has no playable cards or usable potions). Card selection, boss
+    relics, purchases, purge decisions, and full-inventory potion choices
     remain policy actions.
     """
     state = game_state(message)
@@ -314,6 +317,20 @@ def environment_auto_action(
                     "rule": "shop_open_merchant",
                     "reason": "自动打开商人界面",
                 }
+
+    # Do this last so explicit reward/shop rules retain their useful labels.
+    # The semantic action compiler has already filtered unavailable cards,
+    # targets, potions, and blocked choices, so one remaining action is safe to
+    # execute without an inference request.
+    if len(actions) == 1:
+        action = dict(actions[0])
+        label = str(action.get("label") or action.get("command") or action.get("id") or "唯一动作")
+        action["label"] = f"自动执行 {label}"
+        return action, {
+            "rule": "single_legal_action",
+            "reason": f"当前仅有一个合法动作：{label}",
+            "screen_type": screen_type,
+        }
     return None
 
 
@@ -1084,6 +1101,9 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
 
     normalized.pop("map", None)
     if normalized.get("screen_type") != "NONE" or normalized.get("room_phase") != "COMBAT":
+        # CommunicationMod may briefly retain the previous combat payload on
+        # a non-combat screen. Never expose that stale state to a prompt.
+        normalized.pop("combat", None)
         return normalized
 
     # Combat runs every turn, so keep this prompt compact even though map
@@ -1294,6 +1314,9 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
             "is_gone": monster.get("is_gone"),
             "powers": powers_summary(monster.get("powers")),
         }
+        known_monster = monster_profile(monster.get("id") or monster.get("name"))
+        if known_monster is not None:
+            item["knowledge"] = known_monster
         if not hide_enemy_intents:
             item.update(
                 {
@@ -2886,6 +2909,7 @@ def request_prompt_evolution_review(
             {
                 "type": "prompt_evolution_review_request",
                 "review": review,
+                "phase": review.get("phase", "validation") if isinstance(review, dict) else "validation",
                 "error": error,
             }
         )
@@ -2995,8 +3019,12 @@ class TeacherClient:
                         "thinking_enabled": self.thinking,
                         "thinking": update.get("thinking", ""),
                         "output": update.get("output", ""),
+                        "retrying": bool(update.get("retrying")),
+                        "retry_attempt": update.get("retry_attempt"),
+                        "retry_delay_seconds": update.get("retry_delay_seconds"),
+                        "retry_reason": update.get("retry_reason"),
                     },
-                    "assist_status": "思考中",
+                    "assist_status": "网络重试中" if update.get("retrying") else "思考中",
                     "executed_action": None,
                     "source": None,
                     "overridden": None,
@@ -3014,6 +3042,7 @@ class TeacherClient:
                 on_update=forward_update,
                 system_prompt=system_prompt,
                 prompt_version=prompt_version,
+                temperature=0.0 if self.prompt_evolution is not None and self.prompt_evolution.enabled else None,
             )
         except TeacherError as exc:
             return self._fallback_decision("不可用", str(exc))
@@ -3328,9 +3357,7 @@ def ask_action(
         """Push a transient teacher or policy status without changing game state."""
         if getattr(bridge, "connection", None) is None:
             return
-        try:
-            bridge.send(
-                {
+        packet = {
                     "type": "model_update",
                     "text": format_view(message, run_id, error, decision_update, visited_shop_rooms, actions),
                     "in_game": bool(message.get("in_game")),
@@ -3339,7 +3366,11 @@ def ask_action(
                     "model_pending": model_pending,
                     "auto_execute": auto_execute,
                 }
-            )
+        evolution = getattr(teacher, "prompt_evolution", None)
+        if evolution is not None and evolution.enabled:
+            packet["prompt_evolution"] = evolution.status()
+        try:
+            bridge.send(packet)
         except OSError:
             # The game action can still be executed if the optional UI closes
             # during a long streaming request.
@@ -3455,15 +3486,17 @@ def ask_action(
             send_model_update(automatic_decision, auto_execute=True)
         return str(automatic["command"]), automatic, automatic_decision
     while True:
-        bridge.send(
-            {
+        packet = {
                 "type": "view",
                 "text": format_view(message, run_id, error, decision, visited_shop_rooms, actions),
                 "in_game": bool(message.get("in_game")),
                 "decision": decision,
                 "overlay": overlay_view_data(message, run_id, actions, action_history),
             }
-        )
+        evolution = getattr(teacher, "prompt_evolution", None)
+        if evolution is not None and evolution.enabled:
+            packet["prompt_evolution"] = evolution.status()
+        bridge.send(packet)
         response = bridge.receive()
         if response is None:
             continue
@@ -3627,6 +3660,14 @@ def main() -> int:
     # CommunicationMod waits for this stdout handshake.
     teacher.prewarm()
     prompt_evolution_preflight_error = prompt_evolution.preflight()
+    if prompt_evolution.enabled:
+        print(
+            f"prompt evolution ready: character selected at START; active skill version will be loaded per run"
+            if prompt_evolution_preflight_error is None
+            else f"prompt evolution unavailable: {prompt_evolution_preflight_error}",
+            file=sys.stderr,
+            flush=True,
+        )
     posthoc_preflight_error = posthoc.preflight()
     policy.prewarm()
     if policy.runtime == "remote_online_rl" and policy.enabled and posthoc.enabled != policy.online_rl_attribution_enabled:
@@ -3962,17 +4003,38 @@ def main() -> int:
                                 trace_path,
                                 completed_record["post_state"],
                             )
-                        if evolution_result.get("kind") == "review":
-                            review = evolution_result["review"]
+                        if evolution_result.get("kind") in {"candidate_review", "review", "result_review"}:
                             review_error: str | None = None
-                            while True:
+                            while evolution_result.get("kind") in {"candidate_review", "review", "result_review"}:
+                                review = evolution_result.get("review")
+                                try:
+                                    bridge.send(
+                                        {
+                                            "type": "prompt_evolution_update",
+                                            "model_id": teacher.model,
+                                            "prompt_evolution": prompt_evolution.status(),
+                                        }
+                                    )
+                                except OSError:
+                                    pass
                                 review_response = request_prompt_evolution_review(bridge, review, review_error)
                                 evolution_result = prompt_evolution.handle_review(review_response)
-                                if evolution_result.get("kind") != "error":
-                                    break
-                                review_error = str(evolution_result.get("error") or "审核结果无效")
+                                if evolution_result.get("kind") == "error":
+                                    review_error = str(evolution_result.get("error") or "审核结果无效")
+                                else:
+                                    review_error = None
                         if evolution_result.get("kind") == "start_candidate":
                             prompt_evolution_restart_config = dict(evolution_result["run_config"])
+                        try:
+                            bridge.send(
+                                {
+                                    "type": "prompt_evolution_update",
+                                    "model_id": teacher.model,
+                                    "prompt_evolution": prompt_evolution.status(),
+                                }
+                            )
+                        except OSError:
+                            pass
                         write_event(
                             {
                                 "event": "prompt_evolution_terminal",

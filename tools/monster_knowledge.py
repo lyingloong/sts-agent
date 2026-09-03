@@ -63,3 +63,44 @@ def boss_profile(value: Any) -> dict[str, Any] | None:
         for field in ("id", "name", "act", "min_hp", "max_hp", "min_hp_ascension", "max_hp_ascension")
         if entry.get(field) is not None
     } | {"moves": moves}
+
+
+def monster_profile(value: Any) -> dict[str, Any] | None:
+    """Return static reference mechanics for one known combat enemy.
+
+    This is deliberately separate from the live enemy fields. ``moves`` lists
+    possibilities from the knowledge snapshot; the current intent, damage,
+    HP, block, and Powers remain sourced from CommunicationMod.
+    """
+    key = normalize_item_key(value)
+    entry = _load().get(key)
+    if not isinstance(entry, dict):
+        return None
+    moves: list[dict[str, Any]] = []
+    for move in entry.get("moves", []):
+        if not isinstance(move, dict):
+            continue
+        item = {
+            field: move.get(field)
+            for field in ("id", "name", "intent", "damage", "damage_ascension", "hits", "block")
+            if move.get(field) is not None
+        }
+        if item:
+            moves.append(item)
+    result = {
+        field: entry.get(field)
+        for field in (
+            "id",
+            "name",
+            "type",
+            "act",
+            "min_hp",
+            "max_hp",
+            "min_hp_ascension",
+            "max_hp_ascension",
+        )
+        if entry.get(field) is not None
+    }
+    result["moves"] = moves
+    result["source"] = "static_knowledge"
+    return result

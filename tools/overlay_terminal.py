@@ -72,6 +72,19 @@ def display_model_name(value: Any) -> str:
     return text.rsplit("/", 1)[-1] if text else "-"
 
 
+def action_panel_mode_info(decision: Any) -> tuple[str, str]:
+    """Return a mode-specific title and short purpose for MODEL / ACTION."""
+    mode = decision.get("mode") if isinstance(decision, dict) else None
+    return {
+        "candidate_assist": ("动作面板 · 候选辅助", "模型给出候选，等待人工确认"),
+        "confidence_auto": ("动作面板 · 置信度自动", "高置信度动作自动执行，其余等待确认"),
+        "remote_online_rl": ("动作面板 · 在线强化学习", "策略采样结果自动执行"),
+        "environment_automation": ("动作面板 · 环境推进", "Controller 正在执行无决策推进动作"),
+        "teacher_collection": ("动作面板 · 远程教师", "教师选择动作并记录 SFT 数据"),
+        "prompt_evolution": ("动作面板 · Prompt 演化", "教师选择动作并评估策略候选"),
+    }.get(str(mode), ("动作面板 · 人工操作", "等待当前合法动作"))
+
+
 def enable_windows_dpi_awareness() -> None:
     """Avoid Windows bitmap scaling, which makes Tk text look blurry."""
     if sys.platform != "win32":
@@ -235,6 +248,49 @@ def online_rl_panel_text(status: Any, model_id: Any = None) -> str:
     return "\n".join(lines)
 
 
+def prompt_evolution_panel_text(status: Any, model_id: Any = None) -> str:
+    """Render the prompt-evolution lifecycle independently from action UI."""
+
+    value = status if isinstance(status, dict) else {}
+    model = display_model_name(model_id)
+    character = table_cell(value.get("character") or "等待开始游戏")
+    role = table_cell(value.get("role") or "-")
+    active = table_cell(value.get("active_version") or "-")
+    policy = table_cell(value.get("policy_id") or "-")
+    candidate = table_cell(value.get("candidate_id") or "-")
+    target = table_cell(value.get("target_skill") or "-")
+    revision = value.get("revision")
+    revision_text = str(revision) if isinstance(revision, int) else "-"
+    lines = [
+        "Prompt Evolution",
+        f"教师：{model}",
+        f"角色：{character}  |  当前角色：{role}",
+        f"生效版本：{active}  |  运行策略：{policy}",
+        f"候选：{candidate}  |  目标 skill：{target}",
+        f"修订次数：{revision_text}",
+        "",
+        "当前阶段",
+        table_cell(value.get("stage") or "等待 controller 状态"),
+    ]
+    input_chars = value.get("analysis_input_chars")
+    input_limit = value.get("analysis_input_limit_chars")
+    if isinstance(input_chars, int) and isinstance(input_limit, int) and input_chars > 0:
+        if value.get("analysis_input_truncated"):
+            lines.extend(
+                (
+                    "",
+                    "输入告警",
+                    f"候选分析输入约 {input_chars:,} 字符，已超过上限 {input_limit:,}，内容已截断。",
+                )
+            )
+        else:
+            lines.extend(("", f"分析输入：{input_chars:,}/{input_limit:,} 字符，未截断"))
+    error = table_cell(value.get("error"))
+    if error:
+        lines.extend(("", "异常", error))
+    return "\n".join(lines)
+
+
 def posthoc_reflection_text(packet: dict[str, Any]) -> str:
     """Summarize a completed rollout without exposing raw terminal state."""
 
@@ -329,32 +385,54 @@ def prompt_evolution_review_text(review: Any) -> str:
     if not isinstance(review, dict):
         return "没有可审核的 prompt 候选。"
     comparison = review.get("comparison") if isinstance(review.get("comparison"), dict) else {}
+    phase = str(review.get("phase") or "validation")
     incumbent = comparison.get("incumbent") if isinstance(comparison.get("incumbent"), dict) else {}
     candidate = comparison.get("candidate") if isinstance(comparison.get("candidate"), dict) else {}
     left = incumbent.get("metrics") if isinstance(incumbent.get("metrics"), dict) else {}
     right = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
     change = comparison.get("change_summary") if isinstance(comparison.get("change_summary"), dict) else {}
+    candidate_payload = review.get("candidate") if isinstance(review.get("candidate"), dict) else {}
+    if phase == "candidate":
+        new_result = "候选尚未验证"
+        delta = "等待人工批准后再运行同一种子"
+        automatic = "不适用"
+    else:
+        new_result = (
+            f"{right.get('screen_type', '?')}  Act {right.get('act', '?')} Floor {right.get('floor', '?')}  "
+            f"HP {right.get('current_hp', '?')}/{right.get('max_hp', '?')}  分数 {right.get('score', '?')}"
+        )
+        delta = str(comparison.get("score_delta", "?"))
+        automatic = "更好" if comparison.get("automatically_favorable") else "未超过旧版本"
     lines = [
         "PROMPT EVOLUTION REVIEW",
+        f"阶段：{'候选验证前审核' if phase == 'candidate' else '验证结果审核'}",
         f"种子：{table_cell(comparison.get('seed') or '?')}",
         f"旧版本：{table_cell(incumbent.get('policy_id') or '?')}  |  新版本：{table_cell(candidate.get('policy_id') or '?')}",
         f"旧结果：{left.get('screen_type', '?')}  Act {left.get('act', '?')} Floor {left.get('floor', '?')}  HP {left.get('current_hp', '?')}/{left.get('max_hp', '?')}  分数 {left.get('score', '?')}",
-        f"新结果：{right.get('screen_type', '?')}  Act {right.get('act', '?')} Floor {right.get('floor', '?')}  HP {right.get('current_hp', '?')}/{right.get('max_hp', '?')}  分数 {right.get('score', '?')}",
-        f"分数变化：{comparison.get('score_delta', '?')}  | 自动判断：{'更好' if comparison.get('automatically_favorable') else '未超过旧版本'}",
+        f"新结果：{new_result}",
+        f"分数变化：{delta}  | 自动判断：{automatic}",
         "",
         f"修改场景：{table_cell(change.get('target_skill') or '?')}",
         f"问题诊断：{table_cell(change.get('diagnosis') or '未提供')}",
         f"预期效果：{table_cell(change.get('expected_effect') or '未提供')}",
         f"风险：{table_cell(change.get('risk') or '未提供')}",
         "",
-        "原策略补充：",
-        table_cell(change.get("previous_instruction") or "（无）"),
+        "原 skill：",
+        table_cell(change.get("previous_skill") or change.get("previous_instruction") or "（无）"),
         "",
-        "候选策略补充：",
-        table_cell(change.get("instruction") or "（无）"),
+        "候选 skill：",
+        table_cell(change.get("skill") or change.get("instruction") or "（无）"),
         "",
         "证据步骤：" + ", ".join(f"#{item}" for item in change.get("evidence_step_ids", []) if isinstance(item, int)),
     ]
+    if candidate_payload.get("analysis_input_truncated"):
+        lines.extend(
+            (
+                "",
+                "输入告警：候选分析账本超过配置上限，发送给教师的内容已截断。",
+                f"实际 {candidate_payload.get('analysis_input_chars', '?')} 字符 / 上限 {candidate_payload.get('analysis_input_limit_chars', '?')} 字符。",
+            )
+        )
     evidence = comparison.get("evidence") if isinstance(comparison.get("evidence"), dict) else {}
     candidate_evidence = evidence.get("candidate") if isinstance(evidence.get("candidate"), list) else []
     if candidate_evidence:
@@ -389,6 +467,12 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
         f"模型：{model}    状态：{status}",
         f"动作：{action}    延迟：{latency_text}",
     ]
+    if teacher.get("retrying"):
+        retry_attempt = teacher.get("retry_attempt")
+        retry_delay = teacher.get("retry_delay_seconds")
+        attempt_text = f"第 {retry_attempt} 次" if isinstance(retry_attempt, int) else "下一次"
+        delay_text = f"，等待 {retry_delay:.1f} 秒" if isinstance(retry_delay, (int, float)) else ""
+        lines.append(f"网络重试：{attempt_text}{delay_text}后继续")
     thinking = str(teacher.get("thinking") or "").strip()
     output = str(teacher.get("output") or "").strip()
     lines.extend(("", "教师思考", thinking or "（未返回思考内容）", "", "最终输出", output or "（未返回输出）"))
@@ -414,6 +498,7 @@ class OverlayTerminal:
         self.actions: queue.Queue[str] = queue.Queue()
         self.reflection_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self.prompt_evolution_responses: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._prompt_evolution_warning_signature: str | None = None
         self.network_thread: threading.Thread | None = None
         self.closing = False
         self.pending_view = False
@@ -425,9 +510,11 @@ class OverlayTerminal:
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
         self.control = tk.Toplevel(self.root)
-        self.control.title("StS Agent - Model & Action")
+        self.control.title("StS Agent - Action Panel")
         self.online_rl = tk.Toplevel(self.root)
         self.online_rl.title("StS Agent - Online RL")
+        self.prompt_evolution = tk.Toplevel(self.root)
+        self.prompt_evolution.title("StS Agent - Prompt Evolution")
         self.connection_state = tk.StringVar()
         self.control_connection = tk.StringVar()
         self.ui_font = self._choose_font("Microsoft YaHei UI", "Noto Sans SC", "Microsoft YaHei", "Segoe UI")
@@ -443,7 +530,8 @@ class OverlayTerminal:
         self._configure_window(self.root, "status", 360, 260)
         self._configure_window(self.control, "control", 380, 260)
         self._configure_window(self.online_rl, "online_rl", 300, 210)
-        for window in (self.root, self.control, self.online_rl):
+        self._configure_window(self.prompt_evolution, "prompt_evolution", 360, 250)
+        for window in (self.root, self.control, self.online_rl, self.prompt_evolution):
             window.bind(
                 "<Map>",
                 lambda _event, target=window: self._restore_frameless_window(target),
@@ -452,21 +540,30 @@ class OverlayTerminal:
         self._build_status_window()
         self._build_control_window()
         self._build_online_rl_window()
+        self._build_prompt_evolution_window()
         if self.config["overlay"]["frameless"]:
             self._install_resize_handles(self.root)
             self._install_resize_handles(self.control)
             self._install_resize_handles(self.online_rl)
+            self._install_resize_handles(self.prompt_evolution)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.control.protocol("WM_DELETE_WINDOW", self.close)
         self.online_rl.protocol("WM_DELETE_WINDOW", self.close)
+        self.prompt_evolution.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Configure>", self._schedule_layout_save, add="+")
         self.control.bind("<Configure>", self._schedule_layout_save, add="+")
         self.online_rl.bind("<Configure>", self._schedule_layout_save, add="+")
+        self.prompt_evolution.bind("<Configure>", self._schedule_layout_save, add="+")
         self.root.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
         self.control.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
         self.online_rl.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
-        if self.config["policy"]["runtime"] != "remote_online_rl":
+        self.prompt_evolution.bind("<FocusOut>", self._schedule_topmost_refresh, add="+")
+        if not self.config["policy"]["enabled"] or self.config["policy"]["runtime"] != "remote_online_rl":
             self.online_rl.withdraw()
+        if self.config["prompt_evolution"]["enabled"]:
+            self._set_prompt_evolution_panel({}, self.config["teacher"]["model"])
+        else:
+            self.prompt_evolution.withdraw()
         self._set_controls_enabled(False)
         self._set_connection("正在连接 controller...", WARNING)
         if self.always_on_top:
@@ -483,7 +580,7 @@ class OverlayTerminal:
         return {
             name: geometry
             for name, geometry in value.items()
-            if name in {"status", "control", "online_rl"} and isinstance(geometry, str) and GEOMETRY_PATTERN.fullmatch(geometry)
+            if name in {"status", "control", "online_rl", "prompt_evolution"} and isinstance(geometry, str) and GEOMETRY_PATTERN.fullmatch(geometry)
         }
 
     def _configure_window(self, window: tk.Misc, name: str, min_width: int, min_height: int) -> None:
@@ -502,7 +599,7 @@ class OverlayTerminal:
         """Use the native Windows topmost band without activating either Overlay."""
         if not self.always_on_top or self.closing:
             return
-        for window in (self.root, self.control, self.online_rl):
+        for window in (self.root, self.control, self.online_rl, self.prompt_evolution):
             if str(window) in self._minimized_frameless:
                 continue
             try:
@@ -549,6 +646,8 @@ class OverlayTerminal:
             padx=10,
         )
         label.grid(row=0, column=0, sticky="w")
+        if window is self.control:
+            self.control_title_label = label
         if self.config["overlay"]["frameless"]:
             minimize_button = self._minimize_button(bar, window, background=PANEL)
             minimize_button.grid(row=0, column=2, sticky="e")
@@ -592,7 +691,7 @@ class OverlayTerminal:
     def _is_frameless_primary_window(self, window: tk.Misc) -> bool:
         return bool(
             self.config["overlay"]["frameless"]
-            and window in (self.root, self.control, self.online_rl)
+            and window in (self.root, self.control, self.online_rl, self.prompt_evolution)
         )
 
     def _minimize_window(self, window: tk.Misc) -> None:
@@ -635,7 +734,9 @@ class OverlayTerminal:
             return "status"
         if window is self.control:
             return "control"
-        return "online_rl"
+        if window is self.online_rl:
+            return "online_rl"
+        return "prompt_evolution"
 
     def _show_state_panel_for_prompt(self) -> None:
         """Make a human-input prompt visible even when other panels are minimized."""
@@ -762,7 +863,7 @@ class OverlayTerminal:
         outer.grid_rowconfigure(5, weight=0, minsize=16)
         outer.grid_columnconfigure(0, weight=1)
 
-        title_bar = self._title_bar(outer, self.control, "MODEL / ACTION")
+        title_bar = self._title_bar(outer, self.control, "动作面板 · 人工操作")
         title_bar.grid(row=0, column=0, sticky="ew", pady=(0, 7))
         self.reconnect_button = self._button(title_bar, "重连", self.connect, compact=True)
         self.reconnect_button.grid(row=0, column=1, sticky="e", padx=(0, 4))
@@ -928,6 +1029,82 @@ class OverlayTerminal:
         self.online_rl_text.tag_configure("rl_device", foreground=MUTED, font=(self.data_font, 9))
         self.online_rl_text.tag_configure("rl_error", foreground=ERROR, font=(self.data_font, 9, "bold"))
 
+    def _build_prompt_evolution_window(self) -> None:
+        outer = tk.Frame(self.prompt_evolution, background=BACKGROUND, padx=10, pady=10)
+        outer.grid(sticky="nsew")
+        self.prompt_evolution.grid_rowconfigure(0, weight=1)
+        self.prompt_evolution.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+        self._title_bar(outer, self.prompt_evolution, "PROMPT EVOLUTION").grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        text_frame = tk.Frame(outer, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        self.prompt_evolution_text = tk.Text(
+            text_frame,
+            wrap="word",
+            state="disabled",
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=9,
+            font=(self.data_font, 9),
+        )
+        self.prompt_evolution_text.grid(row=0, column=0, sticky="nsew")
+        self.prompt_evolution_text.tag_configure("pe_title", foreground=ACCENT, font=(self.ui_font, 11, "bold"), spacing3=4)
+        self.prompt_evolution_text.tag_configure("pe_meta", foreground=MUTED, font=(self.data_font, 9))
+        self.prompt_evolution_text.tag_configure("pe_section", foreground=WARNING, font=(self.ui_font, 10, "bold"), spacing1=9, spacing3=2)
+        self.prompt_evolution_text.tag_configure("pe_stage", foreground=ACCENT, font=(self.data_font, 10, "bold"))
+        self.prompt_evolution_text.tag_configure("pe_error", foreground=ERROR, font=(self.data_font, 9, "bold"))
+
+    def _set_prompt_evolution_panel(self, status: Any, model_id: Any = None) -> None:
+        if isinstance(model_id, str) and model_id.strip():
+            self.prompt_evolution_model_id = model_id
+        self.prompt_evolution.deiconify()
+        widget = self.prompt_evolution_text
+        value = status if isinstance(status, dict) else {}
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("end", prompt_evolution_panel_text(value, getattr(self, 'prompt_evolution_model_id', None)))
+        widget.tag_add("pe_title", "1.0", "1.end")
+        for line in ("当前阶段", "异常"):
+            start = widget.search(line, "1.0", stopindex="end")
+            if start:
+                widget.tag_add("pe_section", start, f"{start}+{len(line)}c")
+        stage_text = table_cell(value.get("stage") or "等待 controller 状态")
+        stage = widget.search(stage_text, "1.0", stopindex="end")
+        if stage:
+            widget.tag_add("pe_stage", stage, f"{stage}+{len(stage_text)}c")
+        widget.configure(state="disabled")
+
+    def _show_prompt_evolution_update(self, packet: dict[str, Any]) -> None:
+        status = packet.get("prompt_evolution")
+        self._set_prompt_evolution_panel(status, packet.get("model_id"))
+        if not isinstance(status, dict) or not status.get("analysis_input_truncated"):
+            return
+        input_chars = status.get("analysis_input_chars")
+        input_limit = status.get("analysis_input_limit_chars")
+        if not isinstance(input_chars, int) or not isinstance(input_limit, int):
+            return
+        signature = ":".join(
+            str(status.get(key) or "")
+            for key in ("candidate_id", "analysis_input_chars", "analysis_input_limit_chars")
+        )
+        if signature == self._prompt_evolution_warning_signature:
+            return
+        self._prompt_evolution_warning_signature = signature
+        messagebox.showwarning(
+            "Prompt 输入已截断",
+            "候选分析输入超过配置上限，发送给 DeepSeek 的动作账本被截断。\n\n"
+            f"当前约 {input_chars:,} 字符，上限 {input_limit:,} 字符。\n"
+            "请提高 prompt_evolution.max_analysis_input_chars 后再进行本轮分析。",
+            parent=self.prompt_evolution,
+        )
+
     def _button(self, parent: tk.Misc, text: str, command: Callable[[], None], compact: bool = False) -> tk.Button:
         return tk.Button(
             parent,
@@ -1018,12 +1195,23 @@ class OverlayTerminal:
         mode_label = "思考已开启" if thinking_enabled else "快速模式"
         thinking = str(teacher.get("thinking") or "").strip() or "（未返回思考内容）"
         output = str(teacher.get("output") or "").strip() or "（未返回输出）"
+        retrying = bool(teacher.get("retrying"))
+        retry_attempt = teacher.get("retry_attempt")
+        retry_delay = teacher.get("retry_delay_seconds")
+        retry_text = ""
+        if retrying:
+            attempt_text = f"第 {retry_attempt} 次" if isinstance(retry_attempt, int) else "下一次"
+            delay_text = f"，等待 {retry_delay:.1f} 秒" if isinstance(retry_delay, (int, float)) else ""
+            retry_text = f"网络重试：{attempt_text}{delay_text}后继续"
+        title = "Prompt 演化教师" if decision.get("mode") == "prompt_evolution" else "远程教师模式"
 
         self.teacher_text.configure(state="normal")
         self.teacher_text.delete("1.0", "end")
-        self.teacher_text.insert("end", f"远程教师模式 · {mode_label}", "teacher_title")
+        self.teacher_text.insert("end", f"{title} · {mode_label}", "teacher_title")
         self.teacher_text.insert("end", f"\n模型：{model}    状态：{status}", "teacher_meta")
         self.teacher_text.insert("end", f"\n动作：{action}    延迟：{latency_text}", "teacher_meta")
+        if retry_text:
+            self.teacher_text.insert("end", f"\n{retry_text}", "teacher_warning")
         self.teacher_text.insert("end", "\n\n教师思考", "teacher_section")
         self.teacher_text.insert("end", f"\n{thinking}", "teacher_body")
         self.teacher_text.insert("end", "\n\n最终输出", "teacher_section")
@@ -1214,11 +1402,19 @@ class OverlayTerminal:
             )
         decision = packet.get("decision")
         self._clear_candidate_actions()
+        mode_title, mode_purpose = action_panel_mode_info(decision)
+        self.control.title(f"StS Agent - {mode_title}")
+        self.control_title_label.configure(text=mode_title)
         teacher_mode = isinstance(decision, dict) and decision.get("mode") in {"teacher_collection", "prompt_evolution"}
         online_rl_mode = isinstance(decision, dict) and decision.get("mode") == "remote_online_rl"
+        prompt_evolution_mode = isinstance(decision, dict) and decision.get("mode") == "prompt_evolution"
         environment_mode = isinstance(decision, dict) and decision.get("mode") == "environment_automation"
         if online_rl_mode:
+            self.prompt_evolution.withdraw()
             self._set_online_rl_panel(decision.get("online_rl"), decision.get("model_id"))
+        elif prompt_evolution_mode:
+            self.online_rl.withdraw()
+            self._set_prompt_evolution_panel(packet.get("prompt_evolution"), decision.get("model_id"))
         if teacher_mode:
             self.candidate_frame.grid_remove()
             self.teacher_frame.grid()
@@ -1281,9 +1477,28 @@ class OverlayTerminal:
                     automatic.grid(row=1, column=0, sticky="ew", pady=(0, 5), padx=7)
                     self.candidate_buttons.append(automatic)
                 else:
-                    self.candidate_title.configure(text="模型候选")
-                    meta = "正在计算" if packet.get("model_pending") or status == "请求中" else f"{count} 个选项"
+                    title_by_mode = {
+                        "candidate_assist": "候选动作",
+                        "confidence_auto": "置信度评分",
+                    }
+                    mode = decision.get("mode") if isinstance(decision, dict) else None
+                    self.candidate_title.configure(text=title_by_mode.get(mode, "动作候选"))
+                    if packet.get("model_pending") or status == "请求中":
+                        meta = "正在计算"
+                    elif mode == "confidence_auto":
+                        confidence = decision.get("confidence") if isinstance(decision, dict) else {}
+                        route = confidence.get("route") if isinstance(confidence, dict) else None
+                        meta = "高置信度，已自动执行" if route == "auto_execute" else "低置信度，等待确认"
+                    else:
+                        meta = f"{count} 个选项"
                     self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
+            if not teacher_mode and not environment_mode and not online_rl_mode and isinstance(decision, dict):
+                self.candidate_meta.configure(
+                    text=f"{self.candidate_meta.cget('text')}  |  {mode_purpose}"
+                )
+            elif not isinstance(decision, dict):
+                self.candidate_title.configure(text="人工动作")
+                self.candidate_meta.configure(text=mode_purpose)
             if not online_rl_mode and isinstance(candidates, list):
                 for index, candidate in enumerate(candidates, start=1):
                     if not isinstance(candidate, dict):
@@ -1553,7 +1768,7 @@ class OverlayTerminal:
         dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_attribution_dialog(dialog))
 
     def _show_prompt_evolution_review(self, packet: dict[str, Any]) -> None:
-        """Show the fixed-seed candidate gate and return a human verdict."""
+        """Show either the pre-validation candidate gate or result gate."""
 
         if self.closing:
             self.prompt_evolution_responses.put({"type": "prompt_evolution_review", "verdict": "abandon"})
@@ -1581,6 +1796,8 @@ class OverlayTerminal:
         header = tk.Frame(outer, background=BACKGROUND)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         header.grid_columnconfigure(0, weight=1)
+        review = packet.get("review") if isinstance(packet.get("review"), dict) else {}
+        phase = str(review.get("phase") or packet.get("phase") or "validation")
         tk.Label(
             header,
             text="PROMPT EVOLUTION REVIEW",
@@ -1661,7 +1878,8 @@ class OverlayTerminal:
         reject = self._button(buttons, "拒绝并重写", lambda: finish("reject"), compact=True)
         reject.configure(background="#6b4b2d", activebackground="#8a623c")
         reject.grid(row=0, column=1, padx=(0, 8))
-        accept = self._button(buttons, "接受候选", lambda: finish("accept"), compact=True)
+        accept_label = "开始验证候选" if phase == "candidate" else "接受并固化"
+        accept = self._button(buttons, accept_label, lambda: finish("accept"), compact=True)
         accept.configure(background=ACCENT, foreground="#10221f", activebackground="#61ddc2", activeforeground="#10221f", font=(self.ui_font, 9, "bold"))
         accept.grid(row=0, column=2)
         dialog.protocol("WM_DELETE_WINDOW", lambda: finish("abandon"))
@@ -1737,6 +1955,8 @@ class OverlayTerminal:
                             writer.flush()
                         elif packet_type == "online_rl_update":
                             self._post_ui(self._show_online_rl_update, packet)
+                        elif packet_type == "prompt_evolution_update":
+                            self._post_ui(self._show_prompt_evolution_update, packet)
                         elif packet_type == "posthoc_reflection_request":
                             self._post_ui(self._show_reflection_dialog, packet)
                             response = self.reflection_responses.get()
@@ -1812,6 +2032,7 @@ class OverlayTerminal:
                         "status": self.root.winfo_geometry(),
                         "control": self.control.winfo_geometry(),
                         "online_rl": self.online_rl.winfo_geometry(),
+                        "prompt_evolution": self.prompt_evolution.winfo_geometry(),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1855,6 +2076,10 @@ class OverlayTerminal:
             pass
         try:
             self.online_rl.destroy()
+        except tk.TclError:
+            pass
+        try:
+            self.prompt_evolution.destroy()
         except tk.TclError:
             pass
         self.root.destroy()

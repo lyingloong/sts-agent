@@ -59,7 +59,8 @@ python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
 | `posthoc_feedback.mode` | `human`（默认，终局显示正/负人工反思框）或 `auto`（不请求人工输入，教师根据终局与完整动作账本自行做双向归因）。自动模式只适合探索，建议定期审计归因 artifact。 |
 | `<group>.base_url` / `<group>.model` | API 根地址与模型 ID。 |
 | `<group>.api_key_file` | 相对项目根目录的密钥文件，必须被 Git 忽略。 |
-| `<group>.timeout_seconds` / `max_retries` | 单次 API 请求超时和重试次数。 |
+| `<group>.timeout_seconds` / `max_retries` | 单次 API 请求超时和失败后的最多重试次数；网络错误、超时、429 和 5xx 会重试，认证/参数类 4xx 立即失败。 |
+| `<group>.retry_backoff_seconds` / `retry_max_backoff_seconds` | 重试前的指数退避起始秒数和上限；默认第 1 次重试等待 5 秒，之后按 5、10、20... 秒增长。按 RPM=20 的远程服务限制设置。设为 `0` 可关闭等待但仍保留重试。 |
 | `<group>.temperature` / `max_tokens` | 教师/归因模型生成温度与最大输出 token。 |
 | `teacher.max_input_chars` / `teacher.screens` | 教师单步上下文的最大字符数，以及请求教师的场景。 |
 | `teacher.thinking` / `json_mode` / `streaming` | 是否请求思考、结构化 JSON 和流式展示。 |
@@ -71,7 +72,7 @@ python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
 
 ### Prompt 演化
 
-`prompt_evolution` 是固定角色、进阶和游戏种子的人工审核式策略迭代模式。它与 `policy`、`posthoc_feedback` 互斥，使用同一份 `teacher` USTC API：教师只提出一个场景或角色 skill 的小型替换，候选策略在同一种子上重跑后交给人工审核。首次 incumbent 可以使用随机种子，观察到游戏返回的真实种子后才建立候选复跑锚点。只有接受才会写入当前角色目录下 Git 跟踪的 `prompts/characters/<角色>/versions/pNNNN.json` 并更新 manifest；候选、轨迹、拒绝理由和 session 状态写入被忽略的 `data/prompt_evolution/`。
+`prompt_evolution` 是固定角色、进阶和游戏种子的人工审核式策略迭代模式。它与 `policy`、`posthoc_feedback` 互斥，使用同一份 `teacher` USTC API：教师只提出一个场景或角色 skill 的小型替换，候选先经过一次“验证前审核”，人工批准后才在同一种子上重跑，验证结果再经过第二次人工审核。首次 incumbent 可以使用随机种子，观察到游戏返回的真实种子后才建立候选复跑锚点。只有接受验证结果才会写入当前角色目录下 Git 跟踪的 `prompts/characters/<角色>/versions/pNNNN.json` 并更新 manifest；候选、轨迹、拒绝理由和 session 状态写入被忽略的 `data/prompt_evolution/`。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -79,9 +80,9 @@ python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
 | `policy_dir` | 角色 Prompt 库的项目相对目录；运行时使用其下的 `<角色>/manifest.json` 和 `versions/`。 |
 | `output_dir` | 候选、重跑轨迹和审核状态的本地实验目录。 |
 | `max_skill_chars` | 单个场景补充策略的最大字符数；防止候选变成长篇新 prompt。 |
-| `max_analysis_input_chars` / `max_analysis_tokens` | 发送给 USTC 演化教师的完整动作账本输入和输出上限。 |
+| `max_analysis_input_chars` / `max_analysis_tokens` | 发送给 USTC 演化教师的动态动作账本字符上限和输出 token 上限；默认分别为 `900000` 和 `8192`。相邻步骤相同的动作后/动作前状态会用引用压缩；输入上限使用字符计数，避免把字符和模型 token 混淆；若仍超限，Prompt Evolution 面板会显示告警并弹窗。 |
 | `max_revisions_per_cycle` | 同一候选被拒绝后最多自动重写次数。 |
-| `auto_continue` | 接受候选后是否立即以新版本作为 incumbent 继续下一轮；关闭则停在接受结果等待手动开始。 |
+| `auto_continue` | 接受验证结果后是否自动生成下一候选；即使开启，也会先停在下一次“验证前审核”，不会跳过人工批准。关闭则接受后暂停。 |
 
 ### Overlay
 

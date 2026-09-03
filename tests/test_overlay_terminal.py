@@ -12,6 +12,20 @@ import overlay_terminal  # noqa: E402
 
 
 class OverlayFormattingTests(unittest.TestCase):
+    def test_action_panel_title_identifies_runtime_mode(self) -> None:
+        self.assertEqual(
+            overlay_terminal.action_panel_mode_info({"mode": "confidence_auto"}),
+            ("动作面板 · 置信度自动", "高置信度动作自动执行，其余等待确认"),
+        )
+        self.assertEqual(
+            overlay_terminal.action_panel_mode_info({"mode": "teacher_collection"}),
+            ("动作面板 · 远程教师", "教师选择动作并记录 SFT 数据"),
+        )
+        self.assertEqual(
+            overlay_terminal.action_panel_mode_info(None),
+            ("动作面板 · 人工操作", "等待当前合法动作"),
+        )
+
     def test_state_panel_excludes_model_candidate_block(self) -> None:
         rendered = overlay_terminal.state_text_only(
             "STS AGENT\n"
@@ -95,6 +109,39 @@ class OverlayFormattingTests(unittest.TestCase):
         self.assertIn("Rollout：当前 2/4  |  已完成 1/4", rendered)
         self.assertIn("GPU 5 · 剩余 18432 MiB · 利用率 12%", rendered)
 
+    def test_prompt_evolution_panel_reports_skill_lifecycle(self) -> None:
+        rendered = overlay_terminal.prompt_evolution_panel_text(
+            {
+                "character": "IRONCLAD",
+                "role": "candidate",
+                "active_version": "p0001",
+                "policy_id": "c0001",
+                "candidate_id": "c0001",
+                "target_skill": "COMBAT",
+                "revision": 1,
+                "stage": "候选 skill 已生成，准备重跑同一种子",
+            },
+            "https://example/models/deepseek-v4-pro",
+        )
+        self.assertIn("Prompt Evolution", rendered)
+        self.assertIn("角色：IRONCLAD  |  当前角色：candidate", rendered)
+        self.assertIn("候选：c0001  |  目标 skill：COMBAT", rendered)
+        self.assertIn("候选 skill 已生成", rendered)
+
+    def test_prompt_evolution_panel_reports_analysis_input_truncation(self) -> None:
+        rendered = overlay_terminal.prompt_evolution_panel_text(
+            {
+                "character": "IRONCLAD",
+                "stage": "教师正在分析轨迹",
+                "analysis_input_chars": 901234,
+                "analysis_input_limit_chars": 900000,
+                "analysis_input_truncated": True,
+            },
+            "deepseek-v4-pro",
+        )
+        self.assertIn("输入告警", rendered)
+        self.assertIn("已超过上限", rendered)
+
     def test_model_name_uses_only_the_final_path_component(self) -> None:
         self.assertEqual(
             overlay_terminal.display_model_name("/data/wanghao/sts-agent/models/base/Qwen3-0.6B+sft-v0-r001"),
@@ -176,6 +223,22 @@ class OverlayFormattingTests(unittest.TestCase):
         self.assertIn("自动执行", rendered)
         self.assertIn("保留资源，离开事件。", rendered)
         self.assertIn('{"action_id":"A2"}', rendered)
+
+    def test_teacher_panel_text_shows_retry_wait(self) -> None:
+        rendered = overlay_terminal.teacher_panel_text(
+            {
+                "mode": "teacher_collection",
+                "assist_status": "网络重试中",
+                "teacher": {
+                    "model_id": "deepseek-v4-pro",
+                    "retrying": True,
+                    "retry_attempt": 2,
+                    "retry_delay_seconds": 1.0,
+                },
+            }
+        )
+        self.assertIn("网络重试中", rendered)
+        self.assertIn("第 2 次，等待 1.0 秒后继续", rendered)
 
     def test_history_line_falls_back_to_action_id(self) -> None:
         self.assertEqual(overlay_terminal.history_line({"step_id": 2, "action_id": "END_TURN"}), "#2 END_TURN")

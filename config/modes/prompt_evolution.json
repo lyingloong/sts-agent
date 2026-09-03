@@ -11,7 +11,11 @@
     "thinking": false,
     "json_mode": true,
     "streaming": false,
-    "max_tokens": 5200
+    "temperature": 0.0,
+    "max_tokens": 5200,
+    "max_retries": 3,
+    "retry_backoff_seconds": 5.0,
+    "retry_max_backoff_seconds": 30.0
   },
   "posthoc_feedback": {
     "enabled": false
@@ -21,8 +25,8 @@
     "policy_dir": "prompts/characters",
     "output_dir": "data/prompt_evolution",
     "max_skill_chars": 2400,
-    "max_analysis_input_chars": 96000,
-    "max_analysis_tokens": 1800,
+    "max_analysis_input_chars": 900000,
+    "max_analysis_tokens": 8192,
     "max_revisions_per_cycle": 3,
     "auto_continue": true
   }

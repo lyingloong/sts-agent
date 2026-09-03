@@ -1,8 +1,9 @@
-"""Human-gated, single-seed prompt evolution for the remote StS teacher.
+"""Human-gated, single-seed evolution of role and scene skills.
 
-The module deliberately evolves only small scene-skill supplements.  The
-stable protocol prompt and game-action compiler remain controller-owned; a
-candidate cannot execute commands or become active until a human accepts it.
+The stable protocol prompt and game-action compiler remain controller-owned;
+a generated candidate must pass a human pre-validation gate before it can
+execute, and only a second human gate after the comparison run can promote it
+to a versioned role/scene skill.
 """
 
 from __future__ import annotations
@@ -14,15 +15,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from posthoc_feedback import _posthoc_state_snapshot, compact_text, terminal_summary
-from teacher_client import RemoteTeacherClient, TeacherError, compact_json
-from teacher_prompts import PROMPT_VERSION as BASE_PROMPT_VERSION
-from teacher_prompts import CHARACTER_KEYS, SCENARIO_PROMPTS, build_system_prompt, character_key, scenario_key
+from posthoc_feedback import POSTHOC_STATIC_FIELDS, _posthoc_state_snapshot, compact_text, terminal_summary
+from teacher_client import RemoteTeacherClient, TeacherError
+from teacher_prompts import PLAYER_PROMPT_VERSION as BASE_PROMPT_VERSION
+from teacher_prompts import CHARACTER_KEYS, SCENARIO_PROMPTS, build_system_prompt, character_key, character_prompt, scenario_key
 
 
-SCHEMA_VERSION = "sts-prompt-evolution-0.1"
-PROMPT_VERSION = "sts-prompt-evolution-v1"
-SKILL_KEYS = frozenset({"GLOBAL", "ROLE", *SCENARIO_PROMPTS.keys()})
+SCHEMA_VERSION = "sts-prompt-evolution-0.2"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"sts-prompt-evolution-0.1", SCHEMA_VERSION})
+PROMPT_VERSION = "sts-prompt-evolution-v2"
+SKILL_KEYS = frozenset({"ROLE", *SCENARIO_PROMPTS.keys()})
 ACTION_SOURCES = frozenset({"teacher_auto", "model_auto", "online_policy_sample", "human_override"})
 
 
@@ -128,6 +130,47 @@ def _evidence_steps(run: dict[str, Any], step_ids: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _public_action(value: Any) -> dict[str, Any]:
+    """Keep action mechanics useful for analysis without static KB prose."""
+
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    # Semantic actions are deliberately scalar records. Retain every scalar
+    # parameter (including future action fields) while excluding any nested
+    # payload that could reintroduce static item knowledge.
+    for key, item in value.items():
+        if key in POSTHOC_STATIC_FIELDS:
+            continue
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            result[key] = compact_text(item, 320) if isinstance(item, str) else item
+    return result
+
+
+def _public_decision(value: Any) -> dict[str, Any]:
+    """Expose selection/probability metadata, never teacher chain-of-thought."""
+
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in ("source", "mode", "model_action", "executed_action", "overridden", "confidence", "assist_status"):
+        item = value.get(key)
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            result[key] = item
+    candidates = value.get("model_candidates")
+    if isinstance(candidates, list):
+        result["model_candidates"] = [
+            {
+                key: item.get(key)
+                for key in ("rank", "action_id", "label", "probability", "score")
+                if isinstance(item, dict) and (isinstance(item.get(key), (str, int, float, bool)) or item.get(key) is None)
+            }
+            for item in candidates[:8]
+            if isinstance(item, dict)
+        ]
+    return result
+
+
 def trace_ledger(trace_path: Path) -> list[dict[str, Any]]:
     """Return a detailed, bounded public ledger for evolution analysis."""
 
@@ -150,21 +193,38 @@ def trace_ledger(trace_path: Path) -> list[dict[str, Any]]:
         legal_actions = record.get("legal_actions")
         legal_actions = legal_actions if isinstance(legal_actions, list) else []
         source = str(decision.get("source") or "environment_auto")
+        post_state = record.get("post_state") if isinstance(record.get("post_state"), dict) else {}
         result.append(
             {
                 "step_id": record.get("step_id"),
                 "screen_type": pre_state.get("screen_type"),
+                "screen_after": post_state.get("screen_type"),
                 "source": source,
                 "policy_action": source in ACTION_SOURCES,
                 "action": compact_text(action.get("label") or action.get("command") or action.get("id"), 300),
-                "legal_actions": [
-                    compact_text(item.get("label") or item.get("command") or item.get("id"), 240)
-                    for item in legal_actions
-                    if isinstance(item, dict)
-                ],
+                "action_detail": _public_action(action),
+                "command": compact_text(record.get("command"), 320),
+                "legal_actions": [_public_action(item) for item in legal_actions if isinstance(item, dict)],
+                "decision": _public_decision(decision),
                 "state": _posthoc_state_snapshot(pre_state, map_ids),
+                "state_after": _posthoc_state_snapshot(post_state, map_ids),
+                "terminal": bool(record.get("terminal")),
+                "stable_after_action": record.get("stable_after_action"),
             }
         )
+    # An acknowledgement's post-state is normally the next decision's
+    # pre-state. Keep an explicit reference in that common case instead of
+    # sending the same large observation twice. Retain the full post-state
+    # for transitions, unstable animations, and the terminal action.
+    for index, item in enumerate(result[:-1]):
+        next_item = result[index + 1]
+        if (
+            item.get("state_after") == next_item.get("state")
+            and item.get("stable_after_action") is not False
+            and not item.get("terminal")
+        ):
+            item["state_after_ref"] = next_item.get("step_id")
+            item.pop("state_after", None)
     return result
 
 
@@ -198,6 +258,10 @@ class PromptEvolutionManager:
         self.candidate_result: dict[str, Any] | None = None
         self.revision_count = 0
         self.candidate_index = 0
+        self.stage = "等待开始游戏"
+        self.current_role = "-"
+        self.last_input_chars = 0
+        self.last_input_truncated = False
         # The run's selected character is not known until START, so its
         # isolated prompt library is loaded by begin_run instead of __init__.
 
@@ -205,7 +269,7 @@ class PromptEvolutionManager:
         if self.manifest_path is None:
             raise PromptEvolutionError("prompt policy character library is not selected")
         self.manifest = _read_object(self.manifest_path, "prompt policy manifest")
-        if self.manifest.get("schema_version") != SCHEMA_VERSION:
+        if self.manifest.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS:
             raise PromptEvolutionError("prompt policy manifest has an unsupported schema_version")
         if self.manifest.get("character") != self.character:
             raise PromptEvolutionError("prompt policy manifest character does not match the active run")
@@ -219,17 +283,56 @@ class PromptEvolutionManager:
         if self.version_root is None:
             raise PromptEvolutionError("prompt policy character library is not selected")
         policy = _read_object(self.version_root / f"{version}.json", "prompt policy version")
-        if policy.get("schema_version") != SCHEMA_VERSION or policy.get("version") != version:
+        if policy.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS or policy.get("version") != version:
             raise PromptEvolutionError(f"prompt policy version is invalid: {version}")
         if policy.get("character") != self.character:
             raise PromptEvolutionError(f"prompt policy {version} character does not match the active run")
-        skills = policy.get("skills")
-        if not isinstance(skills, dict):
-            raise PromptEvolutionError(f"prompt policy {version} skills must be an object")
-        for key, value in skills.items():
-            if key not in SKILL_KEYS or not isinstance(value, str):
-                raise PromptEvolutionError(f"prompt policy {version} contains invalid skill {key!r}")
+        role_skill = policy.get("role_skill")
+        if role_skill is not None and not isinstance(role_skill, str):
+            raise PromptEvolutionError(f"prompt policy {version} role_skill must be a string")
+        scene_skills = policy.get("scene_skills")
+        if scene_skills is not None:
+            if not isinstance(scene_skills, dict):
+                raise PromptEvolutionError(f"prompt policy {version} scene_skills must be an object")
+            for key, value in scene_skills.items():
+                if key not in SCENARIO_PROMPTS or not isinstance(value, str):
+                    raise PromptEvolutionError(f"prompt policy {version} contains invalid scene skill {key!r}")
+        # Versions written before 0.2 used one mixed dictionary.  Read it so
+        # existing character libraries remain usable, but all new versions
+        # are written with the explicit role/scene structure below.
+        legacy = policy.get("skills")
+        if legacy is not None:
+            if not isinstance(legacy, dict):
+                raise PromptEvolutionError(f"prompt policy {version} legacy skills must be an object")
+            for key, value in legacy.items():
+                if key not in {"GLOBAL", *SKILL_KEYS} or not isinstance(value, str):
+                    raise PromptEvolutionError(f"prompt policy {version} contains invalid legacy skill {key!r}")
         return policy
+
+    def _effective_skills(self, policy: dict[str, Any]) -> tuple[str, dict[str, str]]:
+        """Resolve a complete role/scene skill set for one policy version."""
+
+        role_skill = str(policy.get("role_skill") or "").strip()
+        scene_skills = {
+            key: value
+            for key, value in SCENARIO_PROMPTS.items()
+            if isinstance(value, str) and value.strip()
+        }
+        raw_scenes = policy.get("scene_skills")
+        if isinstance(raw_scenes, dict):
+            scene_skills.update(
+                {key: str(value).strip() for key, value in raw_scenes.items() if key in SCENARIO_PROMPTS and str(value).strip()}
+            )
+        legacy = policy.get("skills")
+        if isinstance(legacy, dict):
+            if not role_skill:
+                role_skill = str(legacy.get("ROLE") or legacy.get("GLOBAL") or "").strip()
+            scene_skills.update(
+                {key: str(legacy[key]).strip() for key in SCENARIO_PROMPTS if str(legacy.get(key) or "").strip()}
+            )
+        if not role_skill and self.character:
+            role_skill = character_prompt(self.character).strip()
+        return role_skill, scene_skills
 
     @property
     def active_version(self) -> str:
@@ -276,12 +379,16 @@ class PromptEvolutionManager:
         if self.candidate is not None and self.candidate_result is None:
             self.current_policy = self.candidate
             role = "candidate" if self.revision_count == 0 else "revision"
+            self.current_role = role
+            self.stage = f"正在运行 {role}：{self.current_policy_id}"
         else:
             self.current_policy = self.active_policy
             role = "incumbent"
+            self.current_role = role
             self.incumbent = None
             self.candidate_result = None
             self.revision_count = 0
+            self.stage = f"正在运行 incumbent：{self.current_policy_id}"
         metadata = {
             "role": role,
             "character_library": character,
@@ -292,26 +399,38 @@ class PromptEvolutionManager:
         self._write_session_state({"status": "running", "run": metadata, "run_config": run_config})
         return metadata
 
-    def system_prompt(self, observation: dict[str, Any]) -> tuple[str, str]:
-        """Compose the stable teacher prompt with accepted/candidate scene skills."""
+    def status(self) -> dict[str, Any]:
+        """Return a small UI-safe snapshot of the current evolution stage."""
 
-        base = build_system_prompt(observation, character=self.character)
+        return {
+            "stage": self.stage,
+            "character": self.character or "-",
+            "active_version": self.active_version,
+            "policy_id": self.current_policy_id,
+            "role": self.current_role,
+            "candidate_id": (self.candidate or {}).get("candidate_id") if isinstance(self.candidate, dict) else None,
+            "target_skill": (self.candidate or {}).get("target_skill") if isinstance(self.candidate, dict) else None,
+            "revision": self.revision_count,
+            "analysis_input_chars": self.last_input_chars,
+            "analysis_input_limit_chars": self.max_analysis_input_chars,
+            "analysis_input_truncated": self.last_input_truncated,
+            "error": self.last_error,
+        }
+
+    def system_prompt(self, observation: dict[str, Any]) -> tuple[str, str]:
+        """Compose the player prompt from the active role and scene skills."""
+
         if not self.enabled:
-            return base, BASE_PROMPT_VERSION
-        skills = self.current_policy.get("skills")
-        skills = skills if isinstance(skills, dict) else {}
-        selected = [
-            str(skills[key]).strip()
-            for key in ("GLOBAL", "ROLE", scenario_key(observation))
-            if str(skills.get(key) or "").strip()
-        ]
-        if not selected:
-            return base, f"{PROMPT_VERSION}:{self.current_policy_id}"
-        appendix = "\n".join(f"- {item}" for item in selected)
+            return build_system_prompt(observation, character=self.character, persona="player"), BASE_PROMPT_VERSION
+        role_skill, scene_skills = self._effective_skills(self.current_policy)
         return (
-            base
-            + "\n\n当前已审核策略补充（仅在当前公开状态支持时适用；不得取代合法动作表或虚构信息）：\n"
-            + appendix,
+            build_system_prompt(
+                observation,
+                character=self.character,
+                persona="player",
+                role_skill=role_skill,
+                scene_skill=scene_skills.get(scenario_key(observation), ""),
+            ),
             f"{PROMPT_VERSION}:{self.current_policy_id}",
         )
 
@@ -325,37 +444,60 @@ class PromptEvolutionManager:
         keys = ", ".join(sorted(SKILL_KEYS))
         system = (
             "你是《杀戮尖塔》单种子 Prompt 演化器。根据完整公开动作账本与终局结果，"
-            "提出一个可审核的、很小的策略补充修改。你不是行动模型，也不能写游戏命令、代码、"
-            "硬合法性限制或完整重写提示词。只修改一个 scene skill；它必须是可复用的条件性策略，"
+            "提出一个可审核的、范围明确的 skill 修改。你不是行动模型，也不能写游戏命令、代码、"
+            "硬合法性限制或完整重写通用协议。只修改一个 role skill 或 scene skill；输出该 skill 的完整新文本，"
             "不能提及当前种子、具体楼层号、具体卡牌/敌人名称，除非其是通用机制示例。"
             "不要把一次终局结果平摊归因给所有动作；只引用账本中有清楚证据的 1-8 个步骤。"
+            "账本中若出现 state_after_ref，表示动作后的状态与所指向下一步的 state 完全相同；只有状态变化或终局才会内联 state_after。"
             "输出严格 JSON，不要 Markdown 或推理："
-            '{"target_skill":"COMBAT","instruction":"...","diagnosis":"...",'
+            '{"target_skill":"COMBAT","skill":"...","diagnosis":"...",'
             '"evidence_step_ids":[4,8],"expected_effect":"...","risk":"..."}。'
             f"当前角色为 {self.character}。target_skill 必须是以下之一：{keys}。"
-            "ROLE 仅描述该角色的通用机制与构筑原则；instruction 将替换该 skill 先前的补充文本。"
+            "ROLE 是角色专属 skill；其他键是场景 skill；skill 将直接替换目标 skill 的当前版本。"
         )
+        terminal_state = run.get("terminal_state") if isinstance(run.get("terminal_state"), dict) else {}
+        source_counts: dict[str, int] = {}
+        for item in run.get("ledger", []):
+            if isinstance(item, dict):
+                source = str(item.get("source") or "unknown")
+                source_counts[source] = source_counts.get(source, 0) + 1
         user = {
             "base_prompt_version": BASE_PROMPT_VERSION,
+            "run_id": run.get("run_id"),
             "incumbent_policy": {
                 "version": run["policy"].get("version"),
-                "skills": run["policy"].get("skills", {}),
+                "role_skill": self._effective_skills(run["policy"])[0],
+                "scene_skills": self._effective_skills(run["policy"])[1],
             },
-            "run_config": {key: run["run_config"].get(key) for key in ("character", "ascension", "seed")},
-            "terminal": terminal_summary(run["terminal_state"]),
+            "run_config": {
+                key: run["run_config"].get(key)
+                for key in ("character", "ascension", "seed", "seed_source", "collection_mode")
+                if key in run["run_config"]
+            },
+            "terminal": terminal_summary(terminal_state),
+            "terminal_state": _posthoc_state_snapshot(terminal_state, {}),
             "metrics": run["metrics"],
+            "trace_summary": {
+                "accepted_steps": len(run.get("ledger", [])),
+                "action_sources": source_counts,
+                "first_step_id": run["ledger"][0].get("step_id") if run.get("ledger") else None,
+                "last_step_id": run["ledger"][-1].get("step_id") if run.get("ledger") else None,
+            },
             "action_ledger": run["ledger"],
         }
         if rejected_candidate is not None:
             user["rejected_candidate"] = {
                 key: rejected_candidate.get(key)
-                for key in ("candidate_id", "target_skill", "instruction", "diagnosis", "expected_effect", "risk")
+                for key in ("candidate_id", "target_skill", "skill", "instruction", "diagnosis", "expected_effect", "risk")
             }
             user["human_rejection_reason"] = rejection_reason
             user["revision_requirement"] = "保留可取之处，但必须直接解决人工拒绝理由，仍只改一个 skill。"
+        serialized = json.dumps(user, ensure_ascii=False, separators=(",", ":"), default=str)
+        self.last_input_chars = len(serialized)
+        self.last_input_truncated = self.max_analysis_input_chars > 0 and len(serialized) > self.max_analysis_input_chars
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": compact_json(user, limit=self.max_analysis_input_chars)},
+            {"role": "user", "content": serialized if not self.last_input_truncated else serialized[: self.max_analysis_input_chars] + "...<truncated>"},
         ]
 
     def _next_candidate_id(self) -> str:
@@ -389,6 +531,8 @@ class PromptEvolutionManager:
             raise PromptEvolutionError(str(exc)) from exc
         value = _extract_object(str(response["output"]))
         target = str(value.get("target_skill") or "").strip().upper()
+        if target == "GLOBAL":
+            target = "ROLE"
         if target not in SKILL_KEYS:
             raise PromptEvolutionError("teacher candidate has an unsupported target_skill")
         evidence = value.get("evidence_step_ids")
@@ -398,24 +542,29 @@ class PromptEvolutionManager:
         evidence_ids = [item for item in evidence if isinstance(item, int) and item in valid_steps]
         if not evidence_ids:
             raise PromptEvolutionError("teacher candidate evidence_step_ids do not reference this run")
-        current_skills = run["policy"].get("skills")
-        current_skills = current_skills if isinstance(current_skills, dict) else {}
-        skills = {key: str(item) for key, item in current_skills.items() if key in SKILL_KEYS and isinstance(item, str)}
-        instruction = _compact_skill(value.get("instruction"), self.max_skill_chars)
-        skills[target] = instruction
+        current_role, current_scenes = self._effective_skills(run["policy"])
+        instruction = _compact_skill(value.get("skill") or value.get("instruction"), self.max_skill_chars)
+        role_skill = instruction if target == "ROLE" else current_role
+        scene_skills = dict(current_scenes)
+        if target != "ROLE":
+            scene_skills[target] = instruction
         candidate = {
             "schema_version": SCHEMA_VERSION,
             "candidate_id": self._next_candidate_id(),
             "character": self.character,
             "parent_version": self.active_version,
             "target_skill": target,
-            "previous_instruction": str(current_skills.get(target) or ""),
-            "instruction": instruction,
-            "skills": skills,
+            "previous_skill": current_role if target == "ROLE" else str(current_scenes.get(target) or ""),
+            "skill": instruction,
+            "role_skill": role_skill,
+            "scene_skills": scene_skills,
             "diagnosis": compact_text(value.get("diagnosis"), 1000),
             "evidence_step_ids": sorted(set(evidence_ids))[:8],
             "expected_effect": compact_text(value.get("expected_effect"), 1000),
             "risk": compact_text(value.get("risk"), 1000),
+            "analysis_input_chars": self.last_input_chars,
+            "analysis_input_limit_chars": self.max_analysis_input_chars,
+            "analysis_input_truncated": self.last_input_truncated,
             "teacher": {
                 "model_id": response["model_id"],
                 "prompt_version": response["prompt_version"],
@@ -461,6 +610,7 @@ class PromptEvolutionManager:
             self.incumbent = run
             self.candidate_result = None
             self.revision_count = 0
+            self.stage = "教师正在分析 incumbent 轨迹并生成候选 skill"
             if not str(run_config.get("seed") or "").strip():
                 message = "game did not expose a display seed; cannot anchor prompt evolution reruns"
                 self._write_session_state({"status": "seed_unavailable", "error": message, "incumbent": run})
@@ -469,18 +619,60 @@ class PromptEvolutionManager:
                 self.candidate = self._propose_candidate(run)
             except PromptEvolutionError as exc:
                 self._write_session_state({"status": "proposal_error", "error": str(exc), "incumbent": run})
+                self.stage = "候选 skill 生成失败"
                 return {"kind": "proposal_error", "error": str(exc)}
-            self._write_session_state({"status": "candidate_ready", "incumbent": run, "candidate": self.candidate})
-            return {"kind": "start_candidate", "candidate": self.candidate, "run_config": run_config}
+            self.stage = f"候选 skill 已生成：{self.candidate.get('target_skill', '?')}，等待人工批准验证"
+            review = self._candidate_review()
+            self._write_session_state({"status": "candidate_ready_review", "incumbent": run, "candidate": self.candidate, "review": review})
+            return {"kind": "candidate_review", "review": review}
         if self.incumbent is None:
             return {"kind": "proposal_error", "error": "candidate run has no incumbent in this controller session"}
         if not _same_start(self.incumbent["run_config"], run_config):
             return {"kind": "proposal_error", "error": "candidate run did not use the incumbent character, ascension, and seed"}
         self.candidate_result = run
+        self.stage = "候选轨迹已完成，等待人工审核"
         comparison = self._comparison(self.incumbent, run, self.candidate or {})
         review = {"schema_version": SCHEMA_VERSION, "comparison": comparison, "candidate": self.candidate, "revision": self.revision_count}
+        review["phase"] = "validation"
         self._write_session_state({"status": "awaiting_review", "incumbent": self.incumbent, "candidate_result": run, "candidate": self.candidate, "review": review})
-        return {"kind": "review", "review": review}
+        return {"kind": "result_review", "review": review}
+
+    def _candidate_review(self) -> dict[str, Any]:
+        """Build the pre-validation review without pretending a run happened."""
+
+        if self.incumbent is None or self.candidate is None:
+            raise PromptEvolutionError("candidate review requires incumbent and candidate")
+        metrics = self.incumbent.get("metrics") if isinstance(self.incumbent.get("metrics"), dict) else {}
+        change = self.candidate
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "phase": "candidate",
+            "comparison": {
+                "seed": self.incumbent["run_config"].get("seed"),
+                "incumbent": {
+                    "run_id": self.incumbent["run_id"],
+                    "policy_id": self.incumbent["policy"].get("candidate_id") or self.incumbent["policy"].get("version"),
+                    "metrics": metrics,
+                },
+                "candidate": {
+                    "run_id": None,
+                    "policy_id": change.get("candidate_id"),
+                    "metrics": None,
+                },
+                "score_delta": None,
+                "automatically_favorable": None,
+                "change_summary": {
+                    key: change.get(key, change.get({"previous_skill": "previous_instruction", "skill": "instruction"}.get(key, key), ""))
+                    for key in ("target_skill", "previous_skill", "skill", "diagnosis", "evidence_step_ids", "expected_effect", "risk")
+                },
+                "evidence": {
+                    "incumbent": _evidence_steps(self.incumbent, change.get("evidence_step_ids", [])),
+                    "candidate": [],
+                },
+            },
+            "candidate": self.candidate,
+            "revision": self.revision_count,
+        }
 
     @staticmethod
     def _comparison(incumbent: dict[str, Any], candidate: dict[str, Any], change: dict[str, Any]) -> dict[str, Any]:
@@ -493,8 +685,8 @@ class PromptEvolutionManager:
             "score_delta": round(float(right["score"]) - float(left["score"]), 4),
             "automatically_favorable": float(right["score"]) > float(left["score"]),
             "change_summary": {
-                key: change.get(key, "")
-                for key in ("target_skill", "previous_instruction", "instruction", "diagnosis", "evidence_step_ids", "expected_effect", "risk")
+                key: change.get(key, change.get({"previous_skill": "previous_instruction", "skill": "instruction"}.get(key, key), ""))
+                for key in ("target_skill", "previous_skill", "skill", "diagnosis", "evidence_step_ids", "expected_effect", "risk")
             },
             "evidence": {
                 "incumbent": _evidence_steps(incumbent, change.get("evidence_step_ids", [])),
@@ -505,15 +697,44 @@ class PromptEvolutionManager:
     def handle_review(self, response: dict[str, Any]) -> dict[str, Any]:
         """Apply a human review. Accepted versions alone update the manifest."""
 
-        if self.candidate is None or self.candidate_result is None or self.incumbent is None:
+        if self.candidate is None or self.incumbent is None:
             return {"kind": "error", "error": "no prompt-evolution candidate is awaiting review"}
         verdict = str(response.get("verdict") or "").strip().lower()
         reason = compact_text(response.get("reason"), 4000)
+        pre_validation = self.candidate_result is None
         if verdict == "abandon":
+            self.stage = "本轮演化已放弃"
             self._write_session_state({"status": "abandoned", "reason": reason, "candidate": self.candidate})
             self.candidate = None
             self.candidate_result = None
             return {"kind": "abandoned"}
+        if pre_validation:
+            if verdict == "accept":
+                self.stage = f"候选 {self.current_policy_id} 已批准，准备验证同一种子"
+                self._write_session_state({"status": "candidate_approved", "incumbent": self.incumbent, "candidate": self.candidate})
+                return {"kind": "start_candidate", "candidate": self.candidate, "run_config": self.incumbent["run_config"]}
+            if verdict != "reject":
+                return {"kind": "error", "error": "review verdict must be accept, reject, or abandon"}
+            if not reason:
+                return {"kind": "error", "error": "rejecting a candidate requires a reason"}
+            if self.revision_count >= self.max_revisions_per_cycle:
+                self.stage = "达到本轮修订上限"
+                self._write_session_state({"status": "revision_limit", "reason": reason, "candidate": self.candidate})
+                return {"kind": "abandoned", "reason": "reached configured revision limit"}
+            rejected = self.candidate
+            self.revision_count += 1
+            try:
+                self.candidate = self._propose_candidate(self.incumbent, rejected_candidate=rejected, rejection_reason=reason)
+            except PromptEvolutionError as exc:
+                self.stage = "候选 skill 修订失败"
+                self._write_session_state({"status": "revision_error", "error": str(exc), "candidate": rejected})
+                return {"kind": "error", "error": str(exc)}
+            self.stage = f"修订候选 skill 已生成：{self.candidate.get('target_skill', '?')}，等待人工批准验证"
+            review = self._candidate_review()
+            self._write_session_state({"status": "candidate_ready_review", "incumbent": self.incumbent, "candidate": self.candidate, "review": review, "revision": self.revision_count})
+            return {"kind": "candidate_review", "review": review, "revision": self.revision_count}
+        if self.candidate_result is None:
+            return {"kind": "error", "error": "candidate validation result is missing"}
         if verdict == "accept":
             promoted = self._promote_candidate(reason)
             self.incumbent = self.candidate_result
@@ -527,20 +748,25 @@ class PromptEvolutionManager:
             self.candidate_result = None
             self.revision_count = 0
             if not self.auto_continue:
+                self.stage = f"已接受 {self.active_version}，等待下一轮"
                 self._write_session_state({"status": "accepted_paused", "active_version": self.active_version})
                 return {"kind": "accepted_paused", "version": self.active_version}
             try:
                 self.candidate = self._propose_candidate(self.incumbent)
             except PromptEvolutionError as exc:
+                self.stage = "已接受，但下一候选生成失败"
                 self._write_session_state({"status": "accepted_proposal_error", "error": str(exc), "active_version": self.active_version})
                 return {"kind": "accepted_paused", "version": self.active_version, "error": str(exc)}
-            self._write_session_state({"status": "candidate_ready", "incumbent": self.incumbent, "candidate": self.candidate})
-            return {"kind": "start_candidate", "candidate": self.candidate, "run_config": self.incumbent["run_config"], "accepted_version": self.active_version}
+            self.stage = f"新候选 skill 已生成：{self.candidate.get('target_skill', '?')}，等待人工批准验证"
+            review = self._candidate_review()
+            self._write_session_state({"status": "candidate_ready_review", "incumbent": self.incumbent, "candidate": self.candidate, "review": review})
+            return {"kind": "candidate_review", "review": review, "accepted_version": self.active_version}
         if verdict != "reject":
             return {"kind": "error", "error": "review verdict must be accept, reject, or abandon"}
         if not reason:
             return {"kind": "error", "error": "rejecting a candidate requires a reason"}
         if self.revision_count >= self.max_revisions_per_cycle:
+            self.stage = "达到本轮修订上限"
             self._write_session_state({"status": "revision_limit", "reason": reason, "candidate": self.candidate})
             return {"kind": "abandoned", "reason": "reached configured revision limit"}
         rejected = self.candidate
@@ -553,10 +779,13 @@ class PromptEvolutionManager:
                 rejection_reason=reason,
             )
         except PromptEvolutionError as exc:
+            self.stage = "候选 skill 修订失败"
             self._write_session_state({"status": "revision_error", "error": str(exc), "candidate": rejected})
             return {"kind": "error", "error": str(exc)}
-        self._write_session_state({"status": "candidate_ready", "incumbent": self.incumbent, "candidate": self.candidate, "revision": self.revision_count})
-        return {"kind": "start_candidate", "candidate": self.candidate, "run_config": self.incumbent["run_config"], "revision": self.revision_count}
+        self.stage = f"修订候选 skill 已生成：{self.candidate.get('target_skill', '?')}，等待人工批准验证"
+        review = self._candidate_review()
+        self._write_session_state({"status": "candidate_ready_review", "incumbent": self.incumbent, "candidate": self.candidate, "review": review, "revision": self.revision_count})
+        return {"kind": "candidate_review", "review": review, "revision": self.revision_count}
 
     def _promote_candidate(self, human_note: str) -> dict[str, Any]:
         assert self.candidate is not None
@@ -575,15 +804,17 @@ class PromptEvolutionManager:
         except (TypeError, ValueError) as exc:
             raise PromptEvolutionError("prompt policy manifest next_version_index must be an integer") from exc
         version = f"p{next_index:04d}"
+        role_skill, scene_skills = self._effective_skills(self.candidate)
         policy = {
             "schema_version": SCHEMA_VERSION,
             "version": version,
             "character": self.character,
             "parent_version": self.active_version,
-            "skills": self.candidate["skills"],
+            "role_skill": role_skill,
+            "scene_skills": scene_skills,
             "change": {
                 key: self.candidate.get(key)
-                for key in ("candidate_id", "target_skill", "previous_instruction", "instruction", "diagnosis", "evidence_step_ids", "expected_effect", "risk", "teacher")
+                for key in ("candidate_id", "target_skill", "previous_skill", "skill", "diagnosis", "evidence_step_ids", "expected_effect", "risk", "teacher")
             },
             "human_acceptance_note": human_note,
             "accepted_at_utc": now_utc(),

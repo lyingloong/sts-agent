@@ -22,4 +22,6 @@ python tools\overlay_terminal.py --config config\modes\candidate_assist.json
 
 `remote_inference.json` 和 `remote_online_rl.json` 中的 Linux 路径是当前训练机示例，迁移到其他机器时只需在本地配置中改路径。密钥仍放在项目根目录的 `ustc_api.txt`，不会进入 Git。
 
+教师模式默认对网络错误重试 3 次，并使用 5、10、20 秒退避（按远程 RPM=20 设置）；可在 `teacher_sft.json` 或 `prompt_evolution.json` 中调整 `max_retries`、`retry_backoff_seconds` 和 `retry_max_backoff_seconds`。Prompt Evolution 还会强制动作和候选生成请求使用 `temperature=0`。
+
 `config/agent.json` 继续保留，作为兼容旧启动命令 `python tools\\...` 的当前活动配置。新实验建议显式指定模式文件，避免误用上一种模式。

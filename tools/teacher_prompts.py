@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 
-PROMPT_VERSION = "sts1-teacher-zh-v4"
+TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v5"
+PLAYER_PROMPT_VERSION = "sts1-player-zh-v1"
+# Kept as the default public version for the SFT teacher client.
+PROMPT_VERSION = TEACHER_PROMPT_VERSION
 CHARACTER_PROMPT_LIBRARY_VERSION = "sts1-character-prompt-library-v1"
 CHARACTER_KEYS = frozenset({"IRONCLAD", "THE_SILENT", "DEFECT", "WATCHER"})
 CHARACTER_ALIASES = {
@@ -22,12 +25,20 @@ CHARACTER_ALIASES = {
     "WATCHER": "WATCHER",
 }
 
-COMMON_PROMPT = """你是《杀戮尖塔 1》的远程教师，负责为模仿学习轨迹选择一个动作。
-目标是提高整局通关概率，而不是只追求当前房间的即时收益。只使用观察中明确给出的公开信息；不要臆测没有展示的事件结果、牌堆顺序、敌人意图或物品效果。当前合法动作列表是唯一可执行集合。
+_COMMON_RULES = """目标是提高整局通关概率，而不是只追求当前房间的即时收益。只使用观察中明确给出的公开信息；不要臆测没有展示的事件结果、牌堆顺序、敌人意图或物品效果。当前合法动作列表是唯一可执行集合。
 
 做决定时先识别当前场景和不可逆后果，再比较每个合法动作：当前生命和即将受到的伤害、牌组缺口、遗物与药水、金币、当前 Act/Floor、当前 Act 已公开首领、未来地图路线和最近动作。`decision_constraints` 是已持有遗物造成的真实限制或代价，必须服从；不要把已被约束排除的选择当作可行方案。优先选择稳健、能解决当前最紧迫问题且不依赖未经证实假设的动作。不要因为某张牌/遗物稀有就自动选择，也不要为了保留资源而在即将失败时拒绝使用资源。
 
 你可以进行内部推理，但最终只能返回一个 JSON 对象，格式严格为 {\"action_id\":\"A<n>\"}。其中 A<n> 必须来自当前合法动作列表；不要输出解释、Markdown、命令或其他动作 ID。"""
+
+COMMON_PROMPT = (
+    "你是《杀戮尖塔 1》的远程教师，负责为模仿学习轨迹选择一个动作。\n"
+    + _COMMON_RULES
+)
+PLAYER_COMMON_PROMPT = (
+    "你是正在亲自游玩《杀戮尖塔 1》的玩家。你的任务是在当前局面做出并执行一个最有利于整局通关的动作；当前已审核的 skill 是你的策略记忆。\n"
+    + _COMMON_RULES
+)
 
 
 SCENARIO_PROMPTS: dict[str, str] = {
@@ -41,6 +52,7 @@ SCENARIO_PROMPTS: dict[str, str] = {
 只能从当前可达的合法节点中选择，不要把未展示的事件结果当作确定事实。""",
     "COMBAT": """【战斗决策】
 先计算本回合最危险的敌方意图：结合每个敌人的当前伤害、攻击段数、格挡和状态，估算不处理时的总损失；优先避免死亡和不可接受的生命损失。若某个敌人被击杀后能立即消除主要威胁，击杀价值通常高于分散伤害。
+- `combat.monsters[*].knowledge` 是静态怪物参考，包含类型、生命区间和可能招式；它用于理解敌人的典型机制，不代表本回合一定会使用某个招式。当前实时 `intent`、`intent_damage`、`intent_hits`、HP、格挡和 Powers 以 observation 中的游戏状态为准；如果持有符文圆顶导致实时意图隐藏，不要用静态招式猜测当前意图。
 - 比较所有出牌、用药水和结束回合动作，而不是只看单张牌的面板伤害。
 - 先处理会影响后续计算的易伤/虚弱/力量/格挡等效果，再决定攻击、格挡、抽牌、成长和出牌顺序；以当前 observation 的牌面描述为准。
 - 评估能量、当前手牌、敌人数量、目标选择和结束回合后的状态。把 `END_TURN` 当作最后备选：当前仍有能量且存在可支付、具有非负价值的出牌或用药水动作时，先逐一比较这些动作；不要因为推理简化、只关注单张牌或想保留能量而直接结束回合。只有已完成有意的回合规划、没有值得支付的动作，或结束回合有明确更高价值时，才结束回合。
@@ -185,14 +197,29 @@ def scenario_key(observation: dict[str, Any]) -> str:
     return screen if screen in SCENARIO_PROMPTS else "GENERIC"
 
 
-def build_system_prompt(observation: dict[str, Any], *, character: Any = None) -> str:
-    """Return the teacher-only Chinese system prompt for this observation."""
+def build_system_prompt(
+    observation: dict[str, Any],
+    *,
+    character: Any = None,
+    persona: str = "teacher",
+    role_skill: str | None = None,
+    scene_skill: str | None = None,
+) -> str:
+    """Return the Chinese action prompt, optionally using versioned skills.
+
+    Prompt Evolution passes the active role and scene skill explicitly.  A
+    ``None`` value keeps the normal tracked-library behaviour for the other
+    runtimes, while an empty string intentionally omits that skill.
+    """
 
     key = scenario_key(observation)
     role = character_key_for_observation(observation, character)
-    role_prompt = character_prompt(role) if role else ""
-    parts = [COMMON_PROMPT]
+    role_prompt = character_prompt(role) if role_skill is None and role else str(role_skill or "").strip()
+    common_prompt = PLAYER_COMMON_PROMPT if str(persona).strip().casefold() == "player" else COMMON_PROMPT
+    parts = [common_prompt]
     if role_prompt:
         parts.append(role_prompt)
-    parts.append(SCENARIO_PROMPTS[key])
+    scenario_prompt = SCENARIO_PROMPTS[key] if scene_skill is None else str(scene_skill or "").strip()
+    if scenario_prompt:
+        parts.append(scenario_prompt)
     return "\n\n".join(parts)

@@ -24,7 +24,7 @@ class PromptEvolutionTests(unittest.TestCase):
                 {
                     "schema_version": prompt_evolution.SCHEMA_VERSION,
                     "character": "IRONCLAD",
-                    "base_prompt_version": "sts1-teacher-zh-v2",
+                    "base_prompt_version": "sts1-player-zh-v1",
                     "active_version": "p0001",
                     "next_version_index": 2,
                 }
@@ -68,16 +68,66 @@ class PromptEvolutionTests(unittest.TestCase):
                         "recent_actions": [{"action": "结束回合"}],
                     },
                     "legal_actions": [
-                        {"id": "A1", "label": "出牌 防御"},
+                        {"id": "A1", "kind": "play", "card_index": 1, "label": "出牌 防御"},
                         {"id": "A2", "label": "结束回合"},
                     ],
                     "action": {"id": "A2", "label": "结束回合"},
-                    "decision": {"source": "teacher_auto"},
+                    "command": "END",
+                    "post_state": {
+                        "screen_type": "NONE",
+                        "act": 1,
+                        "floor": 2,
+                        "current_hp": 45,
+                        "max_hp": 80,
+                        "description": "static text should be removed",
+                    },
+                    "decision": {"source": "teacher_auto", "model_action": "A2", "model_candidates": [{"rank": 1, "action_id": "A2", "probability": 0.8}]},
+                    "terminal": False,
+                    "stable_after_action": True,
                 }
             )
             + "\n",
             encoding="utf-8",
         )
+
+    def test_evolution_ledger_keeps_before_after_dynamics_without_static_prose(self) -> None:
+        _manager, root = self.make_manager()
+        trace = root / "trace.jsonl"
+        self.trace(trace)
+        ledger = prompt_evolution.trace_ledger(trace)
+        self.assertEqual(len(ledger), 1)
+        item = ledger[0]
+        self.assertEqual(item["action_detail"]["id"], "A2")
+        self.assertEqual(item["command"], "END")
+        self.assertEqual(item["state_after"]["current_hp"], 45)
+        self.assertEqual(item["decision"]["model_candidates"][0]["probability"], 0.8)
+        self.assertNotIn("description", item["state_after"])
+
+    def test_evolution_ledger_deduplicates_adjacent_identical_states(self) -> None:
+        manager, root = self.make_manager()
+        trace = root / "dedup-trace.jsonl"
+        state = {"screen_type": "MAP", "act": 1, "floor": 2, "map": {"nodes": [{"x": 1}]}}
+        records = []
+        for step_id in (1, 2):
+            records.append(
+                {
+                    "step_id": step_id,
+                    "accepted": True,
+                    "pre_state": state,
+                    "legal_actions": [{"id": "A1", "kind": "choose", "label": "选择"}],
+                    "action": {"id": "A1", "kind": "choose", "label": "选择"},
+                    "command": "CHOOSE 0",
+                    "post_state": state,
+                    "decision": {"source": "teacher_auto"},
+                    "terminal": False,
+                    "stable_after_action": True,
+                }
+            )
+        trace.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in records) + "\n", encoding="utf-8")
+        ledger = prompt_evolution.trace_ledger(trace)
+        self.assertNotIn("state_after", ledger[0])
+        self.assertEqual(ledger[0]["state_after_ref"], 2)
+        self.assertIn("state_after", ledger[1])
 
     def test_candidate_is_not_active_before_acceptance(self) -> None:
         manager, root = self.make_manager()
@@ -113,14 +163,59 @@ class PromptEvolutionTests(unittest.TestCase):
             trace,
             {"screen_type": "GAME_OVER", "act": 1, "floor": 2, "current_hp": 0, "max_hp": 80},
         )
-        self.assertEqual(result["kind"], "start_candidate")
+        self.assertEqual(result["kind"], "candidate_review")
+        self.assertEqual(result["review"]["phase"], "candidate")
         self.assertEqual(manager.active_version, "p0001")
         self.assertEqual(manager.candidate["target_skill"], "COMBAT")
+        self.assertIn("role_skill", manager.candidate)
+        self.assertIn("scene_skills", manager.candidate)
+        self.assertNotIn("skills", manager.candidate)
+        approved = manager.handle_review({"verdict": "accept", "reason": "候选修改范围清楚，先验证。"})
+        self.assertEqual(approved["kind"], "start_candidate")
+
+    def test_candidate_review_rejection_generates_another_review_without_running(self) -> None:
+        manager, root = self.make_manager()
+        run_config = {"character": "IRONCLAD", "ascension": 0, "seed": "ABC123"}
+        manager.begin_run(run_config)
+        trace = root / "trace.jsonl"
+        self.trace(trace)
+
+        responses = iter(
+            [
+                {"target_skill": "COMBAT", "skill": "候选一", "diagnosis": "d", "evidence_step_ids": [4], "expected_effect": "e", "risk": "r"},
+                {"target_skill": "COMBAT", "skill": "候选二", "diagnosis": "d2", "evidence_step_ids": [4], "expected_effect": "e2", "risk": "r2"},
+            ]
+        )
+
+        def complete(*_args, **_kwargs):
+            value = next(responses)
+            return {"output": json.dumps(value, ensure_ascii=False), "model_id": "teacher", "prompt_version": "test", "latency_ms": 1, "attempt": 1, "usage": {}}
+
+        manager.remote.complete = complete  # type: ignore[method-assign]
+        first = manager.complete_run("run-1", run_config | {"prompt_evolution": {"role": "incumbent"}}, trace, {"screen_type": "GAME_OVER", "act": 1, "floor": 2})
+        self.assertEqual(first["kind"], "candidate_review")
+        revised = manager.handle_review({"verdict": "reject", "reason": "证据不足，改成更具体的战斗条件。"})
+        self.assertEqual(revised["kind"], "candidate_review")
+        self.assertEqual(revised["review"]["phase"], "candidate")
+        self.assertIsNone(manager.candidate_result)
 
     def test_first_incumbent_may_start_without_explicit_seed(self) -> None:
         manager, _root = self.make_manager()
         metadata = manager.begin_run({"character": "IRONCLAD", "ascension": 0, "seed": ""})
         self.assertEqual(metadata["role"], "incumbent")
+
+    def test_analysis_budget_defaults_are_large_and_explicit(self) -> None:
+        config = agent_config.DEFAULT_CONFIG["prompt_evolution"]
+        self.assertEqual(config["max_analysis_input_chars"], 900000)
+        self.assertEqual(config["max_analysis_tokens"], 8192)
+
+    def test_action_prompt_uses_player_persona_and_player_base_version(self) -> None:
+        manager, _root = self.make_manager()
+        manager.begin_run({"character": "IRONCLAD", "ascension": 0, "seed": "ABC123"})
+        prompt, version = manager.system_prompt({"screen_type": "MAP", "class": "IRONCLAD"})
+        self.assertIn("正在亲自游玩", prompt)
+        self.assertNotIn("远程教师", prompt)
+        self.assertEqual(version, f"{prompt_evolution.PROMPT_VERSION}:p0001")
 
     def test_reject_requires_reason_and_accept_promotes_version(self) -> None:
         manager, _root = self.make_manager()

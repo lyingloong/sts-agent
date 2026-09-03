@@ -50,7 +50,9 @@
     "model": "deepseek-v4-pro",
     "api_key_file": "ustc_api.txt",
     "timeout_seconds": 180.0,
-    "max_retries": 1,
+    "max_retries": 3,
+    "retry_backoff_seconds": 5.0,
+    "retry_max_backoff_seconds": 30.0,
     "temperature": 0.0,
     "max_tokens": 2048,
     "max_input_chars": 96000,
@@ -64,8 +66,8 @@
     "policy_dir": "prompts/characters",
     "output_dir": "data/prompt_evolution",
     "max_skill_chars": 2400,
-    "max_analysis_input_chars": 96000,
-    "max_analysis_tokens": 1800,
+    "max_analysis_input_chars": 900000,
+    "max_analysis_tokens": 8192,
     "max_revisions_per_cycle": 3,
     "auto_continue": true
   },
@@ -76,6 +78,8 @@
     "api_key_file": "ustc_api.txt",
     "timeout_seconds": 90.0,
     "max_retries": 3,
+    "retry_backoff_seconds": 5.0,
+    "retry_max_backoff_seconds": 30.0,
     "temperature": 0.0,
     "max_tokens": 5200,
     "max_input_chars": 32000,
@@ -98,6 +102,10 @@
     },
     "online_rl": {
       "geometry": "360x240+1090+84",
+      "opacity": 0.97
+    },
+    "prompt_evolution": {
+      "geometry": "420x300+1090+340",
       "opacity": 0.97
     }
   }

@@ -158,8 +158,23 @@ def print_posthoc_attribution(packet: dict) -> None:
 
 def read_prompt_evolution_review(packet: dict) -> dict:
     review = packet.get("review") if isinstance(packet.get("review"), dict) else {}
-    print("\n" + str(review.get("comparison", {})))
-    print("请审核候选 prompt：accept 接受，reject 拒绝并重写，abandon 放弃本次。")
+    phase = str(review.get("phase") or packet.get("phase") or "validation")
+    comparison = review.get("comparison") if isinstance(review.get("comparison"), dict) else {}
+    print("\n" + json.dumps(comparison, ensure_ascii=False, indent=2))
+    change = comparison.get("change_summary") if isinstance(comparison.get("change_summary"), dict) else {}
+    print(f"目标 skill：{change.get('target_skill', '?')}")
+    print(f"原 skill：{change.get('previous_skill') or change.get('previous_instruction') or '（无）'}")
+    print(f"候选 skill：{change.get('skill') or change.get('instruction') or '（无）'}")
+    print(f"诊断：{change.get('diagnosis') or '未提供'}")
+    print(f"证据步骤：{change.get('evidence_step_ids') or []}")
+    candidate = review.get("candidate") if isinstance(review.get("candidate"), dict) else {}
+    if candidate.get("analysis_input_truncated"):
+        print(
+            "输入告警：候选分析账本已截断，"
+            f"约 {candidate.get('analysis_input_chars', '?')} / {candidate.get('analysis_input_limit_chars', '?')} 字符。"
+        )
+    prompt = "请审核候选 skill：accept 开始验证，reject 拒绝并重写，abandon 放弃本次。" if phase == "candidate" else "请审核验证结果：accept 固化候选，reject 拒绝并重写，abandon 放弃本次。"
+    print(prompt)
     try:
         verdict = input("审核> ").strip().lower()
         reason = input("理由（拒绝时必填）> ").strip() if verdict == "reject" else ""

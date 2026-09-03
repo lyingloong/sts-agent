@@ -22,8 +22,10 @@ class FakePolicy:
     def __init__(self, decision):
         self.decision = decision
         self.screens = ("ALL",)
+        self.calls = 0
 
     def rank(self, observation, legal_actions, on_update=None):
+        self.calls += 1
         del observation, legal_actions, on_update
         return self.decision
 
@@ -181,6 +183,29 @@ def shop_room_message() -> dict:
     }
 
 
+def shop_continue_message() -> dict:
+    return {
+        "in_game": True,
+        "available_commands": ["proceed"],
+        "game_state": {
+            "screen_type": "SHOP_SCREEN",
+            "room_phase": "COMPLETE",
+            "choice_list": [],
+        },
+    }
+
+
+def empty_combat_message() -> dict:
+    message = combat_message()
+    message["available_commands"] = ["play", "end", "potion"]
+    message["game_state"]["combat_state"] = {
+        "hand": [],
+        "monsters": [{"name": "Louse", "is_gone": False}],
+    }
+    message["game_state"]["potions"] = []
+    return message
+
+
 class ConfidenceAutoTests(unittest.TestCase):
     def test_environment_automation_collects_combat_rewards_in_order(self) -> None:
         message = full_combat_reward_message()
@@ -266,6 +291,25 @@ class ConfidenceAutoTests(unittest.TestCase):
         choker = next(item for item in observation["decision_constraints"] if item["kind"] == "CARD_PLAY_LIMIT")
         self.assertEqual(choker["plays_remaining_this_turn"], 4)
 
+    def test_combat_observation_adds_static_enemy_knowledge(self) -> None:
+        message = combat_message()
+        monster = message["game_state"]["combat_state"]["monsters"][0]
+        monster.update({"id": "JAWWORM", "name": "Jaw Worm", "current_hp": 41, "max_hp": 46})
+        observation = controller.policy_observation(message)
+        knowledge = observation["combat"]["monsters"][0]["knowledge"]
+        self.assertEqual(knowledge["id"], "JAWWORM")
+        self.assertEqual(knowledge["type"], "Normal")
+        self.assertEqual(knowledge["min_hp"], 40)
+        self.assertEqual(knowledge["max_hp_ascension"], 46)
+        self.assertTrue(any(move["id"] == "CHOMP" for move in knowledge["moves"]))
+        self.assertEqual(knowledge["source"], "static_knowledge")
+
+    def test_noncombat_observation_drops_enemy_knowledge(self) -> None:
+        message = combat_message()
+        message["game_state"].update({"screen_type": "EVENT", "room_phase": "EVENT"})
+        observation = controller.policy_observation(message)
+        self.assertNotIn("combat", observation)
+
     def test_runic_dome_hides_live_enemy_intents_from_model_and_terminal(self) -> None:
         message = combat_message()
         message["game_state"]["relics"] = [{"id": "Runic Dome", "name": "符文圆顶"}]
@@ -284,6 +328,32 @@ class ConfidenceAutoTests(unittest.TestCase):
         assert decision is not None
         self.assertEqual(decision["source"], "environment_auto")
         self.assertEqual(decision["environment"]["rule"], "shop_open_merchant")
+
+    def test_single_shop_continue_is_auto_executed_without_policy(self) -> None:
+        policy = FakePolicy({})
+        command, action, decision = controller.ask_action(
+            NoBridge(), shop_continue_message(), "run-1", policy=policy
+        )
+        self.assertEqual(command, "PROCEED")
+        self.assertEqual(action["id"], "PROCEED")
+        self.assertEqual(action["label"], "自动执行 PROCEED")
+        self.assertEqual(policy.calls, 0)
+        assert decision is not None
+        self.assertEqual(decision["source"], "environment_auto")
+        self.assertEqual(decision["environment"]["rule"], "single_legal_action")
+
+    def test_empty_combat_auto_ends_turn_without_policy(self) -> None:
+        policy = FakePolicy({})
+        command, action, decision = controller.ask_action(
+            NoBridge(), empty_combat_message(), "run-1", policy=policy
+        )
+        self.assertEqual(command, "END")
+        self.assertEqual(action["id"], "END_TURN")
+        self.assertEqual(action["label"], "自动执行 结束回合")
+        self.assertEqual(policy.calls, 0)
+        assert decision is not None
+        self.assertEqual(decision["source"], "environment_auto")
+        self.assertEqual(decision["environment"]["rule"], "single_legal_action")
 
     def test_environment_automation_is_in_recent_action_history(self) -> None:
         message = full_combat_reward_message()

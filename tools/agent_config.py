@@ -61,7 +61,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "deepseek-v4-pro",
         "api_key_file": "deepseek_api.txt",
         "timeout_seconds": 90.0,
-        "max_retries": 1,
+        "max_retries": 3,
+        # RPM=20 is approximately one request every 3 seconds. Start a
+        # retry at 5 seconds to avoid immediately hitting the same limit.
+        "retry_backoff_seconds": 5.0,
+        "retry_max_backoff_seconds": 30.0,
         "temperature": 0.0,
         "max_tokens": 512,
         "max_input_chars": 32000,
@@ -77,7 +81,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "deepseek-v4-pro",
         "api_key_file": "deepseek_api.txt",
         "timeout_seconds": 180.0,
-        "max_retries": 1,
+        "max_retries": 3,
+        "retry_backoff_seconds": 5.0,
+        "retry_max_backoff_seconds": 30.0,
         "temperature": 0.0,
         "max_tokens": 2048,
         "max_input_chars": 96000,
@@ -91,8 +97,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "policy_dir": "prompts/characters",
         "output_dir": "data/prompt_evolution",
         "max_skill_chars": 2400,
-        "max_analysis_input_chars": 96000,
-        "max_analysis_tokens": 1800,
+        # DeepSeek v4 supports a very large context. Keep a headroom-aware
+        # character budget here (the value is characters, not tokens) so a
+        # long run is rarely truncated while leaving room for system/output.
+        "max_analysis_input_chars": 900000,
+        "max_analysis_tokens": 8192,
         "max_revisions_per_cycle": 3,
         "auto_continue": True,
     },
@@ -110,6 +119,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "online_rl": {
             "geometry": "360x240+1090+84",
+            "opacity": 0.97,
+        },
+        "prompt_evolution": {
+            "geometry": "420x300+1090+340",
             "opacity": 0.97,
         },
     },
@@ -250,8 +263,12 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("teacher.api_key_file must be a project-relative path")
     _require_number(teacher["timeout_seconds"], "teacher.timeout_seconds", 1.0)
     retries = teacher["max_retries"]
-    if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 5:
-        raise ConfigError("teacher.max_retries must be an integer from 0 to 5")
+    if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 10:
+        raise ConfigError("teacher.max_retries must be an integer from 0 to 10")
+    _require_number(teacher["retry_backoff_seconds"], "teacher.retry_backoff_seconds", 0.0, 60.0)
+    _require_number(teacher["retry_max_backoff_seconds"], "teacher.retry_max_backoff_seconds", 0.0, 300.0)
+    if teacher["retry_max_backoff_seconds"] < teacher["retry_backoff_seconds"]:
+        raise ConfigError("teacher.retry_max_backoff_seconds must be >= teacher.retry_backoff_seconds")
     _require_number(teacher["temperature"], "teacher.temperature", 0.0, 2.0)
     max_tokens = teacher["max_tokens"]
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 32 <= max_tokens <= 8192:
@@ -284,8 +301,12 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("posthoc_feedback.api_key_file must be a project-relative path")
     _require_number(posthoc["timeout_seconds"], "posthoc_feedback.timeout_seconds", 1.0)
     posthoc_retries = posthoc["max_retries"]
-    if isinstance(posthoc_retries, bool) or not isinstance(posthoc_retries, int) or not 0 <= posthoc_retries <= 5:
-        raise ConfigError("posthoc_feedback.max_retries must be an integer from 0 to 5")
+    if isinstance(posthoc_retries, bool) or not isinstance(posthoc_retries, int) or not 0 <= posthoc_retries <= 10:
+        raise ConfigError("posthoc_feedback.max_retries must be an integer from 0 to 10")
+    _require_number(posthoc["retry_backoff_seconds"], "posthoc_feedback.retry_backoff_seconds", 0.0, 60.0)
+    _require_number(posthoc["retry_max_backoff_seconds"], "posthoc_feedback.retry_max_backoff_seconds", 0.0, 300.0)
+    if posthoc["retry_max_backoff_seconds"] < posthoc["retry_backoff_seconds"]:
+        raise ConfigError("posthoc_feedback.retry_max_backoff_seconds must be >= posthoc_feedback.retry_backoff_seconds")
     _require_number(posthoc["temperature"], "posthoc_feedback.temperature", 0.0, 2.0)
     posthoc_tokens = posthoc["max_tokens"]
     if isinstance(posthoc_tokens, bool) or not isinstance(posthoc_tokens, int) or not 128 <= posthoc_tokens <= 8192:
@@ -318,8 +339,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"prompt_evolution.{key} must be an integer")
     if not 128 <= evolution["max_skill_chars"] <= 12000:
         raise ConfigError("prompt_evolution.max_skill_chars must be from 128 to 12000")
-    if not 4096 <= evolution["max_analysis_input_chars"] <= 262144:
-        raise ConfigError("prompt_evolution.max_analysis_input_chars must be from 4096 to 262144")
+    if not 4096 <= evolution["max_analysis_input_chars"] <= 900000:
+        raise ConfigError("prompt_evolution.max_analysis_input_chars must be from 4096 to 900000")
     if not 256 <= evolution["max_analysis_tokens"] <= 8192:
         raise ConfigError("prompt_evolution.max_analysis_tokens must be from 256 to 8192")
     if not 0 <= evolution["max_revisions_per_cycle"] <= 12:
@@ -335,7 +356,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")
-    for name in ("status", "control", "online_rl"):
+    for name in ("status", "control", "online_rl", "prompt_evolution"):
         window = overlay[name]
         _require_string(window["geometry"], f"overlay.{name}.geometry")
         if not WINDOW_GEOMETRY_PATTERN.fullmatch(window["geometry"]):
