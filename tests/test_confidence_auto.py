@@ -481,6 +481,11 @@ class ConfidenceAutoTests(unittest.TestCase):
 
         self.assertFalse(controller.is_smoke_bomb_potion_use(pending))
 
+    def test_smoke_bomb_transition_blocks_only_the_old_combat_state(self) -> None:
+        self.assertTrue(controller.smoke_bomb_escape_in_progress(combat_message()))
+        self.assertFalse(controller.smoke_bomb_escape_in_progress(combat_reward_message()))
+        self.assertFalse(controller.smoke_bomb_escape_in_progress({"in_game": False, "game_state": {}}))
+
     def test_normalizes_only_current_legal_actions(self) -> None:
         scores = controller.normalize_action_logprobs(
             [

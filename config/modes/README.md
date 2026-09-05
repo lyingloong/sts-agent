@@ -26,4 +26,4 @@ python tools\overlay_terminal.py --config config\modes\candidate_assist.json
 
 `config/agent.json` 是默认唯一入口；修改 `active_mode` 后重启 controller 和客户端即可切换模式。分文件配置仅用于兼容旧命令或临时隔离实验。
 
-`knowledge_experience` 不是一种独立的游戏决策模式。启用后，它作为教师动作决策的带外能力：教师通常选择动作；对某个当前公开实体的机制或策略依据有疑问时，也可直接返回一次 `knowledge_request`。完成“人类回答 -> DeepSeek 整理 -> 人类审核”后，控制器回到同一个游戏状态重新请求动作。
+`knowledge_experience` 不是一种独立的游戏决策模式。启用后，它作为教师动作决策的带外能力：教师通常选择动作；对某个当前公开实体的机制或策略依据有疑问时，也可直接返回一次 `knowledge_request`。完成“人类回答 -> DeepSeek 整理 -> 人类审核”后，控制器回到同一个游戏状态重新请求动作；审核拒绝会携带理由回到 DeepSeek 生成下一版，直到人工接受或放弃。

@@ -80,7 +80,7 @@ python tools\overlay_terminal.py
 
 ### 实体经验知识库
 
-`knowledge_experience` 复用 `teacher` 的 API 配置，不是独立的游戏模式。教师在任意游戏决策中，若当前公开实体确实缺少依据，可以暂时返回知识请求；Overlay/终端收集人类回答后，DeepSeek 输出最多三条经验的完整替换列表，最后由人类审核。只有接受后才原子写入 `data/knowledge/sts1_*.json`，并立即回到同一状态重新请求动作。字段如下：
+`knowledge_experience` 复用 `teacher` 的 API 配置，不是独立的游戏模式。教师在任意游戏决策中，若当前公开实体确实缺少依据，可以暂时返回知识请求；Overlay/终端收集人类回答后，DeepSeek 输出最多三条经验的完整替换列表，最后由人类审核。若审核拒绝，上一版候选和拒绝理由会交回 DeepSeek 重写并再次审核，直到接受或放弃；只有接受后才原子写入 `data/knowledge/sts1_*.json`，并立即回到同一状态重新请求动作。字段如下：
 
 | 字段 | 含义 |
 | --- | --- |

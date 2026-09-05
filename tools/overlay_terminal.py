@@ -507,6 +507,15 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     lines.extend(("", "教师思考", thinking or "（未返回思考内容）", "", "最终输出", output or "（未返回输出）"))
     if decision.get("assist_reason") and not decision.get("model_candidates"):
         lines.extend(("", f"回退原因：{decision.get('assist_reason')}"))
+    if decision.get("knowledge_error"):
+        lines.extend(
+            (
+                "",
+                "知识请求未通过校验",
+                str(decision.get("knowledge_error")),
+                "已交回人工选择；模型只能请求当前公开实体列表中的稳定 ID。",
+            )
+        )
     request = decision.get("knowledge_request") if isinstance(decision, dict) else None
     if isinstance(request, dict):
         lines.extend(("", "知识请求", f"{request.get('entity_type', '?')} / {request.get('entity_id', '?')}", str(request.get("question") or "")))
@@ -1254,6 +1263,13 @@ class OverlayTerminal:
         self.teacher_text.insert("end", f"\n{output}", "teacher_output")
         if decision.get("assist_reason") and not decision.get("model_candidates"):
             self.teacher_text.insert("end", f"\n\n回退原因：{decision.get('assist_reason')}", "teacher_warning")
+        if decision.get("knowledge_error"):
+            self.teacher_text.insert("end", "\n\n知识请求未通过校验", "teacher_section")
+            self.teacher_text.insert(
+                "end",
+                f"\n{decision.get('knowledge_error')}\n已交回人工选择；模型只能请求当前公开实体列表中的稳定 ID。",
+                "teacher_warning",
+            )
         request = decision.get("knowledge_request")
         if isinstance(request, dict):
             self.teacher_text.insert("end", "\n\n知识请求", "teacher_section")
@@ -1886,12 +1902,17 @@ class OverlayTerminal:
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_rowconfigure(1, weight=1)
         entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
-        tk.Label(outer, text=f"REVIEW EXPERIENCE · {entity.get('name') or packet.get('entity_id', '?')}", foreground=ACCENT, background=BACKGROUND, font=(self.ui_font, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        revision = max(1, int(packet.get("revision") or 1))
+        tk.Label(outer, text=f"REVIEW EXPERIENCE · {entity.get('name') or packet.get('entity_id', '?')} · 第 {revision} 版", foreground=ACCENT, background=BACKGROUND, font=(self.ui_font, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 8))
         body = tk.Text(outer, wrap="word", state="normal", background=FIELD, foreground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 10))
         body.grid(row=1, column=0, sticky="nsew")
         previous = packet.get("previous_experience") or []
         proposed = packet.get("proposed_experience") or []
-        body.insert("end", "原有列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(previous, 1)) or "  （空）") + "\n\n教师整理后的完整列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(proposed, 1)) or "  （空）"))
+        feedback = str(packet.get("reviewer_feedback") or "").strip()
+        body.insert("end", "原有列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(previous, 1)) or "  （空）"))
+        if feedback:
+            body.insert("end", "\n\n上一轮审核意见：\n  " + feedback)
+        body.insert("end", "\n\n教师整理后的完整列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(proposed, 1)) or "  （空）"))
         body.configure(state="disabled")
         reason = tk.Text(outer, height=3, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=9, pady=6, font=(self.data_font, 9))
         reason.grid(row=2, column=0, sticky="ew", pady=(8, 0))
@@ -1902,6 +1923,9 @@ class OverlayTerminal:
             if self.knowledge_review_dialog is not dialog:
                 return
             response = {"type": "knowledge_experience_review", "verdict": verdict, "reason": reason.get("1.0", "end-1c").strip()}
+            if verdict == "reject" and not response["reason"]:
+                messagebox.showwarning("需要拒绝理由", "拒绝并重写时请说明需要修改的内容。", parent=dialog)
+                return
             try:
                 dialog.grab_release()
                 dialog.destroy()
@@ -1911,7 +1935,7 @@ class OverlayTerminal:
             self.knowledge_review_responses.put(response)
 
         self._button(buttons, "放弃", lambda: finish("abandon"), compact=True).grid(row=0, column=0, padx=(0, 8))
-        reject = self._button(buttons, "拒绝", lambda: finish("reject"), compact=True)
+        reject = self._button(buttons, "拒绝并重写", lambda: finish("reject"), compact=True)
         reject.configure(background="#6b4b2d", activebackground="#8a623c")
         reject.grid(row=0, column=1, padx=(0, 8))
         accept = self._button(buttons, "接受并写入", lambda: finish("accept"), compact=True)
@@ -2134,6 +2158,8 @@ class OverlayTerminal:
                             status = packet.get("status")
                             if status == "curating":
                                 self._post_ui(self._set_connection, "DeepSeek 正在整理实体经验", WARNING)
+                            elif status == "revising":
+                                self._post_ui(self._set_connection, f"DeepSeek 正在根据审核意见重写第 {packet.get('revision', '?')} 版经验", WARNING)
                             elif status == "accepted":
                                 self._post_ui(self._set_connection, "实体经验已审核并写入知识库", ACCENT)
                             elif status == "error":

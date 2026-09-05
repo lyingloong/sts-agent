@@ -28,7 +28,7 @@ from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
 from item_knowledge import normalize_item_key, potion_effect, relic_effect
 from monster_knowledge import boss_profile, monster_profile
-from experience_knowledge import ExperienceError, append_audit, entity_profile, find_entity, get_experience, normalize_entity_key, public_entity, replace_experience
+from experience_knowledge import ExperienceError, append_audit, entity_profile, entity_reference_key, find_entity, get_experience, normalize_entity_key, public_entity, replace_experience, visible_entity_references
 from experience_curator import curate_experience
 from posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
@@ -54,6 +54,8 @@ EVENT_HISTORY_LIMIT = 16
 # CommunicationMod can report a ready combat state before Smoke Bomb's escape
 # animation has switched the room to its actual post-escape screen.
 SMOKE_BOMB_ANIMATION_DELAY_SECONDS = 5.0
+SMOKE_BOMB_STATE_POLL_SECONDS = 1.0
+SMOKE_BOMB_TRANSITION_TIMEOUT_SECONDS = 15.0
 # Give the overlay a brief frame to show an automatic decision before the
 # command is sent to the game.
 AUTOMATIC_ACTION_DELAY_SECONDS = 0.1
@@ -835,6 +837,17 @@ def is_smoke_bomb_potion_use(pending: dict[str, Any]) -> bool:
     potion_id = str(potion.get("id") or "").replace(" ", "").replace("_", "").casefold()
     potion_name = str(potion.get("name") or "").strip().casefold()
     return potion_id == "smokebomb" or potion_name in {"smoke bomb", "烟雾弹"}
+
+
+def smoke_bomb_escape_in_progress(message: dict[str, Any]) -> bool:
+    """Return whether a Smoke Bomb transition still exposes the old combat."""
+    if not message.get("in_game"):
+        return False
+    state = game_state(message)
+    return (
+        str(state.get("screen_type") or "").upper() == "NONE"
+        and str(state.get("room_phase") or "").upper() == "COMBAT"
+    )
 
 
 def generated_card_choice_source(pending: dict[str, Any]) -> dict[str, Any] | None:
@@ -3027,20 +3040,15 @@ def request_knowledge_experience(
     # Only entities already visible to this decision may trigger a write. This
     # prevents a model from probing or modifying an arbitrary hidden snapshot.
     visible_observation = policy_observation(message, action_history=action_history)
-    visible_keys: set[str] = set()
-    def collect_visible(value: Any) -> None:
-        if isinstance(value, dict):
-            for key in ("id", "name"):
-                if value.get(key) is not None:
-                    visible_keys.add(normalize_entity_key(value[key]))
-            for item in value.values():
-                collect_visible(item)
-        elif isinstance(value, list):
-            for item in value:
-                collect_visible(item)
-    collect_visible(visible_observation)
-    if normalize_entity_key(entity_id) not in visible_keys:
-        return {"status": "error", "error": "知识请求的实体未出现在当前公开状态中"}
+    allowed = visible_entity_references(visible_observation)
+    requested_kind = entity_type
+    requested_key = entity_reference_key(entity_id)
+    if not any(
+        item["entity_type"] == requested_kind and entity_reference_key(item["entity_id"]) == requested_key
+        for item in allowed
+    ):
+        allowlist = ", ".join(f"{item['entity_type']}/{item['entity_id']}" for item in allowed) or "（空）"
+        return {"status": "error", "error": f"知识请求实体不在当前公开实体列表中：{entity_type}/{entity_id}；允许：{allowlist}"}
     entity = find_entity(entity_type, entity_id)
     if entity is None:
         return {"status": "error", "error": f"知识库中找不到实体：{entity_type}/{entity_id}"}
@@ -3068,61 +3076,78 @@ def request_knowledge_experience(
     if not human_answer:
         return {"status": "skipped", "error": "empty human answer"}
 
-    def send_update(update: dict[str, Any]) -> None:
+    revision = 1
+    previous_proposal: list[str] | None = None
+    reviewer_feedback: str | None = None
+    while True:
+        def send_update(update: dict[str, Any]) -> None:
+            try:
+                bridge.send(
+                    {
+                        "type": "knowledge_experience_update",
+                        "entity_type": entity_type,
+                        "entity_id": entity.get("id") or entity_id,
+                        "model_id": teacher.model,
+                        "status": "curating" if revision == 1 else "revising",
+                        "revision": revision,
+                        "teacher": update,
+                    }
+                )
+            except OSError:
+                pass
+
+        try:
+            proposal = curate_experience(
+                teacher.remote,
+                entity_type,
+                entity,
+                question,
+                human_answer,
+                max_entries=max_entries,
+                context=visible_observation,
+                previous_proposal=previous_proposal,
+                reviewer_feedback=reviewer_feedback,
+                revision=revision,
+                on_update=send_update,
+            )
+        except (ExperienceError, TeacherError) as exc:
+            try:
+                bridge.send({"type": "knowledge_experience_update", "status": "error", "error": str(exc), "revision": revision})
+            except OSError:
+                pass
+            return {"status": "error", "error": str(exc)}
+        proposed = proposal["experience"]
         try:
             bridge.send(
                 {
-                    "type": "knowledge_experience_update",
+                    "type": "knowledge_experience_review_request",
                     "entity_type": entity_type,
                     "entity_id": entity.get("id") or entity_id,
-                    "model_id": teacher.model,
-                    "status": "curating",
-                    "teacher": update,
+                    "entity": public_entity(entity),
+                    "question": question,
+                    "human_answer": human_answer,
+                    "previous_experience": existing,
+                    "proposed_experience": proposed,
+                    "previous_proposal": previous_proposal,
+                    "reviewer_feedback": reviewer_feedback,
+                    "revision": revision,
+                    "teacher": proposal.get("teacher", {}),
                 }
             )
         except OSError:
-            pass
-
-    try:
-        proposal = curate_experience(
-            teacher.remote,
-            entity_type,
-            entity,
-            question,
-            human_answer,
-            max_entries=max_entries,
-            context=visible_observation,
-            on_update=send_update,
-        )
-    except (ExperienceError, TeacherError) as exc:
-        try:
-            bridge.send({"type": "knowledge_experience_update", "status": "error", "error": str(exc)})
-        except OSError:
-            pass
-        return {"status": "error", "error": str(exc)}
-    proposed = proposal["experience"]
-    try:
-        bridge.send(
-            {
-                "type": "knowledge_experience_review_request",
-                "entity_type": entity_type,
-                "entity_id": entity.get("id") or entity_id,
-                "entity": public_entity(entity),
-                "question": question,
-                "human_answer": human_answer,
-                "previous_experience": existing,
-                "proposed_experience": proposed,
-                "teacher": proposal.get("teacher", {}),
-            }
-        )
-    except OSError:
-        return {"status": "skipped", "error": "knowledge review UI unavailable"}
-    review = bridge.receive()
-    if not isinstance(review, dict) or review.get("type") != "knowledge_experience_review":
-        return {"status": "skipped", "error": "invalid knowledge review"}
-    verdict = str(review.get("verdict") or "abandon").casefold()
-    if verdict not in {"accept", "accepted"}:
-        return {"status": "rejected" if verdict == "reject" else "skipped", "error": str(review.get("reason") or "")}
+            return {"status": "skipped", "error": "knowledge review UI unavailable"}
+        review = bridge.receive()
+        if not isinstance(review, dict) or review.get("type") != "knowledge_experience_review":
+            return {"status": "skipped", "error": "invalid knowledge review"}
+        verdict = str(review.get("verdict") or "abandon").casefold()
+        if verdict in {"accept", "accepted"}:
+            break
+        if verdict == "reject":
+            previous_proposal = proposed
+            reviewer_feedback = str(review.get("reason") or "").strip() or "用户拒绝上一版候选；请重新审查并改写。"
+            revision += 1
+            continue
+        return {"status": "skipped", "error": str(review.get("reason") or "human abandoned knowledge review")}
     try:
         saved = replace_experience(entity_type, entity.get("id") or entity_id, proposed, max_entries=max_entries)
         append_audit(
@@ -3133,6 +3158,7 @@ def request_knowledge_experience(
                 "human_answer": human_answer,
                 "previous_experience": existing,
                 "accepted_experience": saved,
+                "revision": revision,
                 "teacher": proposal.get("teacher", {}),
             }
         )
@@ -3704,6 +3730,12 @@ def ask_action(
             actions,
             on_update=send_teacher_update,
         )
+        # Make a knowledge request visible before the controller blocks on
+        # the answer dialog.  The dedicated request packet follows below;
+        # this update keeps the action panel from looking frozen during the
+        # human-answer/teacher-curation round trip.
+        if isinstance(decision, dict) and isinstance(decision.get("knowledge_request"), dict):
+            send_teacher_update(decision)
         knowledge_results: list[dict[str, Any]] = []
         for _ in range(3):
             knowledge_request = decision.get("knowledge_request") if isinstance(decision, dict) else None
@@ -3734,6 +3766,9 @@ def ask_action(
             )
         if knowledge_results and isinstance(decision, dict):
             decision["knowledge_results"] = knowledge_results
+            last_knowledge = knowledge_results[-1]
+            if isinstance(last_knowledge, dict) and last_knowledge.get("status") != "accepted":
+                decision["knowledge_error"] = str(last_knowledge.get("error") or "知识请求未完成")
     elif policy is None:
         decision = None
     elif candidate_assist_allowed(message, policy.screens):
@@ -3880,7 +3915,7 @@ def main() -> int:
     visited_shop_rooms: set[tuple[int, int]] = set()
     declined_card_reward_keys: set[tuple[int, int]] = set()
     action_history: list[dict[str, Any]] = []
-    smoke_bomb_resume_at: float | None = None
+    smoke_bomb_transition: dict[str, Any] | None = None
     online_restart_config: dict[str, Any] | None = None
     prompt_evolution_restart_config: dict[str, Any] | None = None
     trace_output: TextIO | None = None
@@ -4360,31 +4395,77 @@ def main() -> int:
                             flush=True,
                         )
                     if smoke_bomb_used:
-                        smoke_bomb_resume_at = time.monotonic() + SMOKE_BOMB_ANIMATION_DELAY_SECONDS
+                        transition_started_at = time.monotonic()
+                        smoke_bomb_transition = {
+                            "resume_at": transition_started_at + SMOKE_BOMB_ANIMATION_DELAY_SECONDS,
+                            "deadline": transition_started_at + SMOKE_BOMB_TRANSITION_TIMEOUT_SECONDS,
+                            "run_id": pending.get("run_id"),
+                            "step_id": pending.get("step_id"),
+                        }
                         write_event(
                             {
                                 "event": "smoke_bomb_animation_wait",
                                 "run_id": pending.get("run_id"),
                                 "step_id": pending.get("step_id"),
                                 "delay_seconds": SMOKE_BOMB_ANIMATION_DELAY_SECONDS,
+                                "poll_seconds": SMOKE_BOMB_STATE_POLL_SECONDS,
+                                "timeout_seconds": SMOKE_BOMB_TRANSITION_TIMEOUT_SECONDS,
                                 "at": now_iso(),
                             }
                         )
                     pending = None
 
                 current_message = message
-                if smoke_bomb_resume_at is not None:
-                    remaining = smoke_bomb_resume_at - time.monotonic()
+                smoke_bomb_timeout_error: str | None = None
+                if smoke_bomb_transition is not None:
+                    remaining = float(smoke_bomb_transition["resume_at"]) - time.monotonic()
                     if remaining > 0:
                         print(f"waiting {remaining:.1f}s for Smoke Bomb animation", file=sys.stderr, flush=True)
                         time.sleep(remaining)
-                    smoke_bomb_resume_at = None
-                    # Do not ask the model about the acknowledgement state:
-                    # it can still be the pre-escape combat screen. Ask the
-                    # game for a fresh observation after the animation first.
-                    current_message = None
-                    print("STATE", flush=True)
-                    continue
+                        # Do not ask the model about the acknowledgement
+                        # state: it can still be the pre-escape combat screen.
+                        current_message = None
+                        print("STATE", flush=True)
+                        continue
+                    if smoke_bomb_escape_in_progress(message):
+                        remaining = float(smoke_bomb_transition["deadline"]) - time.monotonic()
+                        if remaining > 0:
+                            delay = min(SMOKE_BOMB_STATE_POLL_SECONDS, remaining)
+                            print(
+                                f"Smoke Bomb transition still in combat; polling again in {delay:.1f}s",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            time.sleep(delay)
+                            current_message = None
+                            print("STATE", flush=True)
+                            continue
+                        smoke_bomb_timeout_error = (
+                            "烟雾弹逃跑动画在 15 秒后仍停留在原战斗；已暂停自动执行，请确认游戏界面后手动操作。"
+                        )
+                        write_event(
+                            {
+                                "event": "smoke_bomb_transition_timeout",
+                                "run_id": smoke_bomb_transition.get("run_id"),
+                                "step_id": smoke_bomb_transition.get("step_id"),
+                                "at": now_iso(),
+                            }
+                        )
+                        smoke_bomb_transition = None
+                    else:
+                        # The first non-combat observation reopens the normal
+                        # action pipeline. environment_auto_action() runs
+                        # before the teacher, so visible reward automation
+                        # finishes before another model decision is requested.
+                        write_event(
+                            {
+                                "event": "smoke_bomb_transition_complete",
+                                "run_id": smoke_bomb_transition.get("run_id"),
+                                "step_id": smoke_bomb_transition.get("step_id"),
+                                "at": now_iso(),
+                            }
+                        )
+                        smoke_bomb_transition = None
                 if not message.get("in_game"):
                     # A main-menu observation starts a fresh run context; do
                     # not leak the previous run's action history into it.
@@ -4495,6 +4576,7 @@ def main() -> int:
                     bridge,
                     message,
                     run_id,
+                    error=smoke_bomb_timeout_error,
                     policy=policy,
                     teacher=teacher,
                     run_config=run_config,

@@ -32,14 +32,14 @@ _COMMON_RULES = """目标是提高整局通关概率，而不是只追求当前�
 你可以进行内部推理，但最终只能返回一个 JSON 对象，格式严格为 {\"action_id\":\"A<n>\"}。其中 A<n> 必须来自当前合法动作列表；不要输出解释、Markdown、命令或其他动作 ID。"""
 
 KNOWLEDGE_REQUEST_RULES = {
-    "encouraged": """只要对当前公开实体的机制、交互、风险或策略含义有不明白、不确定之处，就可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"当前公开的实体 ID 或名称\",\"question\":\"一个具体问题\"}}。这是被鼓励使用的工具：面对实体相关疑问时，优先提问而不是靠猜测继续；不需要先证明自己已经无法可靠决策。只请求当前 observation 中已经公开的实体，问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
-    "normal": """如果对当前公开实体的机制、交互、风险或策略含义有不明白之处，可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"当前公开的实体 ID 或名称\",\"question\":\"一个具体问题\"}}。优先使用当前状态、静态资料和已有 experience；仍有不明白之处时可以提问，不需要先证明自己已经无法可靠决策。只请求当前 observation 中已经公开的实体，问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
+    "encouraged": """只要对当前公开实体的机制、交互、风险或策略含义有不明白、不确定之处，就可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"白名单中的稳定实体 ID\",\"question\":\"一个具体问题\"}}。这是被鼓励使用的工具：面对实体相关疑问时，优先提问而不是靠猜测继续；不需要先证明自己已经无法可靠决策。只能请求用户消息中“知识请求白名单”列出的当前公开实体，并原样使用其中的 entity_id；不要使用事件选项、选项标签或自由填写的名称作为 entity_id。问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
+    "normal": """如果对当前公开实体的机制、交互、风险或策略含义有不明白之处，可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"白名单中的稳定实体 ID\",\"question\":\"一个具体问题\"}}。优先使用当前状态、静态资料和已有 experience；仍有不明白之处时可以提问，不需要先证明自己已经无法可靠决策。只能请求用户消息中“知识请求白名单”列出的当前公开实体，并原样使用其中的 entity_id；不要使用事件选项、选项标签或自由填写的名称作为 entity_id。问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
 }
 
 KNOWLEDGE_RESPONSE_CONTRACT = """【最终输出协议（优先级最高）】
 知识请求已启用。最终只能返回一个 JSON 对象，且只能二选一：
 1. 已能作出判断时，返回 {\"action_id\":\"A<n>\"}，其中 A<n> 必须来自当前合法动作列表；
-2. 对当前公开实体有值得澄清的机制、交互、风险或策略问题时，返回 {\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"当前公开的实体 ID 或名称\",\"question\":\"一个具体问题\"}}，此时不要返回 action_id。
+2. 对当前公开实体有值得澄清的机制、交互、风险或策略问题时，返回 {\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"白名单中的稳定实体 ID\",\"question\":\"一个具体问题\"}}，此时不要返回 action_id。entity_type 和 entity_id 必须来自用户消息中的知识请求白名单；不要使用事件选项、选项标签或自由填写的名称。
 
 不要输出解释、Markdown 或两个对象。上文任何“必须选择当前合法动作”或“只能返回 action_id”的要求，只适用于不发起知识请求时；当你选择提问时，本协议优先。"""
 

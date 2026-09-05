@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from teacher_prompts import PROMPT_VERSION, build_system_prompt
+from experience_knowledge import visible_entity_references
 
 
 class TeacherError(RuntimeError):
@@ -86,8 +87,24 @@ def build_prompt(
         response_instruction,
         "Observation:",
         compact_json(observation, limit=max_input_chars),
-        "Legal actions:",
     ]
+    if allow_knowledge_request:
+        lines.append(
+            "知识请求白名单（第一列是稳定 entity_id，第三列名称仅用于识别；ID 忽略大小写、空格和下划线）："
+        )
+        references = visible_entity_references(observation)
+        if references:
+            lines.extend(
+                f"- {item['entity_type']} | {item['entity_id']} | {item.get('name') or '-'}"
+                for item in references
+            )
+        else:
+            lines.append("- (empty: do not return knowledge_request)")
+    else:
+        lines.append("- (knowledge requests disabled)")
+    lines.extend([
+        "Legal actions:",
+    ])
     for action in legal_actions:
         lines.append(f"- {action_id(action)} | {action_label(action)}")
     if allow_knowledge_request:
@@ -96,7 +113,7 @@ def build_prompt(
             if str(knowledge_request_style).strip().casefold() == "encouraged"
             else "If anything about a currently public entity's mechanics, interactions, risks, or strategic meaning is unclear, you may return a knowledge_request instead of an action."
         )
-        lines.insert(2, request_instruction + " Return only a knowledge_request object with entity_type, entity_id, and question; never combine it with action_id.")
+        lines.insert(2, request_instruction + " 只返回包含 entity_type、entity_id、question 的 knowledge_request，不能同时返回 action_id。entity_type 和 entity_id 必须从下面的白名单中选择；不要把事件选项、选项标签或自由填写的名称用作 entity_id。")
     return "\n".join(lines)
 
 

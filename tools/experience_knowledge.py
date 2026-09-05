@@ -30,6 +30,21 @@ KNOWLEDGE_PATHS = {
 AUDIT_LOG_PATH = PROJECT_ROOT / "data" / "knowledge" / "experience_audit.jsonl"
 KIND_ALIASES = {"cards": "card", "relics": "relic", "potions": "potion", "monsters": "monster", "events": "event", "powers": "power"}
 _KEY_RE = re.compile(r"[^A-Z0-9]+")
+_VISIBLE_ENTITY_KINDS = {
+    "card": "card",
+    "cards": "card",
+    "deck": "card",
+    "hand": "card",
+    "selected_cards": "card",
+    "relic": "relic",
+    "relics": "relic",
+    "potion": "potion",
+    "potions": "potion",
+    "monster": "monster",
+    "monsters": "monster",
+    "power": "power",
+    "powers": "power",
+}
 
 
 class ExperienceError(ValueError):
@@ -43,6 +58,62 @@ def normalize_kind(value: Any) -> str:
 
 def normalize_entity_key(value: Any) -> str:
     return _KEY_RE.sub("", str(value or "").strip().upper())
+
+
+def entity_reference_key(value: Any) -> str:
+    """Compare IDs case-insensitively while retaining non-ASCII names."""
+    normalized = normalize_entity_key(value)
+    return normalized or str(value or "").strip().casefold()
+
+
+def visible_entity_references(observation: Any) -> list[dict[str, str]]:
+    """List only entities that are explicitly public in one observation.
+
+    This list is shared by the teacher prompt and controller validation. Event
+    choices are intentionally not traversed as event entities; only the
+    current event ID/profile is eligible for a knowledge request.
+    """
+    references: dict[tuple[str, str], dict[str, str]] = {}
+
+    def add(kind: str, value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        entity_id = str(value.get("id") or "").strip()
+        name = str(value.get("name") or "").strip()
+        if not entity_id or (kind == "potion" and entity_reference_key(entity_id) == "POTIONSLOT"):
+            return
+        normalized_kind = normalize_kind(kind)
+        key = (normalized_kind, entity_reference_key(entity_id))
+        references.setdefault(key, {"entity_type": normalized_kind, "entity_id": entity_id, "name": name})
+
+    def walk(value: Any, kind: str | None = None) -> None:
+        if isinstance(value, dict):
+            if kind is not None:
+                add(kind, value)
+            for key, child in value.items():
+                # Only recognized entity-bearing fields establish a type.
+                # Do not inherit a parent type through arbitrary nested data
+                # such as a monster's move table or a card's effect fields.
+                child_kind = _VISIBLE_ENTITY_KINDS.get(str(key).casefold())
+                walk(child, child_kind)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, kind)
+
+    if isinstance(observation, dict):
+        walk(observation)
+        if str(observation.get("screen_type") or "").upper() == "EVENT":
+            screen_state = observation.get("screen_state")
+            if isinstance(screen_state, dict):
+                profile = screen_state.get("knowledge")
+                if isinstance(profile, dict):
+                    add("event", profile)
+                elif screen_state.get("event_id"):
+                    add(
+                        "event",
+                        {"id": screen_state.get("event_id"), "name": screen_state.get("event_name")},
+                    )
+    return sorted(references.values(), key=lambda item: (item["entity_type"], item["entity_id"]))
 
 
 def validate_experience(values: Any, max_entries: int = 3) -> list[str]:

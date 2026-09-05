@@ -3,6 +3,7 @@
   "character": "IRONCLAD",
   "character_prompt_version": "sts1-character-prompt-library-v1",
   "base_prompt_version": "sts1-player-zh-v3",
-  "active_version": "p0001",
-  "next_version_index": 2
+  "active_version": "p0003",
+  "next_version_index": 4,
+  "updated_at_utc": "2026-09-05T13:11:47.290525+00:00"
 }

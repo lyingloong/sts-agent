@@ -225,12 +225,16 @@ def read_knowledge_experience_review(packet: dict) -> dict:
     entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
     print("\n知识经验候选审核")
     print(f"实体：{entity.get('name') or packet.get('entity_id')} ({packet.get('entity_type', '?')})")
-    print("候选完整列表：")
+    revision = max(1, int(packet.get("revision") or 1))
+    print(f"候选完整列表（第 {revision} 版）：")
+    previous_feedback = str(packet.get("reviewer_feedback") or "").strip()
+    if previous_feedback:
+        print(f"上一轮审核意见：{previous_feedback}")
     for index, value in enumerate(packet.get("proposed_experience") or [], 1):
         print(f"  {index}. {value}")
     try:
         verdict = input("审核 accept / reject / abandon> ").strip().lower()
-        reason = input("理由（拒绝时可填）> ").strip() if verdict in {"reject", "r"} else ""
+        reason = input("理由（将交给模型重写）> ").strip() if verdict in {"reject", "r"} else ""
     except (EOFError, KeyboardInterrupt):
         print()
         return {"type": "knowledge_experience_review", "verdict": "abandon"}
@@ -310,6 +314,8 @@ def main() -> int:
                 status = packet.get("status", "")
                 if status == "curating":
                     print("DeepSeek 正在整理实体经验...", flush=True)
+                elif status == "revising":
+                    print(f"DeepSeek 正在根据审核意见重写第 {packet.get('revision', '?')} 版经验...", flush=True)
                 elif status == "accepted":
                     print("知识经验已写入静态知识库：", packet.get("experience", []), flush=True)
                 elif status == "error":
