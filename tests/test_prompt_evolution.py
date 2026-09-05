@@ -24,7 +24,7 @@ class PromptEvolutionTests(unittest.TestCase):
                 {
                     "schema_version": prompt_evolution.SCHEMA_VERSION,
                     "character": "IRONCLAD",
-                    "base_prompt_version": "sts1-player-zh-v1",
+                    "base_prompt_version": "sts1-player-zh-v3",
                     "active_version": "p0001",
                     "next_version_index": 2,
                 }
@@ -129,6 +129,51 @@ class PromptEvolutionTests(unittest.TestCase):
         self.assertEqual(ledger[0]["state_after_ref"], 2)
         self.assertIn("state_after", ledger[1])
 
+    def test_analysis_ledger_splits_by_act_and_compacts_automatic_steps(self) -> None:
+        ledger = [
+            {
+                "step_id": 1,
+                "source": "environment_auto",
+                "screen_type": "COMBAT_REWARD",
+                "screen_after": "COMBAT_REWARD",
+                "action": "自动拾取金币",
+                "state": {"act": 1, "floor": 3, "deck": [{"id": "Strike_R", "count": 5}]},
+            },
+            {
+                "step_id": 2,
+                "source": "teacher_auto",
+                "screen_type": "COMBAT",
+                "screen_after": "NONE",
+                "action": "结束回合",
+                "action_detail": {"id": "END"},
+                "command": "END",
+                "legal_actions": [{"id": "END", "label": "结束回合", "description": "static"}],
+                "decision": {"source": "teacher_auto"},
+                "state": {"act": 1, "floor": 3, "map": {"nodes": list(range(100))}, "deck": [{"id": "Strike_R", "count": 5}]},
+                "state_after_ref": 3,
+            },
+            {
+                "step_id": 3,
+                "source": "teacher_auto",
+                "screen_type": "COMBAT",
+                "screen_after": "NONE",
+                "action": "结束回合",
+                "action_detail": {"id": "END"},
+                "command": "END",
+                "legal_actions": [],
+                "decision": {"source": "teacher_auto"},
+                "state": {"act": 2, "floor": 1, "deck": [{"id": "Strike_R", "count": 5}]},
+            },
+        ]
+        segments = prompt_evolution.split_ledger_by_act(ledger)
+        self.assertEqual([act for act, _items in segments], ["1", "2"])
+        first = segments[0][1]
+        self.assertTrue(first[0]["auto"])
+        self.assertNotIn("legal_actions", first[0])
+        self.assertNotIn("map", first[1]["state"])
+        self.assertIn("deck", first[1]["state"])
+        self.assertEqual(segments[1][1][0]["step_id"], 3)
+
     def test_candidate_is_not_active_before_acceptance(self) -> None:
         manager, root = self.make_manager()
         run_config = {"character": "IRONCLAD", "ascension": 0, "seed": "ABC123"}
@@ -208,6 +253,36 @@ class PromptEvolutionTests(unittest.TestCase):
         config = agent_config.DEFAULT_CONFIG["prompt_evolution"]
         self.assertEqual(config["max_analysis_input_chars"], 900000)
         self.assertEqual(config["max_analysis_tokens"], 8192)
+
+    def test_skill_text_segments_keep_complete_skills_and_mark_changes(self) -> None:
+        original, candidate = prompt_evolution.skill_text_segments(
+            "先计算来袭伤害。能防住时再出牌。",
+            "先计算来袭伤害。优先防住后再出牌。",
+        )
+        self.assertEqual("".join(text for text, _kind in original), "先计算来袭伤害。能防住时再出牌。")
+        self.assertEqual("".join(text for text, _kind in candidate), "先计算来袭伤害。优先防住后再出牌。")
+        self.assertIn(("能", "removed"), original)
+        self.assertIn(("优先", "added"), candidate)
+
+    def test_analysis_budget_truncation_keeps_request_valid_json(self) -> None:
+        manager, _root = self.make_manager()
+        manager.max_analysis_input_chars = 4096
+        run = {
+            "run_id": "run-1",
+            "run_config": {"character": "IRONCLAD", "ascension": 0, "seed_source": "random"},
+            "terminal_state": {"screen_type": "GAME_OVER", "act": 1, "floor": 2},
+            "metrics": {"score": 0},
+            "policy": manager.active_policy,
+            "ledger": [
+                {"step_id": index, "source": "teacher_auto", "screen_type": "COMBAT", "state": {"act": 1, "floor": 1, "recent_actions": ["x" * 500]}}
+                for index in range(40)
+            ],
+        }
+        messages = manager._candidate_messages(run, analysis_ledger=prompt_evolution.compact_analysis_ledger(run["ledger"]), analysis_act="1")
+        parsed = json.loads(messages[1]["content"])
+        self.assertTrue(manager.last_input_truncated)
+        self.assertIn("analysis_warning", parsed)
+        self.assertLessEqual(len(messages[1]["content"]), manager.max_analysis_input_chars)
 
     def test_action_prompt_uses_player_persona_and_player_base_version(self) -> None:
         manager, _root = self.make_manager()

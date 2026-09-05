@@ -140,7 +140,29 @@ class OverlayFormattingTests(unittest.TestCase):
             "deepseek-v4-pro",
         )
         self.assertIn("输入告警", rendered)
-        self.assertIn("已超过上限", rendered)
+        self.assertIn("尾部步骤已裁剪", rendered)
+
+    def test_prompt_review_shows_complete_original_and_candidate_skills(self) -> None:
+        rendered = overlay_terminal.prompt_evolution_review_text(
+            {
+                "phase": "candidate",
+                "comparison": {
+                    "seed": "ABC123",
+                    "change_summary": {
+                        "target_skill": "COMBAT",
+                        "previous_skill": "先计算来袭伤害。能防住时再出牌。",
+                        "skill": "先计算来袭伤害。优先防住后再出牌。",
+                        "diagnosis": "防御不足",
+                        "expected_effect": "减少掉血",
+                        "risk": "可能降低输出",
+                        "evidence_step_ids": [7],
+                    },
+                },
+            }
+        )
+        self.assertIn("原 skill（红色为候选中删除的部分）：\n先计算来袭伤害。能防住时再出牌。", rendered)
+        self.assertIn("候选 skill（绿色为相对原 skill 新增的部分）：\n先计算来袭伤害。优先防住后再出牌。", rendered)
+        self.assertNotIn("候选相对 diff", rendered)
 
     def test_model_name_uses_only_the_final_path_component(self) -> None:
         self.assertEqual(

@@ -26,6 +26,7 @@ except ImportError as exc:  # pragma: no cover - Windows Python includes Tk by d
     raise SystemExit(f"Tkinter is required for the overlay client: {exc}") from exc
 
 from agent_config import ConfigError, load_agent_config
+from prompt_evolution import skill_text_segments
 
 
 ACTION_HELP = """输入格式
@@ -280,7 +281,8 @@ def prompt_evolution_panel_text(status: Any, model_id: Any = None) -> str:
                 (
                     "",
                     "输入告警",
-                    f"候选分析输入约 {input_chars:,} 字符，已超过上限 {input_limit:,}，内容已截断。",
+                    f"候选分析输入实际 {input_chars:,} 字符；原始 {value.get('analysis_input_original_chars', '?')} 字符，"
+                    f"上限 {input_limit:,}，尾部步骤已裁剪。",
                 )
             )
         else:
@@ -417,10 +419,10 @@ def prompt_evolution_review_text(review: Any) -> str:
         f"预期效果：{table_cell(change.get('expected_effect') or '未提供')}",
         f"风险：{table_cell(change.get('risk') or '未提供')}",
         "",
-        "原 skill：",
+        "原 skill（红色为候选中删除的部分）：",
         table_cell(change.get("previous_skill") or change.get("previous_instruction") or "（无）"),
         "",
-        "候选 skill：",
+        "候选 skill（绿色为相对原 skill 新增的部分）：",
         table_cell(change.get("skill") or change.get("instruction") or "（无）"),
         "",
         "证据步骤：" + ", ".join(f"#{item}" for item in change.get("evidence_step_ids", []) if isinstance(item, int)),
@@ -430,7 +432,8 @@ def prompt_evolution_review_text(review: Any) -> str:
             (
                 "",
                 "输入告警：候选分析账本超过配置上限，发送给教师的内容已截断。",
-                f"实际 {candidate_payload.get('analysis_input_chars', '?')} 字符 / 上限 {candidate_payload.get('analysis_input_limit_chars', '?')} 字符。",
+                f"实际 {candidate_payload.get('analysis_input_chars', '?')} 字符 / 上限 {candidate_payload.get('analysis_input_limit_chars', '?')} 字符；"
+                f"原始 {candidate_payload.get('analysis_input_original_chars', '?')} 字符。",
             )
         )
     evidence = comparison.get("evidence") if isinstance(comparison.get("evidence"), dict) else {}
@@ -445,6 +448,32 @@ def prompt_evolution_review_text(review: Any) -> str:
                 f"{table_cell(item.get('action') or '?')}"
             )
     return "\n".join(lines)
+
+
+def tag_prompt_evolution_skill_changes(widget: tk.Text, review: Any) -> None:
+    """Color removed original and added candidate fragments in a review Text."""
+
+    if not isinstance(review, dict):
+        return
+    comparison = review.get("comparison") if isinstance(review.get("comparison"), dict) else {}
+    change = comparison.get("change_summary") if isinstance(comparison.get("change_summary"), dict) else {}
+    previous = table_cell(change.get("previous_skill") or change.get("previous_instruction") or "（无）")
+    candidate = table_cell(change.get("skill") or change.get("instruction") or "（无）")
+    original_segments, candidate_segments = skill_text_segments(previous, candidate)
+
+    def apply(header: str, segments: list[tuple[str, str]], tag: str) -> None:
+        header_start = widget.search(header + "\n", "1.0", stopindex="end")
+        if not header_start:
+            return
+        cursor = widget.index(f"{header_start}+{len(header) + 1}c")
+        for fragment, kind in segments:
+            end = widget.index(f"{cursor}+{len(fragment)}c")
+            if kind != "unchanged":
+                widget.tag_add(tag, cursor, end)
+            cursor = end
+
+    apply("原 skill（红色为候选中删除的部分）：", original_segments, "pe_removed")
+    apply("候选 skill（绿色为相对原 skill 新增的部分）：", candidate_segments, "pe_added")
 
 
 def teacher_panel_text(decision: dict[str, Any] | None) -> str:
@@ -478,6 +507,9 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     lines.extend(("", "教师思考", thinking or "（未返回思考内容）", "", "最终输出", output or "（未返回输出）"))
     if decision.get("assist_reason") and not decision.get("model_candidates"):
         lines.extend(("", f"回退原因：{decision.get('assist_reason')}"))
+    request = decision.get("knowledge_request") if isinstance(decision, dict) else None
+    if isinstance(request, dict):
+        lines.extend(("", "知识请求", f"{request.get('entity_type', '?')} / {request.get('entity_id', '?')}", str(request.get("question") or "")))
     return "\n".join(lines)
 
 
@@ -498,6 +530,8 @@ class OverlayTerminal:
         self.actions: queue.Queue[str] = queue.Queue()
         self.reflection_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self.prompt_evolution_responses: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.knowledge_answer_responses: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.knowledge_review_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self._prompt_evolution_warning_signature: str | None = None
         self.network_thread: threading.Thread | None = None
         self.closing = False
@@ -506,6 +540,8 @@ class OverlayTerminal:
         self._topmost_after: str | None = None
         self.reflection_dialog: tk.Toplevel | None = None
         self.attribution_dialog: tk.Toplevel | None = None
+        self.knowledge_answer_dialog: tk.Toplevel | None = None
+        self.knowledge_review_dialog: tk.Toplevel | None = None
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
@@ -1218,6 +1254,10 @@ class OverlayTerminal:
         self.teacher_text.insert("end", f"\n{output}", "teacher_output")
         if decision.get("assist_reason") and not decision.get("model_candidates"):
             self.teacher_text.insert("end", f"\n\n回退原因：{decision.get('assist_reason')}", "teacher_warning")
+        request = decision.get("knowledge_request")
+        if isinstance(request, dict):
+            self.teacher_text.insert("end", "\n\n知识请求", "teacher_section")
+            self.teacher_text.insert("end", f"\n{request.get('entity_type', '?')} / {request.get('entity_id', '?')}\n{request.get('question', '')}", "teacher_body")
         self.teacher_text.configure(state="disabled")
 
     def _configure_teacher_tags(self) -> None:
@@ -1767,6 +1807,119 @@ class OverlayTerminal:
         text.configure(yscrollcommand=scrollbar.set)
         dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_attribution_dialog(dialog))
 
+    def _show_knowledge_answer_dialog(self, packet: dict[str, Any]) -> None:
+        """Collect one human explanation for a public static entity."""
+        if self.closing:
+            self.knowledge_answer_responses.put({"type": "knowledge_experience_answer", "skip": True})
+            return
+        if self.knowledge_answer_dialog is not None and self.knowledge_answer_dialog.winfo_exists():
+            return
+        dialog = tk.Toplevel(self.root)
+        self.knowledge_answer_dialog = dialog
+        dialog.title("StS Agent - Knowledge Experience")
+        dialog.geometry("680x560+560+120")
+        dialog.minsize(520, 420)
+        dialog.configure(background=BACKGROUND)
+        dialog.attributes("-topmost", self.always_on_top)
+        dialog.grab_set()
+        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
+        outer.grid(sticky="nsew")
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(3, weight=1)
+        entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
+        title = f"KNOWLEDGE EXPERIENCE · {entity.get('name') or packet.get('entity_id', '?')}"
+        header = tk.Frame(outer, background=BACKGROUND)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(header, text=title, foreground=ACCENT, background=BACKGROUND, font=(self.ui_font, 11, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(outer, text=f"类型：{packet.get('entity_type', '?')}\n教师问题：{packet.get('question', '')}", foreground=MUTED, background=BACKGROUND, justify="left", anchor="w", font=(self.data_font, 9)).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        existing = packet.get("existing_experience") if isinstance(packet.get("existing_experience"), list) else []
+        tk.Label(outer, text="已有经验：" + ("\n" + "\n".join(f"{i}. {v}" for i, v in enumerate(existing, 1)) if existing else "（空）"), foreground=TEXT, background=BACKGROUND, justify="left", anchor="w", font=(self.data_font, 9)).grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        answer = tk.Text(outer, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 10))
+        answer.grid(row=3, column=0, sticky="nsew")
+        tk.Label(outer, text="输入针对该实体和场景的具体经验；留空跳过。", foreground=MUTED, background=BACKGROUND, anchor="w", font=(self.data_font, 9)).grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        buttons = tk.Frame(outer, background=BACKGROUND)
+        buttons.grid(row=5, column=0, sticky="e", pady=(10, 0))
+
+        def finish(skip: bool) -> None:
+            if self.knowledge_answer_dialog is not dialog:
+                return
+            value = "" if skip else answer.get("1.0", "end-1c").strip()
+            response = {"type": "knowledge_experience_answer", "skip": skip or not value, "answer": value}
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.knowledge_answer_dialog = None
+            self.knowledge_answer_responses.put(response)
+
+        self._button(buttons, "跳过", lambda: finish(True), compact=True).grid(row=0, column=0, padx=(0, 8))
+        submit = self._button(buttons, "提交回答", lambda: finish(False), compact=True)
+        submit.configure(background=ACCENT, foreground="#10221f", activebackground="#61ddc2", activeforeground="#10221f", font=(self.ui_font, 9, "bold"))
+        submit.grid(row=0, column=1)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(True))
+        answer.focus_set()
+        dialog.lift()
+
+    def _show_knowledge_review_dialog(self, packet: dict[str, Any]) -> None:
+        """Show the complete replacement list before writing the JSON snapshot."""
+        if self.closing:
+            self.knowledge_review_responses.put({"type": "knowledge_experience_review", "verdict": "abandon"})
+            return
+        if self.knowledge_review_dialog is not None and self.knowledge_review_dialog.winfo_exists():
+            return
+        dialog = tk.Toplevel(self.root)
+        self.knowledge_review_dialog = dialog
+        dialog.title("StS Agent - Review Experience")
+        dialog.geometry("620x460+600+160")
+        dialog.minsize(480, 340)
+        dialog.configure(background=BACKGROUND)
+        dialog.attributes("-topmost", self.always_on_top)
+        dialog.grab_set()
+        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
+        outer.grid(sticky="nsew")
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
+        entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
+        tk.Label(outer, text=f"REVIEW EXPERIENCE · {entity.get('name') or packet.get('entity_id', '?')}", foreground=ACCENT, background=BACKGROUND, font=(self.ui_font, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        body = tk.Text(outer, wrap="word", state="normal", background=FIELD, foreground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 10))
+        body.grid(row=1, column=0, sticky="nsew")
+        previous = packet.get("previous_experience") or []
+        proposed = packet.get("proposed_experience") or []
+        body.insert("end", "原有列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(previous, 1)) or "  （空）") + "\n\n教师整理后的完整列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(proposed, 1)) or "  （空）"))
+        body.configure(state="disabled")
+        reason = tk.Text(outer, height=3, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=9, pady=6, font=(self.data_font, 9))
+        reason.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        buttons = tk.Frame(outer, background=BACKGROUND)
+        buttons.grid(row=3, column=0, sticky="e", pady=(10, 0))
+
+        def finish(verdict: str) -> None:
+            if self.knowledge_review_dialog is not dialog:
+                return
+            response = {"type": "knowledge_experience_review", "verdict": verdict, "reason": reason.get("1.0", "end-1c").strip()}
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.knowledge_review_dialog = None
+            self.knowledge_review_responses.put(response)
+
+        self._button(buttons, "放弃", lambda: finish("abandon"), compact=True).grid(row=0, column=0, padx=(0, 8))
+        reject = self._button(buttons, "拒绝", lambda: finish("reject"), compact=True)
+        reject.configure(background="#6b4b2d", activebackground="#8a623c")
+        reject.grid(row=0, column=1, padx=(0, 8))
+        accept = self._button(buttons, "接受并写入", lambda: finish("accept"), compact=True)
+        accept.configure(background=ACCENT, foreground="#10221f", activebackground="#61ddc2", activeforeground="#10221f", font=(self.ui_font, 9, "bold"))
+        accept.grid(row=0, column=2)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish("abandon"))
+        dialog.lift()
+
     def _show_prompt_evolution_review(self, packet: dict[str, Any]) -> None:
         """Show either the pre-validation candidate gate or result gate."""
 
@@ -1825,6 +1978,9 @@ class OverlayTerminal:
         text.grid(row=0, column=0, sticky="nsew")
         text.configure(state="normal")
         text.insert("1.0", prompt_evolution_review_text(packet.get("review")))
+        text.tag_configure("pe_removed", foreground="#ef7373", background="#4a2d32")
+        text.tag_configure("pe_added", foreground="#7cdb9a", background="#284336")
+        tag_prompt_evolution_skill_changes(text, packet.get("review"))
         text.configure(state="disabled")
         scrollbar = tk.Scrollbar(text_frame, command=text.yview, relief="flat", borderwidth=0, background=BUTTON, troughcolor=FIELD)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -1969,6 +2125,24 @@ class OverlayTerminal:
                             response = self.prompt_evolution_responses.get()
                             writer.write(json.dumps(response, ensure_ascii=False) + "\n")
                             writer.flush()
+                        elif packet_type == "knowledge_experience_request":
+                            self._post_ui(self._show_knowledge_answer_dialog, packet)
+                            response = self.knowledge_answer_responses.get()
+                            writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                            writer.flush()
+                        elif packet_type == "knowledge_experience_update":
+                            status = packet.get("status")
+                            if status == "curating":
+                                self._post_ui(self._set_connection, "DeepSeek 正在整理实体经验", WARNING)
+                            elif status == "accepted":
+                                self._post_ui(self._set_connection, "实体经验已审核并写入知识库", ACCENT)
+                            elif status == "error":
+                                self._post_ui(self._set_connection, "实体经验整理失败", ERROR)
+                        elif packet_type == "knowledge_experience_review_request":
+                            self._post_ui(self._show_knowledge_review_dialog, packet)
+                            response = self.knowledge_review_responses.get()
+                            writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                            writer.flush()
                         elif packet_type == "shutdown":
                             self._post_ui(self._set_connection, str(packet.get("message", "controller 已停止")), ERROR)
                             break
@@ -2057,6 +2231,8 @@ class OverlayTerminal:
         self._save_layout()
         self.reflection_responses.put({"type": "posthoc_reflection", "skip": True})
         self.prompt_evolution_responses.put({"type": "prompt_evolution_review", "verdict": "abandon"})
+        self.knowledge_answer_responses.put({"type": "knowledge_experience_answer", "skip": True})
+        self.knowledge_review_responses.put({"type": "knowledge_experience_review", "verdict": "abandon"})
         self.actions.put("q")
         if self.reflection_dialog is not None:
             try:
@@ -2070,6 +2246,14 @@ class OverlayTerminal:
             except tk.TclError:
                 pass
             self.attribution_dialog = None
+        for attribute in ("knowledge_answer_dialog", "knowledge_review_dialog"):
+            dialog = getattr(self, attribute)
+            if dialog is not None:
+                try:
+                    dialog.destroy()
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
         try:
             self.control.destroy()
         except tk.TclError:

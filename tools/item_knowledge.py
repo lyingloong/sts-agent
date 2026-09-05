@@ -57,10 +57,12 @@ def _effect(kind: str, item: dict[str, Any]) -> dict[str, Any] | None:
     if entry is None:
         return None
     if kind == "relic":
-        fields = ("id", "name", "description", "tier", "color")
+        fields = ("id", "name", "description", "tier", "color", "experience")
     else:
-        fields = ("id", "name", "description", "rarity", "color", "is_thrown", "target")
+        fields = ("id", "name", "description", "rarity", "color", "is_thrown", "target", "experience")
     result = {key: entry[key] for key in fields if entry.get(key) is not None}
+    if not isinstance(result.get("experience"), list) or not result["experience"]:
+        result.pop("experience", None)
     return {"source": "static_knowledge"} | result
 
 

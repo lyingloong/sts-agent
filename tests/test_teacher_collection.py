@@ -153,6 +153,27 @@ class TeacherClientTests(unittest.TestCase):
         self.assertEqual(result["action_id"], "A1")
         self.assertEqual(captured["temperature"], 0.0)
 
+    def test_disabled_knowledge_request_is_rejected(self) -> None:
+        client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
+        client.enabled = True
+        client.model = "deepseek-v4-pro"
+        client.max_retries = 0
+        client.temperature = 0.0
+        client.max_tokens = 512
+        client.max_input_chars = 32000
+        client.thinking = False
+        client.json_mode = False
+        client.streaming = False
+        client.request_id = 0
+        client.last_error = None
+        client.allow_knowledge_request = False
+        client._request = lambda payload, callback=None: {
+            "model": "deepseek-v4-pro",
+            "choices": [{"message": {"content": '{"knowledge_request":{"entity_type":"card","entity_id":"X","question":"q"}}'}, "finish_reason": "stop"}],
+        }
+        with self.assertRaises(teacher_client.TeacherError):
+            client.select({"screen_type": "COMBAT"}, [{"id": "A1", "label": "选择"}])
+
     def test_select_extracts_reasoning_content_without_using_it_as_label(self) -> None:
         client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
         client.enabled = True

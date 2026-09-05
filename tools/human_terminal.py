@@ -9,6 +9,7 @@ import socket
 import sys
 
 from agent_config import ConfigError, load_agent_config
+from prompt_evolution import skill_text_segments
 
 
 RESET = "\x1b[0m"
@@ -160,18 +161,30 @@ def read_prompt_evolution_review(packet: dict) -> dict:
     review = packet.get("review") if isinstance(packet.get("review"), dict) else {}
     phase = str(review.get("phase") or packet.get("phase") or "validation")
     comparison = review.get("comparison") if isinstance(review.get("comparison"), dict) else {}
-    print("\n" + json.dumps(comparison, ensure_ascii=False, indent=2))
     change = comparison.get("change_summary") if isinstance(comparison.get("change_summary"), dict) else {}
     print(f"目标 skill：{change.get('target_skill', '?')}")
-    print(f"原 skill：{change.get('previous_skill') or change.get('previous_instruction') or '（无）'}")
-    print(f"候选 skill：{change.get('skill') or change.get('instruction') or '（无）'}")
+    previous_skill = change.get("previous_skill") or change.get("previous_instruction") or "（无）"
+    candidate_skill = change.get("skill") or change.get("instruction") or "（无）"
+    original_segments, candidate_segments = skill_text_segments(previous_skill, candidate_skill)
+
+    def color_segments(segments: list[tuple[str, str]], changed_color: str) -> str:
+        return "".join(
+            f"{changed_color}{text}{RESET}" if kind != "unchanged" else text
+            for text, kind in segments
+        )
+
+    print("原 skill（红色为候选中删除的部分）：")
+    print(color_segments(original_segments, RED))
+    print("候选 skill（绿色为相对原 skill 新增的部分）：")
+    print(color_segments(candidate_segments, GREEN))
     print(f"诊断：{change.get('diagnosis') or '未提供'}")
     print(f"证据步骤：{change.get('evidence_step_ids') or []}")
     candidate = review.get("candidate") if isinstance(review.get("candidate"), dict) else {}
     if candidate.get("analysis_input_truncated"):
         print(
-            "输入告警：候选分析账本已截断，"
-            f"约 {candidate.get('analysis_input_chars', '?')} / {candidate.get('analysis_input_limit_chars', '?')} 字符。"
+            "输入告警：候选分析账本已压缩/裁剪，"
+            f"实际 {candidate.get('analysis_input_chars', '?')} / {candidate.get('analysis_input_limit_chars', '?')} 字符，"
+            f"原始 {candidate.get('analysis_input_original_chars', '?')} 字符。"
         )
     prompt = "请审核候选 skill：accept 开始验证，reject 拒绝并重写，abandon 放弃本次。" if phase == "candidate" else "请审核验证结果：accept 固化候选，reject 拒绝并重写，abandon 放弃本次。"
     print(prompt)
@@ -188,6 +201,46 @@ def read_prompt_evolution_review(packet: dict) -> dict:
     else:
         verdict = "abandon"
     return {"type": "prompt_evolution_review", "verdict": verdict, "reason": reason}
+
+
+def read_knowledge_experience_answer(packet: dict, use_color: bool) -> dict:
+    entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
+    print("\n知识经验请求")
+    print(f"实体：{entity.get('name') or packet.get('entity_id')} ({packet.get('entity_type', '?')})")
+    existing = packet.get("existing_experience")
+    if isinstance(existing, list) and existing:
+        print("已有经验：")
+        for index, value in enumerate(existing, 1):
+            print(f"  {index}. {value}")
+    print(f"教师问题：{packet.get('question', '')}")
+    try:
+        answer = input("人类回答（留空跳过）> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return {"type": "knowledge_experience_answer", "skip": True}
+    return {"type": "knowledge_experience_answer", "skip": not answer, "answer": answer}
+
+
+def read_knowledge_experience_review(packet: dict) -> dict:
+    entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
+    print("\n知识经验候选审核")
+    print(f"实体：{entity.get('name') or packet.get('entity_id')} ({packet.get('entity_type', '?')})")
+    print("候选完整列表：")
+    for index, value in enumerate(packet.get("proposed_experience") or [], 1):
+        print(f"  {index}. {value}")
+    try:
+        verdict = input("审核 accept / reject / abandon> ").strip().lower()
+        reason = input("理由（拒绝时可填）> ").strip() if verdict in {"reject", "r"} else ""
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return {"type": "knowledge_experience_review", "verdict": "abandon"}
+    if verdict in {"accept", "a", "yes", "y"}:
+        verdict = "accept"
+    elif verdict in {"reject", "r", "no", "n"}:
+        verdict = "reject"
+    else:
+        verdict = "abandon"
+    return {"type": "knowledge_experience_review", "verdict": verdict, "reason": reason}
 
 
 def main() -> int:
@@ -247,6 +300,22 @@ def main() -> int:
                 print_posthoc_attribution(packet)
             elif packet_type == "prompt_evolution_review_request":
                 response = read_prompt_evolution_review(packet)
+                writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                writer.flush()
+            elif packet_type == "knowledge_experience_request":
+                response = read_knowledge_experience_answer(packet, use_color)
+                writer.write(json.dumps(response, ensure_ascii=False) + "\n")
+                writer.flush()
+            elif packet_type == "knowledge_experience_update":
+                status = packet.get("status", "")
+                if status == "curating":
+                    print("DeepSeek 正在整理实体经验...", flush=True)
+                elif status == "accepted":
+                    print("知识经验已写入静态知识库：", packet.get("experience", []), flush=True)
+                elif status == "error":
+                    print(f"知识经验整理失败：{packet.get('error', '')}", flush=True)
+            elif packet_type == "knowledge_experience_review_request":
+                response = read_knowledge_experience_review(packet)
                 writer.write(json.dumps(response, ensure_ascii=False) + "\n")
                 writer.flush()
             elif packet_type == "shutdown":

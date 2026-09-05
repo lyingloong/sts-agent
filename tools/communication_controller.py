@@ -28,6 +28,8 @@ from agent_config import ConfigError, load_agent_config
 from card_knowledge import card_effect
 from item_knowledge import normalize_item_key, potion_effect, relic_effect
 from monster_knowledge import boss_profile, monster_profile
+from experience_knowledge import ExperienceError, append_audit, entity_profile, find_entity, get_experience, normalize_entity_key, public_entity, replace_experience
+from experience_curator import curate_experience
 from posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
@@ -37,9 +39,10 @@ from posthoc_feedback import (
     terminal_summary as posthoc_terminal_summary,
     write_artifact as write_posthoc_artifact,
 )
-from power_knowledge import power_description
+from power_knowledge import power_description, power_experience
 from prompt_evolution import PromptEvolutionError, PromptEvolutionManager
 from teacher_client import RemoteTeacherClient, TeacherError
+from teacher_prompts import PLAYER_PROMPT_VERSION, build_system_prompt
 
 
 ACTION_HISTORY_LIMIT = 6
@@ -51,6 +54,9 @@ EVENT_HISTORY_LIMIT = 16
 # CommunicationMod can report a ready combat state before Smoke Bomb's escape
 # animation has switched the room to its actual post-escape screen.
 SMOKE_BOMB_ANIMATION_DELAY_SECONDS = 5.0
+# Give the overlay a brief frame to show an automatic decision before the
+# command is sent to the game.
+AUTOMATIC_ACTION_DELAY_SECONDS = 0.1
 
 
 PLAYER_CLASSES = {
@@ -219,6 +225,10 @@ def game_state(message: dict[str, Any]) -> dict[str, Any]:
 
 
 REWARD_AUTOMATION_ORDER = ("RELIC", "GOLD", "POTION", "CARD")
+# In StS1 these are the only potions that can be deliberately consumed
+# outside combat. CommunicationMod may report ``can_use=true`` globally for
+# other potions, so do not treat that flag as context-independent.
+NON_COMBAT_USABLE_POTIONS = frozenset({"BLOODPOTION", "FRUITJUICE"})
 
 
 def combat_reward_entries(message: dict[str, Any]) -> list[tuple[int, str, dict[str, Any]]]:
@@ -322,7 +332,7 @@ def environment_auto_action(
     # The semantic action compiler has already filtered unavailable cards,
     # targets, potions, and blocked choices, so one remaining action is safe to
     # execute without an inference request.
-    if len(actions) == 1:
+    if len(actions) == 1 and actions[0].get("kind") not in {"potion_use", "potion_discard"}:
         action = dict(actions[0])
         label = str(action.get("label") or action.get("command") or action.get("id") or "唯一动作")
         action["label"] = f"自动执行 {label}"
@@ -358,6 +368,7 @@ CARD_MODEL_FIELDS = (
     "upgrades",
     "is_playable",
     "description",
+    "experience",
 )
 POTION_MODEL_FIELDS = (
     "id",
@@ -365,8 +376,9 @@ POTION_MODEL_FIELDS = (
     "description",
     "target",
     "can_use",
+    "experience",
 )
-RELIC_MODEL_FIELDS = ("id", "name", "description", "counter")
+RELIC_MODEL_FIELDS = ("id", "name", "description", "counter", "experience")
 _MISSING = object()
 
 
@@ -637,6 +649,9 @@ def powers_summary(powers: Any) -> list[dict[str, Any]]:
         description = power_description(power)
         if description is not None:
             item["description"] = description
+        experience = power_experience(power)
+        if experience:
+            item["experience"] = experience
         result.append(item)
     return result
 
@@ -1125,6 +1140,7 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
             "act_boss_profile",
             "relics",
             "potions",
+            "deck",
             "decision_constraints",
             "combat",
             "recent_actions",
@@ -1267,6 +1283,9 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
         result["event_name"] = value.get("event_name")
         result["body_text"] = value.get("body_text")
         result["options"] = [normalize_event_option(item) for item in value.get("options", [])]
+        event_profile = entity_profile("event", value.get("event_id") or value.get("event_name"))
+        if event_profile is not None:
+            result["knowledge"] = event_profile
     elif screen_type == "COMBAT_REWARD":
         result["rewards"] = [normalize_reward(item) for item in value.get("rewards", [])]
     elif screen_type == "REST":
@@ -1403,43 +1422,7 @@ def semantic_actions(
                     )
         if "end" in commands:
             result.append({"id": "END_TURN", "command": "END", "kind": "end_turn", "label": "结束回合"})
-        if "potion" in commands:
-            for index, potion in enumerate(state.get("potions", [])):
-                if not isinstance(potion, dict) or is_slot(potion):
-                    continue
-                if potion.get("can_use", False):
-                    if potion.get("requires_target", False):
-                        for target in live_targets:
-                            result.append(
-                                {
-                                    "id": f"POTION_USE:slot={index}:target={target}",
-                                    "command": f"POTION USE {index} {target}",
-                                "kind": "potion_use",
-                                "slot": index,
-                                "target": target,
-                                "label": f"使用药水 {potion.get('name', index)} -> 敌人 {target}",
-                            }
-                            )
-                    else:
-                        result.append(
-                            {
-                                "id": f"POTION_USE:slot={index}",
-                                "command": f"POTION USE {index}",
-                                "kind": "potion_use",
-                                "slot": index,
-                                "label": f"使用药水 {potion.get('name', index)}",
-                            }
-                        )
-                if potion.get("can_discard", False):
-                    result.append(
-                        {
-                            "id": f"POTION_DISCARD:slot={index}",
-                        "command": f"POTION DISCARD {index}",
-                        "kind": "potion_discard",
-                        "slot": index,
-                        "label": f"丢弃药水 {potion.get('name', index)}",
-                    }
-                    )
+        result.extend(potion_actions(state, commands, live_targets, in_combat=True))
         return result
 
     choices = state.get("choice_list", [])
@@ -1447,6 +1430,11 @@ def semantic_actions(
         if "return" in commands:
             result.append({"id": "RETURN", "command": "RETURN", "kind": "return"})
         return result
+    # Potions can be used before a non-map screen's primary choice, such as
+    # freeing a full slot before taking a reward. Enemy-target potions are not
+    # emitted here because there is no combat target list on these screens.
+    if not is_map_screen(state):
+        result.extend(potion_actions(state, commands))
     if "choose" in commands and isinstance(choices, list) and not shop_reentry_blocked(message, visited_shop_rooms):
         blocked_indices = blocked_potion_reward_indices(message) | blocked_gold_reward_indices(message) | blocked_card_reward_indices(
             message,
@@ -1475,6 +1463,100 @@ def semantic_actions(
     ):
         if command in commands:
             result.append({"id": action_id, "command": command.upper(), "kind": kind})
+
+    # A map is a route-selection screen, never a potion-use screen. Some
+    # CommunicationMod versions briefly retain commands from the preceding
+    # combat while the map overlay is opening; filter those stale actions at
+    # the final boundary so they cannot reach the model or terminal.
+    if is_map_screen(state):
+        result = [action for action in result if not is_map_potion_action(action)]
+    return result
+
+
+def is_map_potion_action(action: dict[str, Any]) -> bool:
+    """Return whether an action is a potion operation leaked into the map."""
+    kind = str(action.get("kind") or "").casefold()
+    action_id = str(action.get("id") or "").casefold()
+    text = " ".join(
+        str(action.get(field) or "")
+        for field in ("command", "label", "selection")
+    ).casefold()
+    return (
+        kind in {"potion_use", "potion_discard"}
+        or action_id.startswith("potion_")
+        or "potion" in text
+        or "药水" in text
+    )
+
+
+def is_map_screen(state: dict[str, Any]) -> bool:
+    """Return whether the current state represents route selection."""
+    return (
+        str(state.get("screen_type") or "").upper() == "MAP"
+        or str(state.get("room_phase") or "").upper() == "MAP"
+    )
+
+
+def potion_actions(
+    state: dict[str, Any],
+    commands: set[str],
+    live_targets: list[int] | None = None,
+    *,
+    in_combat: bool = False,
+) -> list[dict[str, Any]]:
+    """Build legal potion operations for the current screen.
+
+    CommunicationMod advertises potion support on screens where a potion can
+    be used before making the screen's primary choice (for example, a full
+    reward inventory). Enemy-target operations are meaningful only in combat.
+    Outside combat, only Blood Potion and Fruit Juice are manually usable;
+    other potions are still exposed when they can be discarded to free a slot.
+    """
+    if "potion" not in commands:
+        return []
+    targets = list(live_targets or [])
+    result: list[dict[str, Any]] = []
+    for index, potion in enumerate(state.get("potions", [])):
+        if not isinstance(potion, dict) or is_slot(potion):
+            continue
+        name = potion.get("name", index)
+        potion_key = normalize_item_key(potion.get("id")) or normalize_item_key(potion.get("name"))
+        can_use = bool(potion.get("can_use", False)) and (
+            in_combat or potion_key in NON_COMBAT_USABLE_POTIONS
+        )
+        if can_use:
+            if potion.get("requires_target", False):
+                for target in targets:
+                    result.append(
+                        {
+                            "id": f"POTION_USE:slot={index}:target={target}",
+                            "command": f"POTION USE {index} {target}",
+                            "kind": "potion_use",
+                            "slot": index,
+                            "target": target,
+                            "label": f"使用药水 {name} -> 敌人 {target}",
+                        }
+                    )
+            else:
+                result.append(
+                    {
+                        "id": f"POTION_USE:slot={index}",
+                        "command": f"POTION USE {index}",
+                        "kind": "potion_use",
+                        "slot": index,
+                        "label": f"使用药水 {name}",
+                    }
+                )
+        if potion.get("can_discard", False):
+            result.append(
+                {
+                    "id": f"POTION_DISCARD:slot={index}",
+                    "command": f"POTION DISCARD {index}",
+                    "kind": "potion_discard",
+                    "slot": index,
+                    "label": f"丢弃药水 {name}",
+                }
+            )
     return result
 
 
@@ -2926,12 +3008,160 @@ def request_prompt_evolution_review(
     }
 
 
+def request_knowledge_experience(
+    bridge: TerminalBridge,
+    teacher: "TeacherClient",
+    message: dict[str, Any],
+    request: dict[str, Any],
+    action_history: list[dict[str, Any]] | None,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the human answer -> DeepSeek curation -> human approval workflow."""
+    knowledge_config = config.get("knowledge_experience", {})
+    max_entries = int(knowledge_config.get("max_entries_per_entity", 3))
+    max_question_chars = int(knowledge_config.get("max_question_chars", 2000))
+    max_answer_chars = int(knowledge_config.get("max_answer_chars", 6000))
+    entity_type = str(request.get("entity_type") or "").strip().casefold()
+    entity_id = str(request.get("entity_id") or "").strip()
+    question = str(request.get("question") or "").strip()[:max_question_chars]
+    # Only entities already visible to this decision may trigger a write. This
+    # prevents a model from probing or modifying an arbitrary hidden snapshot.
+    visible_observation = policy_observation(message, action_history=action_history)
+    visible_keys: set[str] = set()
+    def collect_visible(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("id", "name"):
+                if value.get(key) is not None:
+                    visible_keys.add(normalize_entity_key(value[key]))
+            for item in value.values():
+                collect_visible(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect_visible(item)
+    collect_visible(visible_observation)
+    if normalize_entity_key(entity_id) not in visible_keys:
+        return {"status": "error", "error": "知识请求的实体未出现在当前公开状态中"}
+    entity = find_entity(entity_type, entity_id)
+    if entity is None:
+        return {"status": "error", "error": f"知识库中找不到实体：{entity_type}/{entity_id}"}
+    existing = get_experience(entity)
+    try:
+        bridge.send(
+            {
+                "type": "knowledge_experience_request",
+                "entity_type": entity_type,
+                "entity_id": entity.get("id") or entity_id,
+                "entity": public_entity(entity),
+                "existing_experience": existing,
+                "question": question,
+                "state": visible_observation,
+            }
+        )
+    except OSError:
+        return {"status": "skipped", "error": "knowledge UI unavailable"}
+    response = bridge.receive()
+    if not isinstance(response, dict) or response.get("type") != "knowledge_experience_answer":
+        return {"status": "skipped", "error": "invalid knowledge answer"}
+    if response.get("skip") is True:
+        return {"status": "skipped", "error": "human skipped"}
+    human_answer = str(response.get("answer") or "").strip()[:max_answer_chars]
+    if not human_answer:
+        return {"status": "skipped", "error": "empty human answer"}
+
+    def send_update(update: dict[str, Any]) -> None:
+        try:
+            bridge.send(
+                {
+                    "type": "knowledge_experience_update",
+                    "entity_type": entity_type,
+                    "entity_id": entity.get("id") or entity_id,
+                    "model_id": teacher.model,
+                    "status": "curating",
+                    "teacher": update,
+                }
+            )
+        except OSError:
+            pass
+
+    try:
+        proposal = curate_experience(
+            teacher.remote,
+            entity_type,
+            entity,
+            question,
+            human_answer,
+            max_entries=max_entries,
+            context=visible_observation,
+            on_update=send_update,
+        )
+    except (ExperienceError, TeacherError) as exc:
+        try:
+            bridge.send({"type": "knowledge_experience_update", "status": "error", "error": str(exc)})
+        except OSError:
+            pass
+        return {"status": "error", "error": str(exc)}
+    proposed = proposal["experience"]
+    try:
+        bridge.send(
+            {
+                "type": "knowledge_experience_review_request",
+                "entity_type": entity_type,
+                "entity_id": entity.get("id") or entity_id,
+                "entity": public_entity(entity),
+                "question": question,
+                "human_answer": human_answer,
+                "previous_experience": existing,
+                "proposed_experience": proposed,
+                "teacher": proposal.get("teacher", {}),
+            }
+        )
+    except OSError:
+        return {"status": "skipped", "error": "knowledge review UI unavailable"}
+    review = bridge.receive()
+    if not isinstance(review, dict) or review.get("type") != "knowledge_experience_review":
+        return {"status": "skipped", "error": "invalid knowledge review"}
+    verdict = str(review.get("verdict") or "abandon").casefold()
+    if verdict not in {"accept", "accepted"}:
+        return {"status": "rejected" if verdict == "reject" else "skipped", "error": str(review.get("reason") or "")}
+    try:
+        saved = replace_experience(entity_type, entity.get("id") or entity_id, proposed, max_entries=max_entries)
+        append_audit(
+            {
+                "entity_type": entity_type,
+                "entity_id": entity.get("id") or entity_id,
+                "question": question,
+                "human_answer": human_answer,
+                "previous_experience": existing,
+                "accepted_experience": saved,
+                "teacher": proposal.get("teacher", {}),
+            }
+        )
+    except (ExperienceError, OSError) as exc:
+        return {"status": "error", "error": str(exc)}
+    try:
+        bridge.send(
+            {
+                "type": "knowledge_experience_update",
+                "entity_type": entity_type,
+                "entity_id": entity.get("id") or entity_id,
+                "model_id": teacher.model,
+                "status": "accepted",
+                "experience": saved,
+            }
+        )
+    except OSError:
+        pass
+    return {"status": "accepted", "experience": saved}
+
+
 class TeacherClient:
-    """Remote teacher used only to collect automatically executed SFT labels.
+    """Remote DeepSeek decision client with optional in-game knowledge assistance.
 
     The teacher receives short aliases for the controller-provided action set.
     It cannot send a CommunicationMod command or bypass the local action
-    compiler. A failure produces a human fallback for that one decision.
+    compiler. A failure produces a human fallback for that one decision. When
+    enabled, a knowledge request is a temporary pause in this same decision
+    flow; it never becomes a separate game mode.
     """
 
     def __init__(
@@ -2943,6 +3173,10 @@ class TeacherClient:
         teacher_config = config["teacher"]
         self.remote = RemoteTeacherClient(project_root, teacher_config)
         self.prompt_evolution = prompt_evolution
+        self.knowledge_enabled = bool(config.get("knowledge_experience", {}).get("enabled"))
+        self.knowledge_request_style = str(config.get("knowledge_experience", {}).get("request_style", "encouraged"))
+        self.remote.allow_knowledge_request = self.knowledge_enabled
+        self.remote.knowledge_request_style = self.knowledge_request_style
         self.enabled = self.remote.enabled
         self.model = self.remote.model
         self.thinking = self.remote.thinking
@@ -3034,7 +3268,19 @@ class TeacherClient:
         system_prompt: str | None = None
         prompt_version: str | None = None
         if self.prompt_evolution is not None and self.prompt_evolution.enabled:
-            system_prompt, prompt_version = self.prompt_evolution.system_prompt(observation)
+            system_prompt, prompt_version = self.prompt_evolution.system_prompt(
+                observation,
+                allow_knowledge_request=self.knowledge_enabled,
+                knowledge_request_style=self.knowledge_request_style,
+            )
+        elif self.knowledge_enabled:
+            system_prompt = build_system_prompt(
+                observation,
+                persona="player",
+                allow_knowledge_request=True,
+                knowledge_request_style=self.knowledge_request_style,
+            )
+            prompt_version = PLAYER_PROMPT_VERSION
         try:
             selection = self.remote.select(
                 observation,
@@ -3048,8 +3294,37 @@ class TeacherClient:
             return self._fallback_decision("不可用", str(exc))
         alias = str(selection.get("action_id", ""))
         action = alias_to_action.get(alias)
+        knowledge_request = selection.get("knowledge_request")
+        if action is None and not isinstance(knowledge_request, dict):
+            return self._fallback_decision("动作无效", "教师未返回合法动作或有效知识请求")
         if action is None:
-            return self._fallback_decision("动作无效", "教师返回的动作不在当前合法集合中")
+            teacher_metadata = {
+                "provider": "openai_compatible",
+                "model_id": selection.get("model_id", self.model),
+                "prompt_version": selection.get("prompt_version"),
+                "thinking_enabled": bool(selection.get("thinking_enabled", self.thinking)),
+                "request_id": selection.get("request_id"),
+                "latency_ms": selection.get("latency_ms"),
+                "attempt": selection.get("attempt"),
+                "finish_reason": selection.get("finish_reason"),
+                "output": selection.get("output", ""),
+                "thinking": selection.get("thinking", ""),
+                "usage": selection.get("usage"),
+            }
+            return {
+                "mode": self.mode,
+                "model_id": selection.get("model_id", self.model),
+                "candidate_source": "remote_teacher",
+                "model_action": None,
+                "model_candidates": [],
+                "knowledge_request": knowledge_request,
+                "teacher": teacher_metadata,
+                "assist_status": "需要知识澄清",
+                "assist_reason": "教师请求人类补充实体经验",
+                "executed_action": None,
+                "source": None,
+                "overridden": None,
+            }
         teacher_metadata = {
             "provider": "openai_compatible",
             "model_id": selection.get("model_id", self.model),
@@ -3077,6 +3352,7 @@ class TeacherClient:
                 }
             ],
             "teacher": teacher_metadata,
+            "knowledge_request": knowledge_request,
             "executed_action": None,
             "source": None,
             "overridden": None,
@@ -3345,6 +3621,7 @@ def ask_action(
     visited_shop_rooms: set[tuple[int, int]] | None = None,
     action_history: list[dict[str, Any]] | None = None,
     declined_card_reward_keys: set[tuple[int, int]] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
     actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
 
@@ -3384,6 +3661,7 @@ def ask_action(
             action, detail = environment_action
             decision = environment_auto_decision(action, detail)
             send_model_update(decision, auto_execute=True)
+            time.sleep(AUTOMATIC_ACTION_DELAY_SECONDS)
             print(
                 f"environment auto: {action.get('id')} rule={detail.get('rule')}",
                 file=sys.stderr,
@@ -3426,6 +3704,36 @@ def ask_action(
             actions,
             on_update=send_teacher_update,
         )
+        knowledge_results: list[dict[str, Any]] = []
+        for _ in range(3):
+            knowledge_request = decision.get("knowledge_request") if isinstance(decision, dict) else None
+            if not (
+                isinstance(knowledge_request, dict)
+                and config is not None
+                and bool(config.get("knowledge_experience", {}).get("enabled"))
+            ):
+                break
+            knowledge_result = request_knowledge_experience(
+                bridge,
+                teacher,
+                message,
+                knowledge_request,
+                action_history,
+                config,
+            )
+            knowledge_results.append(knowledge_result)
+            # A successful write changes the next prompt immediately. Ask the
+            # same teacher for an action again against the unchanged state.
+            if knowledge_result.get("status") != "accepted":
+                break
+            actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
+            decision = teacher.rank(
+                policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys),
+                actions,
+                on_update=send_teacher_update,
+            )
+        if knowledge_results and isinstance(decision, dict):
+            decision["knowledge_results"] = knowledge_results
     elif policy is None:
         decision = None
     elif candidate_assist_allowed(message, policy.screens):
@@ -3484,6 +3792,7 @@ def ask_action(
             # result first so the Overlay can show the actual selected action
             # instead of leaving the Model/Action panel blank.
             send_model_update(automatic_decision, auto_execute=True)
+        time.sleep(AUTOMATIC_ACTION_DELAY_SECONDS)
         return str(automatic["command"]), automatic, automatic_decision
     while True:
         packet = {
@@ -3728,6 +4037,7 @@ def main() -> int:
                             visited_shop_rooms=visited_shop_rooms,
                             action_history=action_history,
                             declined_card_reward_keys=declined_card_reward_keys,
+                            config=config,
                         )
                         if result is None:
                             return 0
@@ -4191,6 +4501,7 @@ def main() -> int:
                     visited_shop_rooms=visited_shop_rooms,
                     action_history=action_history,
                     declined_card_reward_keys=declined_card_reward_keys,
+                    config=config,
                 )
                 if result is None:
                     return 0

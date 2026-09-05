@@ -22,5 +22,9 @@
   },
   "prompt_evolution": {
     "enabled": false
+  },
+  "knowledge_experience": {
+    "enabled": true,
+    "request_style": "encouraged"
   }
 }

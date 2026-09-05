@@ -212,7 +212,29 @@ def fetch_all(files: tuple[str, ...]) -> dict[str, Any]:
         }
         for future in as_completed(futures):
             relative_path = futures[future]
-            payloads[relative_path] = normalized_payload(relative_path, future.result())
+            payload = normalized_payload(relative_path, future.result())
+            # Experience is local, human-audited data. Preserve it by stable
+            # entity ID/name when refreshing the upstream snapshot.
+            existing_path = output_path(relative_path)
+            try:
+                existing_payload = json.loads(existing_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing_payload = None
+            old_entities = existing_payload.get(Path(relative_path).stem, existing_payload) if isinstance(existing_payload, dict) else existing_payload
+            new_entities = payload.get(Path(relative_path).stem, payload) if isinstance(payload, dict) else payload
+            if isinstance(old_entities, list) and isinstance(new_entities, list):
+                experiences = {
+                    str(item.get("id") or item.get("name") or "").strip().upper(): item.get("experience")
+                    for item in old_entities
+                    if isinstance(item, dict) and isinstance(item.get("experience"), list)
+                }
+                for item in new_entities:
+                    if not isinstance(item, dict):
+                        continue
+                    old = experiences.get(str(item.get("id") or item.get("name") or "").strip().upper())
+                    if old:
+                        item["experience"] = old[:3]
+            payloads[relative_path] = payload
     return payloads
 
 

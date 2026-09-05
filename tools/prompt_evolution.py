@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,43 @@ def _compact_skill(value: Any, limit: int) -> str:
     if len(text) > limit:
         raise PromptEvolutionError(f"candidate instruction exceeds configured {limit} characters")
     return text
+
+
+def skill_text_segments(previous: Any, candidate: Any) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return complete original/candidate text split into change-aware spans.
+
+    The first list is for the original skill and marks removed text as
+    ``removed``. The second is for the candidate and marks added text as
+    ``added``. Character-level matching keeps the surrounding sentence
+    readable when a teacher revises only a phrase in a Chinese skill.
+    """
+
+    before = str(previous or "").strip()
+    after = str(candidate or "").strip()
+
+    def append(segments: list[tuple[str, str]], text: str, kind: str) -> None:
+        if not text:
+            return
+        if segments and segments[-1][1] == kind:
+            segments[-1] = (segments[-1][0] + text, kind)
+        else:
+            segments.append((text, kind))
+
+    original: list[tuple[str, str]] = []
+    revised: list[tuple[str, str]] = []
+    matcher = SequenceMatcher(a=before, b=after, autojunk=False)
+    for opcode, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if opcode == "equal":
+            append(original, before[old_start:old_end], "unchanged")
+            append(revised, after[new_start:new_end], "unchanged")
+        elif opcode == "delete":
+            append(original, before[old_start:old_end], "removed")
+        elif opcode == "insert":
+            append(revised, after[new_start:new_end], "added")
+        elif opcode == "replace":
+            append(original, before[old_start:old_end], "removed")
+            append(revised, after[new_start:new_end], "added")
+    return original, revised
 
 
 def _extract_object(text: str) -> dict[str, Any]:
@@ -171,6 +209,121 @@ def _public_decision(value: Any) -> dict[str, Any]:
     return result
 
 
+def _analysis_state(value: Any, *, include_inventory: bool) -> dict[str, Any]:
+    """Make a compact review snapshot while retaining decision-critical dynamics."""
+
+    if not isinstance(value, dict):
+        return {}
+    result = dict(value)
+    # The map is a large route graph and the static Boss preview is not useful
+    # for post-run skill attribution. Both are already available to the live
+    # action model and are intentionally excluded from this teacher request.
+    result.pop("map", None)
+    result.pop("act_boss_profile", None)
+    if not include_inventory:
+        for key in ("deck", "relics", "potions"):
+            result.pop(key, None)
+    combat = result.get("combat")
+    if isinstance(combat, dict):
+        combat = dict(combat)
+        monsters = combat.get("monsters")
+        if isinstance(monsters, list):
+            compact_monsters = []
+            for monster in monsters:
+                if not isinstance(monster, dict):
+                    continue
+                compact_monster = dict(monster)
+                # Static move tables are not needed to judge an executed step;
+                # live HP, intent, damage, and Powers remain in the snapshot.
+                compact_monster.pop("knowledge", None)
+                compact_monsters.append(compact_monster)
+            combat["monsters"] = compact_monsters
+        result["combat"] = combat
+    return result
+
+
+def compact_analysis_ledger(ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce one Act's ledger to the public facts needed for skill review.
+
+    The full ledger remains on disk. This representation is only the payload
+    sent to the remote reviewer, so environment/controller actions are a
+    one-line boundary marker and unchanged inventory is not repeated at every
+    step.
+    """
+
+    result: list[dict[str, Any]] = []
+    previous_inventory: str | None = None
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        state = item.get("state") if isinstance(item.get("state"), dict) else {}
+        inventory = {key: state.get(key) for key in ("deck", "relics", "potions")}
+        inventory_key = json.dumps(inventory, ensure_ascii=False, sort_keys=True, default=str)
+        source = str(item.get("source") or "environment_auto")
+        compact: dict[str, Any] = {
+            "step_id": item.get("step_id"),
+            "act": state.get("act"),
+            "floor": state.get("floor"),
+            "screen_type": item.get("screen_type"),
+            "screen_after": item.get("screen_after"),
+            "source": source,
+        }
+        if source not in ACTION_SOURCES:
+            compact["action"] = compact_text(item.get("action") or "自动推进", 120)
+            compact["auto"] = True
+            result.append(compact)
+            continue
+        compact.update(
+            {
+                "action": compact_text(item.get("action"), 180),
+                "action_detail": item.get("action_detail", {}),
+                "command": compact_text(item.get("command"), 160),
+                "legal_actions": [
+                    {
+                        key: value
+                        for key, value in _public_action(action).items()
+                        if key in {"id", "kind", "label", "command", "target", "card_index", "slot", "index"}
+                    }
+                    for action in item.get("legal_actions", [])
+                    if isinstance(action, dict)
+                ],
+                "decision": _public_decision(item.get("decision")),
+                "state": _analysis_state(state, include_inventory=inventory_key != previous_inventory),
+            }
+        )
+        state_after = item.get("state_after")
+        if isinstance(state_after, dict) and (item.get("terminal") or item.get("screen_after") != item.get("screen_type")):
+            compact["state_after"] = _analysis_state(state_after, include_inventory=True)
+        elif item.get("state_after_ref") is not None:
+            compact["state_after_ref"] = item.get("state_after_ref")
+        if item.get("terminal"):
+            compact["terminal"] = True
+        result.append(compact)
+        previous_inventory = inventory_key
+    return result
+
+
+def split_ledger_by_act(ledger: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group an audit ledger into Act-sized teacher analysis segments."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        state = item.get("state") if isinstance(item.get("state"), dict) else {}
+        raw_act = state.get("act")
+        if raw_act is None and isinstance(item.get("state_after"), dict):
+            raw_act = item["state_after"].get("act")
+        act = str(raw_act if raw_act is not None else "unknown")
+        if act not in grouped:
+            grouped[act] = []
+            order.append(act)
+        grouped[act].append(item)
+    order.sort(key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
+    return [(act, compact_analysis_ledger(grouped[act])) for act in order]
+
+
 def trace_ledger(trace_path: Path) -> list[dict[str, Any]]:
     """Return a detailed, bounded public ledger for evolution analysis."""
 
@@ -261,7 +414,13 @@ class PromptEvolutionManager:
         self.stage = "等待开始游戏"
         self.current_role = "-"
         self.last_input_chars = 0
+        self.last_input_original_chars = 0
         self.last_input_truncated = False
+        # Review one Act at a time so a long run never becomes one oversized
+        # teacher request. The full ledger remains available on disk.
+        self.pending_analysis_segments: list[tuple[str, list[dict[str, Any]]]] = []
+        self.current_analysis_act: str | None = None
+        self.current_analysis_ledger: list[dict[str, Any]] | None = None
         # The run's selected character is not known until START, so its
         # isolated prompt library is loaded by begin_run instead of __init__.
 
@@ -411,17 +570,35 @@ class PromptEvolutionManager:
             "candidate_id": (self.candidate or {}).get("candidate_id") if isinstance(self.candidate, dict) else None,
             "target_skill": (self.candidate or {}).get("target_skill") if isinstance(self.candidate, dict) else None,
             "revision": self.revision_count,
+            "analysis_act": self.current_analysis_act or "-",
+            "pending_analysis_acts": [act for act, _ledger in self.pending_analysis_segments],
             "analysis_input_chars": self.last_input_chars,
+            "analysis_input_original_chars": self.last_input_original_chars,
             "analysis_input_limit_chars": self.max_analysis_input_chars,
             "analysis_input_truncated": self.last_input_truncated,
             "error": self.last_error,
         }
 
-    def system_prompt(self, observation: dict[str, Any]) -> tuple[str, str]:
+    def system_prompt(
+        self,
+        observation: dict[str, Any],
+        *,
+        allow_knowledge_request: bool = False,
+        knowledge_request_style: str = "encouraged",
+    ) -> tuple[str, str]:
         """Compose the player prompt from the active role and scene skills."""
 
         if not self.enabled:
-            return build_system_prompt(observation, character=self.character, persona="player"), BASE_PROMPT_VERSION
+            return (
+                build_system_prompt(
+                    observation,
+                    character=self.character,
+                    persona="player",
+                    allow_knowledge_request=allow_knowledge_request,
+                    knowledge_request_style=knowledge_request_style,
+                ),
+                BASE_PROMPT_VERSION,
+            )
         role_skill, scene_skills = self._effective_skills(self.current_policy)
         return (
             build_system_prompt(
@@ -430,6 +607,8 @@ class PromptEvolutionManager:
                 persona="player",
                 role_skill=role_skill,
                 scene_skill=scene_skills.get(scenario_key(observation), ""),
+                allow_knowledge_request=allow_knowledge_request,
+                knowledge_request_style=knowledge_request_style,
             ),
             f"{PROMPT_VERSION}:{self.current_policy_id}",
         )
@@ -438,14 +617,18 @@ class PromptEvolutionManager:
         self,
         run: dict[str, Any],
         *,
+        analysis_ledger: list[dict[str, Any]] | None = None,
+        analysis_act: str | None = None,
         rejected_candidate: dict[str, Any] | None = None,
         rejection_reason: str = "",
     ) -> list[dict[str, str]]:
         keys = ", ".join(sorted(SKILL_KEYS))
         system = (
-            "你是《杀戮尖塔》单种子 Prompt 演化器。根据完整公开动作账本与终局结果，"
+            "你是《杀戮尖塔》Prompt 演化器。根据一个 Act 的公开动作账本与终局结果，"
             "提出一个可审核的、范围明确的 skill 修改。你不是行动模型，也不能写游戏命令、代码、"
-            "硬合法性限制或完整重写通用协议。只修改一个 role skill 或 scene skill；输出该 skill 的完整新文本，"
+            "硬合法性限制或完整重写通用协议。只修改一个 role skill 或 scene skill；输出该 skill 的完整新文本。"
+            "如果人工拒绝理由明确指出另一个场景，target_skill 可以切换到该场景；如果理由涉及多个问题，"
+            "只选择证据最充分的一个，本轮仍只改一个 skill。"
             "不能提及当前种子、具体楼层号、具体卡牌/敌人名称，除非其是通用机制示例。"
             "不要把一次终局结果平摊归因给所有动作；只引用账本中有清楚证据的 1-8 个步骤。"
             "账本中若出现 state_after_ref，表示动作后的状态与所指向下一步的 state 完全相同；只有状态变化或终局才会内联 state_after。"
@@ -456,34 +639,57 @@ class PromptEvolutionManager:
             "ROLE 是角色专属 skill；其他键是场景 skill；skill 将直接替换目标 skill 的当前版本。"
         )
         terminal_state = run.get("terminal_state") if isinstance(run.get("terminal_state"), dict) else {}
+        ledger = analysis_ledger if analysis_ledger is not None else run.get("analysis_ledger", run.get("ledger", []))
+        ledger = ledger if isinstance(ledger, list) else []
+        observed_scenes = {
+            scenario_key(item.get("state", {}))
+            for item in ledger
+            if isinstance(item, dict) and isinstance(item.get("state"), dict)
+        }
+        role_skill, scene_skills = self._effective_skills(run["policy"])
         source_counts: dict[str, int] = {}
-        for item in run.get("ledger", []):
+        for item in ledger:
             if isinstance(item, dict):
                 source = str(item.get("source") or "unknown")
                 source_counts[source] = source_counts.get(source, 0) + 1
+        first_state = next(
+            (item.get("state") for item in ledger if isinstance(item, dict) and isinstance(item.get("state"), dict)),
+            {},
+        )
         user = {
             "base_prompt_version": BASE_PROMPT_VERSION,
             "run_id": run.get("run_id"),
+            "analysis_scope": {
+                "act": analysis_act,
+                "accepted_steps": len(ledger),
+                "first_step_id": ledger[0].get("step_id") if ledger else None,
+                "last_step_id": ledger[-1].get("step_id") if ledger else None,
+            },
             "incumbent_policy": {
                 "version": run["policy"].get("version"),
-                "role_skill": self._effective_skills(run["policy"])[0],
-                "scene_skills": self._effective_skills(run["policy"])[1],
+                "role_skill": role_skill,
+                "scene_skills": {key: scene_skills[key] for key in sorted(observed_scenes) if key in scene_skills},
+                "available_skill_keys": sorted(SKILL_KEYS),
             },
             "run_config": {
                 key: run["run_config"].get(key)
-                for key in ("character", "ascension", "seed", "seed_source", "collection_mode")
+                for key in ("character", "ascension", "seed_source", "collection_mode")
                 if key in run["run_config"]
             },
             "terminal": terminal_summary(terminal_state),
-            "terminal_state": _posthoc_state_snapshot(terminal_state, {}),
             "metrics": run["metrics"],
             "trace_summary": {
-                "accepted_steps": len(run.get("ledger", [])),
+                "accepted_steps": len(ledger),
                 "action_sources": source_counts,
-                "first_step_id": run["ledger"][0].get("step_id") if run.get("ledger") else None,
-                "last_step_id": run["ledger"][-1].get("step_id") if run.get("ledger") else None,
+                "first_step_id": ledger[0].get("step_id") if ledger else None,
+                "last_step_id": ledger[-1].get("step_id") if ledger else None,
             },
-            "action_ledger": run["ledger"],
+            "act_context": {
+                "initial_deck": first_state.get("deck") if isinstance(first_state, dict) else [],
+                "initial_relics": first_state.get("relics") if isinstance(first_state, dict) else [],
+                "initial_potions": first_state.get("potions") if isinstance(first_state, dict) else [],
+            },
+            "action_ledger": ledger,
         }
         if rejected_candidate is not None:
             user["rejected_candidate"] = {
@@ -491,13 +697,45 @@ class PromptEvolutionManager:
                 for key in ("candidate_id", "target_skill", "skill", "instruction", "diagnosis", "expected_effect", "risk")
             }
             user["human_rejection_reason"] = rejection_reason
-            user["revision_requirement"] = "保留可取之处，但必须直接解决人工拒绝理由，仍只改一个 skill。"
+            user["revision_requirement"] = "保留可取之处，但必须直接解决人工拒绝理由；必要时切换 target_skill，仍只改一个 skill。"
         serialized = json.dumps(user, ensure_ascii=False, separators=(",", ":"), default=str)
+        self.last_input_original_chars = len(serialized)
         self.last_input_chars = len(serialized)
         self.last_input_truncated = self.max_analysis_input_chars > 0 and len(serialized) > self.max_analysis_input_chars
+        if self.last_input_truncated:
+            # Keep the fallback valid JSON. Prefix-cutting a JSON document can
+            # make the teacher request unparsable and is worse than explicitly
+            # omitting the least important tail of the Act ledger.
+            original_count = len(ledger)
+            shortened = list(ledger)
+            user["analysis_warning"] = "analysis payload exceeded the configured character limit; tail steps were omitted"
+            while shortened and len(serialized) > self.max_analysis_input_chars:
+                next_length = len(shortened) // 2
+                if next_length == 0:
+                    break
+                shortened = shortened[:next_length]
+                user["action_ledger"] = shortened
+                user["analysis_warning"] = (
+                    "analysis payload exceeded the configured character limit; "
+                    f"{original_count - len(shortened)} tail steps omitted"
+                )
+                serialized = json.dumps(user, ensure_ascii=False, separators=(",", ":"), default=str)
+            # A pathological single step or oversized skill should still
+            # produce a valid, auditable request rather than a malformed one.
+            if len(serialized) > self.max_analysis_input_chars:
+                minimal = {
+                    "analysis_scope": user.get("analysis_scope"),
+                    "terminal": user.get("terminal"),
+                    "metrics": user.get("metrics"),
+                    "incumbent_policy": {"version": user["incumbent_policy"].get("version"), "available_skill_keys": sorted(SKILL_KEYS)},
+                    "action_ledger": [],
+                    "analysis_warning": "analysis payload exceeded the configured character limit; ledger omitted",
+                }
+                serialized = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"), default=str)
+        self.last_input_chars = len(serialized)
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": serialized if not self.last_input_truncated else serialized[: self.max_analysis_input_chars] + "...<truncated>"},
+            {"role": "user", "content": serialized},
         ]
 
     def _next_candidate_id(self) -> str:
@@ -508,11 +746,15 @@ class PromptEvolutionManager:
         self,
         run: dict[str, Any],
         *,
+        analysis_ledger: list[dict[str, Any]] | None = None,
+        analysis_act: str | None = None,
         rejected_candidate: dict[str, Any] | None = None,
         rejection_reason: str = "",
     ) -> dict[str, Any]:
         messages = self._candidate_messages(
             run,
+            analysis_ledger=analysis_ledger,
+            analysis_act=analysis_act,
             rejected_candidate=rejected_candidate,
             rejection_reason=rejection_reason,
         )
@@ -538,7 +780,12 @@ class PromptEvolutionManager:
         evidence = value.get("evidence_step_ids")
         if not isinstance(evidence, list) or not evidence:
             raise PromptEvolutionError("teacher candidate must cite at least one evidence_step_id")
-        valid_steps = {item.get("step_id") for item in run["ledger"] if isinstance(item.get("step_id"), int)}
+        evidence_ledger = analysis_ledger if analysis_ledger is not None else run.get("analysis_ledger", run["ledger"])
+        valid_steps = {
+            item.get("step_id")
+            for item in evidence_ledger
+            if isinstance(item, dict) and isinstance(item.get("step_id"), int)
+        }
         evidence_ids = [item for item in evidence if isinstance(item, int) and item in valid_steps]
         if not evidence_ids:
             raise PromptEvolutionError("teacher candidate evidence_step_ids do not reference this run")
@@ -563,8 +810,10 @@ class PromptEvolutionManager:
             "expected_effect": compact_text(value.get("expected_effect"), 1000),
             "risk": compact_text(value.get("risk"), 1000),
             "analysis_input_chars": self.last_input_chars,
+            "analysis_input_original_chars": self.last_input_original_chars,
             "analysis_input_limit_chars": self.max_analysis_input_chars,
             "analysis_input_truncated": self.last_input_truncated,
+            "analysis_act": analysis_act,
             "teacher": {
                 "model_id": response["model_id"],
                 "prompt_version": response["prompt_version"],
@@ -577,6 +826,25 @@ class PromptEvolutionManager:
         self.last_error = None
         write_json(self.session_root / "candidates" / f"{candidate['candidate_id']}.json", candidate)
         return candidate
+
+    def _propose_next_segment_candidate(self, run: dict[str, Any]) -> dict[str, Any] | None:
+        """Pop the next Act segment and ask the teacher for one candidate."""
+
+        if not self.pending_analysis_segments:
+            self.current_analysis_act = None
+            self.current_analysis_ledger = None
+            return None
+        act, fallback_ledger = self.pending_analysis_segments.pop(0)
+        # After accepting an earlier Act candidate, use the latest validation
+        # run as the evidence source when that Act exists there. This keeps
+        # step ids and state transitions aligned with the incumbent being
+        # compared; the original segment is only a fallback for a run that
+        # ended before reaching the requested Act.
+        latest_segments = dict(split_ledger_by_act(run.get("ledger", [])))
+        ledger = latest_segments.get(act, fallback_ledger)
+        self.current_analysis_act = act
+        self.current_analysis_ledger = ledger
+        return self._propose_candidate(run, analysis_ledger=ledger, analysis_act=act)
 
     def complete_run(
         self,
@@ -605,6 +873,7 @@ class PromptEvolutionManager:
             "ledger": trace_ledger(trace_path),
             "completed_at_utc": now_utc(),
         }
+        run["analysis_acts"] = [act for act, _ledger in split_ledger_by_act(run["ledger"])]
         write_json(self.session_root / "runs" / f"{run_id}.json", run)
         if role == "incumbent":
             self.incumbent = run
@@ -616,7 +885,10 @@ class PromptEvolutionManager:
                 self._write_session_state({"status": "seed_unavailable", "error": message, "incumbent": run})
                 return {"kind": "proposal_error", "error": message}
             try:
-                self.candidate = self._propose_candidate(run)
+                self.pending_analysis_segments = split_ledger_by_act(run["ledger"])
+                self.candidate = self._propose_next_segment_candidate(run)
+                if self.candidate is None:
+                    raise PromptEvolutionError("incumbent trace has no accepted actions to analyze")
             except PromptEvolutionError as exc:
                 self._write_session_state({"status": "proposal_error", "error": str(exc), "incumbent": run})
                 self.stage = "候选 skill 生成失败"
@@ -724,7 +996,13 @@ class PromptEvolutionManager:
             rejected = self.candidate
             self.revision_count += 1
             try:
-                self.candidate = self._propose_candidate(self.incumbent, rejected_candidate=rejected, rejection_reason=reason)
+                self.candidate = self._propose_candidate(
+                    self.incumbent,
+                    analysis_ledger=self.current_analysis_ledger,
+                    analysis_act=self.current_analysis_act,
+                    rejected_candidate=rejected,
+                    rejection_reason=reason,
+                )
             except PromptEvolutionError as exc:
                 self.stage = "候选 skill 修订失败"
                 self._write_session_state({"status": "revision_error", "error": str(exc), "candidate": rejected})
@@ -752,7 +1030,11 @@ class PromptEvolutionManager:
                 self._write_session_state({"status": "accepted_paused", "active_version": self.active_version})
                 return {"kind": "accepted_paused", "version": self.active_version}
             try:
-                self.candidate = self._propose_candidate(self.incumbent)
+                self.candidate = self._propose_next_segment_candidate(self.incumbent)
+                if self.candidate is None:
+                    self.stage = f"已接受 {self.active_version}，本局各 Act 已分析完毕"
+                    self._write_session_state({"status": "accepted_paused", "active_version": self.active_version})
+                    return {"kind": "accepted_paused", "version": self.active_version}
             except PromptEvolutionError as exc:
                 self.stage = "已接受，但下一候选生成失败"
                 self._write_session_state({"status": "accepted_proposal_error", "error": str(exc), "active_version": self.active_version})
@@ -775,6 +1057,8 @@ class PromptEvolutionManager:
         try:
             self.candidate = self._propose_candidate(
                 self.incumbent,
+                analysis_ledger=self.current_analysis_ledger,
+                analysis_act=self.current_analysis_act,
                 rejected_candidate=rejected,
                 rejection_reason=reason,
             )

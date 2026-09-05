@@ -98,6 +98,9 @@ def card_effect(card: dict[str, Any]) -> dict[str, Any] | None:
         "upgrade_damage": upgrade.get("damage"),
         "upgrade_block": upgrade.get("block"),
         "upgrade_magic_number": upgrade.get("magic_number"),
+        "experience": entry.get("experience", []),
     }
     effect["upgrade"] = {key: value for key, value in effect["upgrade"].items() if value is not None}
+    if not isinstance(effect.get("experience"), list) or not effect["experience"]:
+        effect.pop("experience", None)
     return {key: value for key, value in effect.items() if value is not None}

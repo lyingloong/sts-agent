@@ -154,7 +154,7 @@ class TrainSftTests(unittest.TestCase):
         )
         self.assertEqual(routed["combat"]["hand"][0]["id"], "Strike_R")
         self.assertNotIn("map", routed)
-        self.assertNotIn("deck", routed)
+        self.assertEqual(routed["deck"][0]["id"], "Strike_R")
         self.assertNotIn("screen_state", routed)
 
     def test_split_is_by_run_and_deterministic(self) -> None:

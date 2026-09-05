@@ -4,14 +4,22 @@
 
 ## 配置归属
 
-配置加载器以 `tools/agent_config.py` 的默认值为基线，对所选 JSON 做严格稀疏合并。推荐按模式使用 `config/modes/*.json`，每次启动 controller、Overlay、终端时传入同一个 `--config`；这样一个模式只维护自己的开关与关键参数。`config/agent.json` 仍保留，用于兼容不带参数的旧命令。
+配置加载器以 `tools/agent_config.py` 的默认值为基线，对配置做严格稀疏合并。推荐直接编辑 `config/agent.json` 的 `active_mode`；各模式的覆盖写在同一个文件的 `mode_profiles` 下，因此 CommunicationMod 固定启动 controller 时不需要额外参数。`config/modes/*.json` 仍保留为兼容和独立实验入口。
 
 例如：
 
 ```powershell
-python tools\communication_controller.py --config config\modes\prompt_evolution.json
-python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
+python tools\communication_controller.py
+python tools\overlay_terminal.py
 ```
+
+单文件模式切换只需修改：
+
+```json
+"active_mode": "prompt_evolution"
+```
+
+可选值为 `manual`、`candidate_assist`、`teacher_sft`、`prompt_evolution`、`remote_inference`、`remote_online_rl`。切换后必须重启 controller；Overlay 也应重启以读取同一份配置。
 
 `policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 在所选模式配置中只设置一次。本机推理、远端固定推理、远端在线 RL 不会再从多个配置段重复读取同一 adapter。
 
@@ -55,7 +63,7 @@ python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
 
 | 字段 | 含义 |
 | --- | --- |
-| `<group>.enabled` | 是否启用该功能；`teacher` 与 `policy` 不能同时启用，`posthoc_feedback` 仅允许在线 RL。 |
+| `<group>.enabled` | 是否启用该功能；`teacher` 与 `policy` 不能同时启用，`posthoc_feedback` 仅允许在线 RL，`knowledge_experience` 需要启用 `teacher`。 |
 | `posthoc_feedback.mode` | `human`（默认，终局显示正/负人工反思框）或 `auto`（不请求人工输入，教师根据终局与完整动作账本自行做双向归因）。自动模式只适合探索，建议定期审计归因 artifact。 |
 | `<group>.base_url` / `<group>.model` | API 根地址与模型 ID。 |
 | `<group>.api_key_file` | 相对项目根目录的密钥文件，必须被 Git 忽略。 |
@@ -70,6 +78,17 @@ python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
 | `posthoc_feedback.max_applied_per_direction` | 本地校验后每个方向实际送入更新的最多步骤数。 |
 | `posthoc_feedback.min_confidence` | 接受教师归因步骤的最低置信度。 |
 
+### 实体经验知识库
+
+`knowledge_experience` 复用 `teacher` 的 API 配置，不是独立的游戏模式。教师在任意游戏决策中，若当前公开实体确实缺少依据，可以暂时返回知识请求；Overlay/终端收集人类回答后，DeepSeek 输出最多三条经验的完整替换列表，最后由人类审核。只有接受后才原子写入 `data/knowledge/sts1_*.json`，并立即回到同一状态重新请求动作。字段如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `knowledge_experience.enabled` | 开启教师动作流程中的带外知识请求与审核写库能力；关闭时教师只能返回动作。 |
+| `knowledge_experience.request_style` | `encouraged`（默认）：只要当前公开实体有不明白之处，就鼓励优先澄清而非猜测；`normal`：同样允许提问，但措辞更克制，优先使用已有状态与静态资料。 |
+| `max_entries_per_entity` | 每个实体经验上限，当前限制为 3。 |
+| `max_question_chars` / `max_answer_chars` | 单次模型问题与人类回答的最大字符数。 |
+
 ### Prompt 演化
 
 `prompt_evolution` 是固定角色、进阶和游戏种子的人工审核式策略迭代模式。它与 `policy`、`posthoc_feedback` 互斥，使用同一份 `teacher` USTC API：教师只提出一个场景或角色 skill 的小型替换，候选先经过一次“验证前审核”，人工批准后才在同一种子上重跑，验证结果再经过第二次人工审核。首次 incumbent 可以使用随机种子，观察到游戏返回的真实种子后才建立候选复跑锚点。只有接受验证结果才会写入当前角色目录下 Git 跟踪的 `prompts/characters/<角色>/versions/pNNNN.json` 并更新 manifest；候选、轨迹、拒绝理由和 session 状态写入被忽略的 `data/prompt_evolution/`。
@@ -80,7 +99,7 @@ python tools\overlay_terminal.py --config config\modes\prompt_evolution.json
 | `policy_dir` | 角色 Prompt 库的项目相对目录；运行时使用其下的 `<角色>/manifest.json` 和 `versions/`。 |
 | `output_dir` | 候选、重跑轨迹和审核状态的本地实验目录。 |
 | `max_skill_chars` | 单个场景补充策略的最大字符数；防止候选变成长篇新 prompt。 |
-| `max_analysis_input_chars` / `max_analysis_tokens` | 发送给 USTC 演化教师的动态动作账本字符上限和输出 token 上限；默认分别为 `900000` 和 `8192`。相邻步骤相同的动作后/动作前状态会用引用压缩；输入上限使用字符计数，避免把字符和模型 token 混淆；若仍超限，Prompt Evolution 面板会显示告警并弹窗。 |
+| `max_analysis_input_chars` / `max_analysis_tokens` | 发送给 USTC 演化教师的单个 Act 压缩动作账本字符上限和输出 token 上限；默认分别为 `900000` 和 `8192`。完整运行按 Act 分段逐次审核；自动推进、地图图结构、Boss 详细招式表、静态物品描述和未变化的卡组/遗物/药水不会重复发送。输入上限使用字符计数，避免把字符和模型 token 混淆；若仍超限，Prompt Evolution 面板会显示告警并弹窗。 |
 | `max_revisions_per_cycle` | 同一候选被拒绝后最多自动重写次数。 |
 | `auto_continue` | 接受验证结果后是否自动生成下一候选；即使开启，也会先停在下一次“验证前审核”，不会跳过人工批准。关闭则接受后暂停。 |
 

@@ -84,3 +84,16 @@ def power_description(power: dict[str, Any]) -> str | None:
             if entry is not None:
                 return str(entry["description"])
     return None
+
+
+def power_experience(power: dict[str, Any]) -> list[str]:
+    """Return at most three human-audited tips for an active Power."""
+    cache = _load()
+    keys = (normalize_power_key(power.get("id")), normalize_power_key(power.get("name")))
+    for source in (cache["powers"], cache["card_powers"]):
+        for key in keys:
+            entry = source.get(key)
+            values = entry.get("experience") if isinstance(entry, dict) else None
+            if isinstance(values, list):
+                return [str(value) for value in values[:3] if isinstance(value, str) and value.strip()]
+    return []

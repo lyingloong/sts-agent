@@ -1,112 +1,75 @@
 {
   "schema_version": 1,
-  "server": {
-    "host": "127.0.0.1",
-    "port": 8765
-  },
-  "policy": {
-    "enabled": false,
-    "runtime": "remote_online_rl",
-    "model": {
-      "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
-      "initial_adapter": "/data/wanghao/sts-agent/outputs/online_rl/posthoc-r001/versions/v000002",
-      "initial_policy_version": "rl-001",
-      "hub_endpoint": "https://huggingface.co"
+  "active_mode": "prompt_evolution",
+  "server": {"host": "127.0.0.1", "port": 8765},
+  "mode_profiles": {
+    "manual": {
+      "policy": {"enabled": false}, "teacher": {"enabled": false},
+      "posthoc_feedback": {"enabled": false}, "prompt_evolution": {"enabled": false},
+      "knowledge_experience": {"enabled": false}
     },
-    "request": {
-      "top_k": 3,
-      "response_timeout_seconds": 90.0,
-      "startup_timeout_seconds": 200.0,
-      "screens": ["ALL"]
+    "candidate_assist": {
+      "policy": {
+        "enabled": true, "runtime": "local",
+        "model": {"base": "models/base/Qwen3-0.6B", "initial_adapter": "", "initial_policy_version": "sft-v0"},
+        "confidence_auto": {"enabled": true, "min_probability": 0.85}
+      },
+      "teacher": {"enabled": false}, "posthoc_feedback": {"enabled": false},
+      "prompt_evolution": {"enabled": false}, "knowledge_experience": {"enabled": false}
     },
-    "local": {
-      "python": "auto"
-    },
-    "remote": {
-      "ssh_host": "linke84090",
-      "project_root": "/data/wanghao/sts-agent",
-      "python": ".venv/bin/python",
-      "online_rl_config": "config/online_rl.json",
-      "connect_timeout_seconds": 30.0,
-      "update_timeout_seconds": 1800.0,
-      "inference_gpu": {
-        "device": "auto",
-        "minimum_free_memory_mib": 6000
-      }
-    },
-    "development": {
-      "mock": false,
-      "debug": false
-    },
-    "confidence_auto": {
-      "enabled": false,
-      "min_probability": 0.85
-    }
-  },
-  "posthoc_feedback": {
-    "enabled": false,
-    "mode": "auto",
-    "base_url": "https://api.llm.ustc.edu.cn/",
-    "model": "deepseek-v4-pro",
-    "api_key_file": "ustc_api.txt",
-    "timeout_seconds": 180.0,
-    "max_retries": 3,
-    "retry_backoff_seconds": 5.0,
-    "retry_max_backoff_seconds": 30.0,
-    "temperature": 0.0,
-    "max_tokens": 2048,
-    "max_input_chars": 96000,
-    "max_reflection_chars": 4000,
-    "max_candidates_per_direction": 10,
-    "max_applied_per_direction": 8,
-    "min_confidence": 0.75
-  },
-  "prompt_evolution": {
-    "enabled": true,
-    "policy_dir": "prompts/characters",
-    "output_dir": "data/prompt_evolution",
-    "max_skill_chars": 2400,
-    "max_analysis_input_chars": 900000,
-    "max_analysis_tokens": 8192,
-    "max_revisions_per_cycle": 3,
-    "auto_continue": true
-  },
-  "teacher": {
-    "enabled": true,
-    "base_url": "https://api.llm.ustc.edu.cn/",
-    "model": "deepseek-v4-pro",
-    "api_key_file": "ustc_api.txt",
-    "timeout_seconds": 90.0,
-    "max_retries": 3,
-    "retry_backoff_seconds": 5.0,
-    "retry_max_backoff_seconds": 30.0,
-    "temperature": 0.0,
-    "max_tokens": 5200,
-    "max_input_chars": 32000,
-    "thinking": false,
-    "json_mode": true,
-    "streaming": false,
-    "screens": ["ALL"]
-  },
-  "overlay": {
-    "always_on_top": true,
-    "frameless": false,
-    "status": {
-      "geometry": "540x680+24+84",
-      "opacity": 0.96,
-      "divider_columns": 36
-    },
-    "control": {
-      "geometry": "500x440+580+84",
-      "opacity": 0.97
-    },
-    "online_rl": {
-      "geometry": "360x240+1090+84",
-      "opacity": 0.97
+    "teacher_sft": {
+      "policy": {"enabled": false},
+      "teacher": {
+        "enabled": true, "base_url": "https://api.llm.ustc.edu.cn/", "model": "deepseek-v4-pro",
+        "api_key_file": "ustc_api.txt", "thinking": false, "json_mode": true, "streaming": false,
+        "temperature": 0.0, "max_tokens": 5200, "max_retries": 3,
+        "retry_backoff_seconds": 5.0, "retry_max_backoff_seconds": 30.0
+      },
+      "posthoc_feedback": {"enabled": false}, "prompt_evolution": {"enabled": false},
+      "knowledge_experience": {"enabled": true, "request_style": "encouraged"}
     },
     "prompt_evolution": {
-      "geometry": "420x300+1090+340",
-      "opacity": 0.97
+      "policy": {"enabled": false},
+      "teacher": {
+        "enabled": true,
+        "base_url": "https://ws-1ha2dqzqhcry4uty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "model": "deepseek-v4-pro-0813", "api_key_file": "ali_api.txt", "thinking": false,
+        "json_mode": true, "streaming": false, "temperature": 0.0, "max_tokens": 5200,
+        "max_retries": 3, "retry_backoff_seconds": 5.0, "retry_max_backoff_seconds": 30.0
+      },
+      "posthoc_feedback": {"enabled": false},
+      "prompt_evolution": {
+        "enabled": true, "policy_dir": "prompts/characters", "output_dir": "data/prompt_evolution",
+        "max_skill_chars": 2400, "max_analysis_input_chars": 900000, "max_analysis_tokens": 8192,
+        "max_revisions_per_cycle": 3, "auto_continue": true
+      },
+      "knowledge_experience": {"enabled": true, "request_style": "encouraged"}
+    },
+    "remote_inference": {
+      "policy": {
+        "enabled": true, "runtime": "remote_inference",
+        "model": {"base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B", "initial_adapter": "", "initial_policy_version": "sft-v0"},
+        "confidence_auto": {"enabled": true, "min_probability": 0.85}
+      },
+      "teacher": {"enabled": false}, "posthoc_feedback": {"enabled": false},
+      "prompt_evolution": {"enabled": false}, "knowledge_experience": {"enabled": false}
+    },
+    "remote_online_rl": {
+      "policy": {
+        "enabled": true, "runtime": "remote_online_rl",
+        "model": {"base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B", "initial_adapter": "/data/wanghao/sts-agent/outputs/online_rl/posthoc-r001/versions/v000002", "initial_policy_version": "rl-001"},
+        "confidence_auto": {"enabled": false}
+      },
+      "teacher": {"enabled": false},
+      "posthoc_feedback": {"enabled": true, "mode": "auto", "base_url": "https://api.llm.ustc.edu.cn/", "model": "deepseek-v4-pro", "api_key_file": "ustc_api.txt"},
+      "prompt_evolution": {"enabled": false}, "knowledge_experience": {"enabled": false}
     }
+  },
+  "overlay": {
+    "always_on_top": true, "frameless": false,
+    "status": {"geometry": "540x680+24+84", "opacity": 0.96, "divider_columns": 36},
+    "control": {"geometry": "500x440+580+84", "opacity": 0.97},
+    "online_rl": {"geometry": "360x240+1090+84", "opacity": 0.97},
+    "prompt_evolution": {"geometry": "420x300+1090+340", "opacity": 0.97}
   }
 }

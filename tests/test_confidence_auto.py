@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
@@ -266,6 +267,73 @@ class ConfidenceAutoTests(unittest.TestCase):
             ["CHOOSE:index=1", "PROCEED"],
         )
 
+    def test_map_actions_filter_stale_potion_operations(self) -> None:
+        message = {
+            "in_game": True,
+            "available_commands": ["choose", "potion", "return"],
+            "game_state": {
+                "screen_type": "MAP",
+                "room_phase": "COMPLETE",
+                "choice_list": ["x=2", "使用药水", "x=3"],
+            },
+        }
+        actions = controller.semantic_actions(message)
+        leaked = [
+            {"id": "POTION_USE:slot=0", "command": "POTION USE 0", "kind": "potion_use"},
+            {"id": "A3", "command": "USE 0", "kind": "choose", "label": "使用药水"},
+        ]
+        self.assertEqual([action["id"] for action in actions], ["CHOOSE:index=0", "CHOOSE:index=2", "RETURN"])
+        self.assertTrue(all(controller.is_map_potion_action(action) for action in leaked))
+
+    def test_non_map_choice_screen_exposes_potion_operations(self) -> None:
+        message = {
+            "in_game": True,
+            "available_commands": ["choose", "potion"],
+            "game_state": {
+                "screen_type": "COMBAT_REWARD",
+                "room_phase": "COMPLETE",
+                "choice_list": ["potion", "card"],
+                "potions": [
+                    {
+                        "id": "AttackPotion",
+                        "name": "攻击药水",
+                        "requires_target": True,
+                        "can_use": True,
+                        "can_discard": True,
+                    },
+                    {"id": "BloodPotion", "name": "鲜血药水", "can_use": True, "can_discard": True},
+                    {"id": "SwiftPotion", "name": "迅捷药水", "can_use": True, "can_discard": True},
+                ],
+            },
+        }
+        actions = controller.semantic_actions(message)
+        self.assertEqual(
+            [action["id"] for action in actions],
+            [
+                "POTION_DISCARD:slot=0",
+                "POTION_USE:slot=1",
+                "POTION_DISCARD:slot=1",
+                "POTION_DISCARD:slot=2",
+                "CHOOSE:index=1",
+            ],
+        )
+        self.assertEqual(controller.parse_human_input("u 1", message)[0], "POTION USE 1")
+        self.assertEqual(controller.parse_human_input("d 0", message)[0], "POTION DISCARD 0")
+
+    def test_noncombat_potion_that_cannot_be_used_is_discard_only(self) -> None:
+        message = {
+            "in_game": True,
+            "available_commands": ["potion"],
+            "game_state": {
+                "screen_type": "EVENT",
+                "room_phase": "EVENT",
+                "potions": [{"id": "SwiftPotion", "name": "迅捷药水", "can_use": True, "can_discard": True}],
+            },
+        }
+        actions = controller.semantic_actions(message)
+        self.assertEqual([action["id"] for action in actions], ["POTION_DISCARD:slot=0"])
+        self.assertIsNone(controller.environment_auto_action(message, actions))
+
     def test_ectoplasm_masks_gold_reward_and_automation_skips_it(self) -> None:
         message = combat_reward_message()
         message["game_state"]["relics"] = [{"id": "Ectoplasm", "name": "灵体外质"}]
@@ -288,6 +356,14 @@ class ConfidenceAutoTests(unittest.TestCase):
         ]
         observation = controller.policy_observation(message, action_history=history)
         self.assertEqual(observation["act_boss_profile"]["id"], "HEXAGHOST")
+        self.assertIn("strategy", observation["act_boss_profile"])
+        strategy = observation["act_boss_profile"]["strategy"]
+        self.assertIn("长线输出", strategy)
+        self.assertIn("尽快结束战斗", strategy)
+        self.assertGreater(len(strategy), 100)
+        self.assertNotIn("moves", observation["act_boss_profile"])
+        strike = next(item for item in observation["deck"] if item["id"] == "Strike_R")
+        self.assertEqual(strike["count"], 2)
         choker = next(item for item in observation["decision_constraints"] if item["kind"] == "CARD_PLAY_LIMIT")
         self.assertEqual(choker["plays_remaining_this_turn"], 4)
 
@@ -328,6 +404,16 @@ class ConfidenceAutoTests(unittest.TestCase):
         assert decision is not None
         self.assertEqual(decision["source"], "environment_auto")
         self.assertEqual(decision["environment"]["rule"], "shop_open_merchant")
+
+    def test_automatic_action_waits_briefly_before_command(self) -> None:
+        with patch.object(controller.time, "sleep") as sleep:
+            command, action, decision = controller.ask_action(
+                NoBridge(), shop_room_message(), "run-1", policy=FakePolicy({})
+            )
+        self.assertEqual(command, "CHOOSE 0")
+        self.assertEqual(action["kind"], "choose")
+        self.assertIsNotNone(decision)
+        sleep.assert_called_once_with(controller.AUTOMATIC_ACTION_DELAY_SECONDS)
 
     def test_single_shop_continue_is_auto_executed_without_policy(self) -> None:
         policy = FakePolicy({})

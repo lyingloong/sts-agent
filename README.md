@@ -11,6 +11,7 @@
 - 支持人工终端、透明 Overlay、Qwen Candidate Assist/置信度自动执行，以及 OpenAI 兼容远程教师采集。
 - 轨迹按局保存；教师 SFT 导出只接受稳定、合法且 `source=teacher_auto` 的动作。
 - `data/knowledge/` 是受 Git 跟踪的 StS1 静态知识快照；轨迹、数据集、模型和运行时文件均不提交。
+- 支持实体经验知识闭环：开启 `knowledge_experience` 后，动作教师可在游戏过程中请求当前公开卡牌、药水、遗物、怪物、事件或 Power 的解释，由人类回答、DeepSeek 整理并审核后写回对应实体，最多保留三条；审核后在同一状态继续决策。
 
 `tools/train_sft.py` 已实现第一版 SFT；远程固定 adapter 推理和单 GPU、K=4 的 episode-level 在线更新已实现。固定种子自动评测仍待实现。训练逻辑不放入 `communication_controller.py`。
 
@@ -18,7 +19,7 @@
 
 ### 本地采集
 
-1. 在 CommunicationMod 的 `config.properties` 设置 controller：
+1. 在 CommunicationMod 的 `config.properties` 设置 controller（默认读取 `config/agent.json`）：
 
 ```properties
 command=D\:/miniconda3/python.exe D\:/Code/spire-mod/sts-agent/tools/communication_controller.py
@@ -26,22 +27,16 @@ runAtGameStart=true
 maxInitializationTimeout=300
 ```
 
-要使用某个模式，把配置参数同时加到 controller 和客户端命令，例如：
-
-```properties
-command=D\:/miniconda3/python.exe D\:/Code/spire-mod/sts-agent/tools/communication_controller.py --config D\:/Code/spire-mod/sts-agent/config/modes/candidate_assist.json
-```
-
 2. 启动游戏后运行一个控制客户端：
 
 ```powershell
-python tools\overlay_terminal.py --config config\modes\candidate_assist.json
-# 或 python tools\human_terminal.py --config config\modes\candidate_assist.json
+python tools\overlay_terminal.py
+# 或 python tools\human_terminal.py
 ```
 
 3. 在主菜单输入 `s [character] [ascension] [seed]`，例如 `s IRONCLAD 0 4QTKQ7VBMFX47`；Prompt Evolution 模式首次也可以省略 seed，让游戏生成随机种子。游戏内输入 `h` 查看动作帮助。
 
-`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。新实验建议从 [config/modes](config/modes/README.md) 选择模式，并让 controller 与客户端使用同一个 `--config`；不带参数时仍读取 [config/agent.json](config/agent.json)。完整字段说明和远端在线 RL 配置归属见[配置指南](config/README.md)。API 密钥只放在被忽略的 `*_api.txt` 文件中。
+`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。默认模式由 [config/agent.json](config/agent.json) 的 `active_mode` 决定，切换模式后需要重启游戏/controller 和控制客户端。旧的 `--config config/modes/*.json` 用法仍兼容。完整字段说明和远端在线 RL 配置归属见[配置指南](config/README.md)。API 密钥只放在被忽略的 `*_api.txt` 文件中。
 
 ### 导出与迁移训练数据
 
@@ -80,6 +75,7 @@ tools/                  controller、知识库、导出与客户端工具
 - [远程推理与单 GPU 在线 RL](doc/REMOTE_ONLINE_RL.md)
 - [固定种子 Prompt 演化](doc/PROMPT_EVOLUTION.md)
 - [按模式运行配置](config/modes/README.md)
+- [实体经验知识库](doc/KNOWLEDGE_EXPERIENCE.md)
 - [终局人类反思归因 GRPO](doc/POSTHOC_ATTRIBUTION_GRPO.md)
 - [数据目录和保留策略](data/README.md)
 

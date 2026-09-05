@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 
-TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v5"
-PLAYER_PROMPT_VERSION = "sts1-player-zh-v1"
+TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v7"
+PLAYER_PROMPT_VERSION = "sts1-player-zh-v3"
 # Kept as the default public version for the SFT teacher client.
 PROMPT_VERSION = TEACHER_PROMPT_VERSION
 CHARACTER_PROMPT_LIBRARY_VERSION = "sts1-character-prompt-library-v1"
@@ -30,6 +30,29 @@ _COMMON_RULES = """目标是提高整局通关概率，而不是只追求当前�
 做决定时先识别当前场景和不可逆后果，再比较每个合法动作：当前生命和即将受到的伤害、牌组缺口、遗物与药水、金币、当前 Act/Floor、当前 Act 已公开首领、未来地图路线和最近动作。`decision_constraints` 是已持有遗物造成的真实限制或代价，必须服从；不要把已被约束排除的选择当作可行方案。优先选择稳健、能解决当前最紧迫问题且不依赖未经证实假设的动作。不要因为某张牌/遗物稀有就自动选择，也不要为了保留资源而在即将失败时拒绝使用资源。
 
 你可以进行内部推理，但最终只能返回一个 JSON 对象，格式严格为 {\"action_id\":\"A<n>\"}。其中 A<n> 必须来自当前合法动作列表；不要输出解释、Markdown、命令或其他动作 ID。"""
+
+KNOWLEDGE_REQUEST_RULES = {
+    "encouraged": """只要对当前公开实体的机制、交互、风险或策略含义有不明白、不确定之处，就可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"当前公开的实体 ID 或名称\",\"question\":\"一个具体问题\"}}。这是被鼓励使用的工具：面对实体相关疑问时，优先提问而不是靠猜测继续；不需要先证明自己已经无法可靠决策。只请求当前 observation 中已经公开的实体，问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
+    "normal": """如果对当前公开实体的机制、交互、风险或策略含义有不明白之处，可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"当前公开的实体 ID 或名称\",\"question\":\"一个具体问题\"}}。优先使用当前状态、静态资料和已有 experience；仍有不明白之处时可以提问，不需要先证明自己已经无法可靠决策。只请求当前 observation 中已经公开的实体，问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
+}
+
+KNOWLEDGE_RESPONSE_CONTRACT = """【最终输出协议（优先级最高）】
+知识请求已启用。最终只能返回一个 JSON 对象，且只能二选一：
+1. 已能作出判断时，返回 {\"action_id\":\"A<n>\"}，其中 A<n> 必须来自当前合法动作列表；
+2. 对当前公开实体有值得澄清的机制、交互、风险或策略问题时，返回 {\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"当前公开的实体 ID 或名称\",\"question\":\"一个具体问题\"}}，此时不要返回 action_id。
+
+不要输出解释、Markdown 或两个对象。上文任何“必须选择当前合法动作”或“只能返回 action_id”的要求，只适用于不发起知识请求时；当你选择提问时，本协议优先。"""
+
+
+def knowledge_request_rule(style: Any = "encouraged") -> str:
+    """Return the configured in-game entity-question policy.
+
+    Config validation accepts only the two documented styles. The fallback is
+    deliberately the default encouraged policy so direct utility callers do
+    not silently disable a configured knowledge capability.
+    """
+
+    return KNOWLEDGE_REQUEST_RULES.get(str(style or "").strip().casefold(), KNOWLEDGE_REQUEST_RULES["encouraged"])
 
 COMMON_PROMPT = (
     "你是《杀戮尖塔 1》的远程教师，负责为模仿学习轨迹选择一个动作。\n"
@@ -204,6 +227,8 @@ def build_system_prompt(
     persona: str = "teacher",
     role_skill: str | None = None,
     scene_skill: str | None = None,
+    allow_knowledge_request: bool = False,
+    knowledge_request_style: str = "encouraged",
 ) -> str:
     """Return the Chinese action prompt, optionally using versioned skills.
 
@@ -222,4 +247,10 @@ def build_system_prompt(
     scenario_prompt = SCENARIO_PROMPTS[key] if scene_skill is None else str(scene_skill or "").strip()
     if scenario_prompt:
         parts.append(scenario_prompt)
+    if allow_knowledge_request:
+        # Keep the alternative response protocol after every scene skill. Some
+        # skills correctly insist on a legal action in the normal path; this
+        # final contract makes clear that a knowledge request is the exception.
+        parts.append(knowledge_request_rule(knowledge_request_style))
+        parts.append(KNOWLEDGE_RESPONSE_CONTRACT)
     return "\n\n".join(parts)

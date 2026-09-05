@@ -12,6 +12,12 @@ from typing import Any
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": 1,
+    # ``agent.json`` can select one of the inline mode profiles below. These
+    # metadata fields are ignored by the runtime after loading, but retained
+    # in the returned config for diagnostics. Legacy mode files simply omit
+    # them and continue to work as sparse overrides.
+    "active_mode": "manual",
+    "mode_profiles": {},
     "server": {
         "host": "127.0.0.1",
         "port": 8765,
@@ -105,6 +111,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_revisions_per_cycle": 3,
         "auto_continue": True,
     },
+    "knowledge_experience": {
+        "enabled": False,
+        # Both styles allow an entity question whenever something is unclear;
+        # ``encouraged`` more actively prefers asking over guessing.
+        "request_style": "encouraged",
+        "max_entries_per_entity": 3,
+        "max_question_chars": 2000,
+        "max_answer_chars": 6000,
+    },
     "overlay": {
         "always_on_top": True,
         "frameless": False,
@@ -129,6 +144,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 WINDOW_GEOMETRY_PATTERN = re.compile(r"^\d+x\d+[+-]\d+[+-]\d+$")
+MODE_NAMES = frozenset({
+    "manual",
+    "candidate_assist",
+    "teacher_sft",
+    "prompt_evolution",
+    "remote_inference",
+    "remote_online_rl",
+})
 
 
 class ConfigError(ValueError):
@@ -187,11 +210,29 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     """Validate a merged config and return it for convenient composition."""
     if config.get("schema_version") != 1:
         raise ConfigError("schema_version must be 1")
+    active_mode = config.get("active_mode", "manual")
+    if not isinstance(active_mode, str) or active_mode not in MODE_NAMES:
+        raise ConfigError(f"active_mode must be one of: {', '.join(sorted(MODE_NAMES))}")
+    profiles = config.get("mode_profiles", {})
+    if not isinstance(profiles, dict):
+        raise ConfigError("mode_profiles must be an object")
+    runtime_defaults = {
+        key: value
+        for key, value in DEFAULT_CONFIG.items()
+        if key not in {"active_mode", "mode_profiles"}
+    }
+    for name, profile in profiles.items():
+        if name not in MODE_NAMES:
+            raise ConfigError(f"unknown mode profile: {name}")
+        if not isinstance(profile, dict):
+            raise ConfigError(f"mode_profiles.{name} must be an object")
+        _merge(runtime_defaults, profile, f"mode_profiles.{name}")
     server = config["server"]
     policy = config["policy"]
     teacher = config["teacher"]
     posthoc = config["posthoc_feedback"]
     evolution = config["prompt_evolution"]
+    knowledge = config["knowledge_experience"]
     model = policy["model"]
     request = policy["request"]
     local = policy["local"]
@@ -354,6 +395,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if posthoc["enabled"]:
             raise ConfigError("prompt_evolution.enabled requires posthoc_feedback.enabled=false")
 
+    _require_bool(knowledge["enabled"], "knowledge_experience.enabled")
+    if not isinstance(knowledge["request_style"], str) or knowledge["request_style"] not in {"encouraged", "normal"}:
+        raise ConfigError("knowledge_experience.request_style must be 'encouraged' or 'normal'")
+    for key, minimum, maximum in (("max_entries_per_entity", 1, 3), ("max_question_chars", 64, 12000), ("max_answer_chars", 128, 24000)):
+        value = knowledge[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ConfigError(f"knowledge_experience.{key} must be an integer from {minimum} to {maximum}")
+    if knowledge["enabled"] and not teacher["enabled"]:
+        raise ConfigError("knowledge_experience.enabled requires teacher.enabled")
+
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")
     for name in ("status", "control", "online_rl", "prompt_evolution"):
@@ -369,7 +420,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_agent_config(root: Path | None = None, config_file: str | Path | None = None) -> dict[str, Any]:
-    """Load the selected config with strict keys so typos cannot silently alter runs."""
+    """Load a legacy mode file or agent.json with an optional active profile."""
     path = config_path(root, config_file)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -381,4 +432,36 @@ def load_agent_config(root: Path | None = None, config_file: str | Path | None =
         raise ConfigError(f"invalid JSON in {path}: {exc.msg} (line {exc.lineno})") from exc
     if not isinstance(provided, dict):
         raise ConfigError(f"{path} must contain one JSON object")
-    return validate_config(_merge(DEFAULT_CONFIG, provided))
+    active_mode = provided.get("active_mode", "manual")
+    if not isinstance(active_mode, str) or active_mode not in MODE_NAMES:
+        raise ConfigError(f"active_mode must be one of: {', '.join(sorted(MODE_NAMES))}")
+    profiles = provided.get("mode_profiles", {})
+    if not isinstance(profiles, dict):
+        raise ConfigError("mode_profiles must be an object")
+
+    # Keep profile metadata out of the normal strict merge. A profile is a
+    # sparse runtime override, so its keys are checked against the same
+    # runtime defaults as a standalone config/modes/*.json file.
+    runtime_defaults = {
+        key: value
+        for key, value in DEFAULT_CONFIG.items()
+        if key not in {"active_mode", "mode_profiles"}
+    }
+    runtime_provided = {
+        key: value
+        for key, value in provided.items()
+        if key not in {"active_mode", "mode_profiles"}
+    }
+    merged = _merge(runtime_defaults, runtime_provided)
+    for name, profile in profiles.items():
+        if name not in MODE_NAMES:
+            raise ConfigError(f"unknown mode profile: {name}")
+        if not isinstance(profile, dict):
+            raise ConfigError(f"mode_profiles.{name} must be an object")
+        _merge(runtime_defaults, profile, f"mode_profiles.{name}")
+    selected = profiles.get(active_mode)
+    if selected is not None:
+        merged = _merge(merged, selected, f"mode_profiles.{active_mode}")
+    merged["active_mode"] = active_mode
+    merged["mode_profiles"] = copy.deepcopy(profiles)
+    return validate_config(merged)
