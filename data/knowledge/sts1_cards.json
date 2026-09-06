@@ -320,7 +320,11 @@
       "block": null,
       "magic_number": null,
       "description": "Deal 8 damage.\nAdd a copy of this card into your discard pile."
-    }
+    },
+    "experience": [
+      "选牌经验：作为0费攻击牌，前期（Act 1）可以作为不错的过渡战斗力；在中后期一般不选取。",
+      "战斗经验：使用后本次战斗卡组中愤怒的数量会变多，需要谨慎考虑是否使用。"
+    ]
   },
   {
     "id": "APOTHEOSIS",
@@ -349,7 +353,11 @@
       "block": null,
       "magic_number": null,
       "description": "Upgrade ALL your cards for the rest of combat.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：相当优质的一张卡牌，只有在牌组中升级牌比例很高时考虑不选取。",
+      "战斗经验：战斗中可以优先打出。"
+    ]
   },
   {
     "id": "ARMAMENTS",
@@ -378,7 +386,12 @@
       "block": null,
       "magic_number": null,
       "description": "Gain 5 Block.\nUpgrade all cards in your hand for the rest of combat."
-    }
+    },
+    "experience": [
+      "选牌经验：卡组中没有武装时，选取一张武装通常是不错的选择；一般不需要选取第二张武装牌。",
+      "战斗经验：一般可以优先打出武装以升级一些关键牌。",
+      "升级后的武装会产生质变，所以升级优先级很高。"
+    ]
   },
   {
     "id": "ASCENDERSBANE",
@@ -407,7 +420,10 @@
       "block": null,
       "magic_number": null,
       "description": "Unplayable.\nEthereal.\nCannot be removed from your deck."
-    }
+    },
+    "experience": [
+      "诅咒牌，不可删除，一般是高难度游戏中开局自带。"
+    ]
   },
   {
     "id": "AUTO_SHIELDS",
@@ -670,7 +686,11 @@
       "block": null,
       "magic_number": null,
       "description": "Block is not removed at the start of your turn."
-    }
+    },
+    "experience": [
+      "选牌经验：优质牌，但在卡组偏速攻的情况下不推荐选取；是“防御战士”流派的核心牌之一。",
+      "战斗经验：由于消耗的能量高，所以一般情况下在保证一定防御/格挡的前提下或在敌人的非攻击回合打出；打出此牌后，战斗中便可以考虑优先打出更多格挡牌。"
+    ]
   },
   {
     "id": "BASH",
@@ -699,7 +719,10 @@
       "block": null,
       "magic_number": "+1",
       "description": "Deal 10 damage.\nApply 3 Vulnerable."
-    }
+    },
+    "experience": [
+      "选牌经验：初始牌，质量一般。"
+    ]
   },
   {
     "id": "BATTLEHYMN",
@@ -757,7 +780,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Draw 4 cards.\nYou cannot draw additional cards this turn."
-    }
+    },
+    "experience": [
+      "选牌经验：优质牌，卡组抽牌能力较差时一般可以选取一张。",
+      "战斗经验：如果手牌中有其他可以抽牌的牌时需要先考虑是否要打出那些牌，没有的话优先打出本牌来大量抽牌是很好的选择。"
+    ]
   },
   {
     "id": "BEAM_CELL",
@@ -815,7 +842,12 @@
       "block": null,
       "magic_number": "-1",
       "description": "Gain 1 Vulnerable.\nAt the start of your turn, gain [R]."
-    }
+    },
+    "experience": [
+      "选牌经验：比较优质的牌，在卡组较缺能量时可以优先选取。",
+      "战斗经验：在确保不会因为打出本牌获得的易伤而掉很多血时可以使用；如果本回合很难防御住敌人的攻击，就需要谨慎考虑。",
+      "由于升级后只会获得一层易伤，所以应优先升级此牌。"
+    ]
   },
   {
     "id": "BIASED_COGNITION",
@@ -962,7 +994,10 @@
       "block": null,
       "magic_number": null,
       "description": "Apply 2 Weak to ALL enemies."
-    }
+    },
+    "experience": [
+      "战斗经验：优先对攻击伤害更高的/没有虚弱效果的敌人使用。"
+    ]
   },
   {
     "id": "BLIZZARD",
@@ -1020,7 +1055,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Lose 3 HP.\nGain [R] [R] [R]."
-    }
+    },
+    "experience": [
+      "选牌经验：优质的能量牌。",
+      "战斗经验：在缺少费用打出其他手牌时使用。"
+    ]
   },
   {
     "id": "BLOOD_FOR_BLOOD",
@@ -1049,7 +1088,11 @@
       "block": null,
       "magic_number": null,
       "description": "Costs 1 less [R]\nfor each time you lose HP this combat.\nDeal 22 damage."
-    }
+    },
+    "experience": [
+      "选牌经验：比较优质的过渡牌。",
+      "战斗经验：战斗中可以等此牌能量消耗变低后再使用。"
+    ]
   },
   {
     "id": "BLUDGEON",
@@ -1078,7 +1121,11 @@
       "block": null,
       "magic_number": null,
       "description": "Deal 42 damage."
-    }
+    },
+    "experience": [
+      "选牌经验：优质的过渡牌，高能量消耗、高攻击数值，在游戏前中期效果很好；在卡组中已经有好用的过渡攻击牌时谨慎选取。",
+      "战斗经验：尽量不要浪费此牌的伤害；如果有其他牌能够更好的利用能量，可以不打出此牌；3点能量消耗一般会导致缺少能量来防御，尽量不要因为贪图这张牌的攻击数值而承受大量伤害，但如果能通过这张牌迅速击杀敌人来减少受伤也可以。"
+    ]
   },
   {
     "id": "BLUR",
@@ -1136,7 +1183,12 @@
       "block": null,
       "magic_number": null,
       "description": "(Deals 0 damage.)"
-    }
+    },
+    "experience": [
+      "选牌经验：防御流派的核心卡牌之一，由于升级后不消耗能量，所以除了纯攻击流派，一般都可以选取一张。",
+      "战斗经验：回合内先叠加好格挡再使用该牌，一般可以将本牌留在回合最后使用。",
+      "由于升级后不消耗能量，所以优先考虑升级此牌。"
+    ]
   },
   {
     "id": "BOOTSEQUENCE",
@@ -1281,7 +1333,11 @@
       "block": null,
       "magic_number": null,
       "description": "Innate.\nAt the start of your turn, lose 1 HP and draw 1 card."
-    }
+    },
+    "experience": [
+      "选牌经验：在牌组中较缺抽牌时可以选取。",
+      "升级后只会增加固有效果（战斗开始时会出现在初始手牌），所以升级的优先级不高。"
+    ]
   },
   {
     "id": "BUFFER",
@@ -1397,7 +1453,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Exhaust 1 card.\nDraw 3 cards."
-    }
+    },
+    "experience": [
+      "选牌经验：在前中后期都有用的牌，既可以消耗劣质牌，又可以抽牌。",
+      "战斗经验：优先用此牌来消耗诅咒牌、状态牌等，其次是质量较低的牌，如初始的“打击”、“防御”等。"
+    ]
   },
   {
     "id": "BURST",
@@ -1542,7 +1602,12 @@
       "block": null,
       "magic_number": null,
       "description": "Ethereal.\nDeal 28 damage."
-    }
+    },
+    "experience": [
+      "选牌经验：很优质的过渡输出牌，在前中期都可以选取，后期卡组已经成型之后可以不选取。",
+      "战斗经验：在前中期卡组质量不高时尽量抽到就使用，避免因为虚无效果导致回合结束时自动消耗（在本次战斗中移除）。",
+      "升级数值提升很高，可以优先升级。"
+    ]
   },
   {
     "id": "CARVEREALITY",
@@ -1716,7 +1781,11 @@
       "block": null,
       "magic_number": "+2",
       "description": "Shuffle 5 random Skills into your draw pile. They cost 0 this combat.\nExhaust."
-    }
+    },
+    "experience": [
+      "选取经验：在卡组没成型或质量较差时，可以考虑此牌，有时会有很好的效果；但在卡组成型后，反而会污染卡组。",
+      "升级后加入5张随机技能牌太多，一般不升级。"
+    ]
   },
   {
     "id": "CLASH",
@@ -1745,7 +1814,11 @@
       "block": null,
       "magic_number": null,
       "description": "Can only be played if every card in your hand is an Attack.\nDeal 18 damage."
-    }
+    },
+    "experience": [
+      "选取经验：一般情况下不是优质牌，经常难以打出；在牌组中有可以消耗其他牌的牌时、或牌组中攻击牌的占比较高时可以考虑。",
+      "战斗经验：不能打出时，可以考虑消耗其他牌来创造打出的条件；不要为了打出本牌破坏出牌规划或者浪费其他优质牌等。"
+    ]
   },
   {
     "id": "CLEARTHEMIND",
@@ -1803,7 +1876,10 @@
       "block": null,
       "magic_number": null,
       "description": "Deal 11 damage to ALL enemies."
-    }
+    },
+    "experience": [
+      "选牌经验：在卡组缺少群攻手段时可以选取。"
+    ]
   },
   {
     "id": "CLOAK_AND_DAGGER",
@@ -1861,7 +1937,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Deal 14 damage.\nApply 3 Weak."
-    }
+    },
+    "experience": [
+      "选牌经验：不算优质，在卡组比较需要虚弱效果或者很缺少过渡输出牌时考虑选取。",
+      "战斗经验：施加虚弱可以降低敌人的伤害。"
+    ]
   },
   {
     "id": "CLUMSY",
@@ -1977,7 +2057,10 @@
       "block": null,
       "magic_number": "+2",
       "description": "At the end of your turn, lose 1 HP and deal 7 damage to ALL enemies."
-    }
+    },
+    "experience": [
+      "选牌经验：缺少群攻手段或缺少伤害输出时可以考虑选取；中后期一般不再选取（除非有卡牌“撕裂”）。"
+    ]
   },
   {
     "id": "COMPILE_DRIVER",
@@ -2296,7 +2379,12 @@
       "block": null,
       "magic_number": null,
       "description": "Skills cost 0.\nWhenever you play a Skill, Exhaust it."
-    }
+    },
+    "experience": [
+      "选取经验：这张牌比较特殊，但通常是相当优质的牌；在牌组中技能牌数量较多时价值较高。",
+      "战斗经验：需要仔细斟酌使用时机，避免因为大量技能牌被消耗导致战斗后期防御乏力（在精英和BOSS战斗中比较明显，因为战斗时间通常较长）。",
+      "不会改变消耗X能量的技能牌的耗能；打出此牌后，即使拥有混乱效果，技能牌耗能仍然为0；与卡牌“黑暗之拥”、卡牌“无惧疼痛”、遗物“枯木树枝”的配合很好。"
+    ]
   },
   {
     "id": "CREATIVE_AI",
@@ -2441,7 +2529,10 @@
       "block": null,
       "magic_number": null,
       "description": "Unplayable.\nCannot be removed from your deck."
-    }
+    },
+    "experience": [
+      "这张牌既不能在战斗外从牌组中删除，又不能在战斗内通过主动消耗等手段移除（在消耗这张牌时，它会返回手牌，所以有时需要消耗牌但又不想消耗其他牌时，可以消耗此牌）。"
+    ]
   },
   {
     "id": "CUTTHROUGHFATE",
@@ -2586,7 +2677,10 @@
       "block": null,
       "magic_number": null,
       "description": "Whenever a card is Exhausted,\ndraw 1 card."
-    }
+    },
+    "experience": [
+      "选牌经验：很优质的抽牌卡。"
+    ]
   },
   {
     "id": "DARK_SHACKLES",
@@ -2615,7 +2709,11 @@
       "block": null,
       "magic_number": "+6",
       "description": "Enemy loses 15 Strength this turn.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：比较优质的防御牌。",
+      "战斗经验：战斗中用来防御多段伤害效果很好，防御强力的单段伤害也不错。"
+    ]
   },
   {
     "id": "DASH",
@@ -2789,7 +2887,10 @@
       "block": null,
       "magic_number": "+1",
       "description": "Shuffle your discard pile into your draw pile.\nDraw 2 cards."
-    }
+    },
+    "experience": [
+      "选牌经验：比较优质的抽牌卡。"
+    ]
   },
   {
     "id": "DEFEND_B",
@@ -2913,7 +3014,10 @@
       "block": "+3",
       "magic_number": null,
       "description": "Gain 8 Block."
-    }
+    },
+    "experience": [
+      "初始牌，删除优先级低于打击。"
+    ]
   },
   {
     "id": "DEFLECT",
@@ -3000,7 +3104,10 @@
       "block": null,
       "magic_number": "+1",
       "description": "At the start of your turn, gain 3 Strength."
-    }
+    },
+    "experience": [
+      "选牌经验：比较优质的力量来源，但由于能量消耗高，如果卡组已经成型，便可以不考虑选取；很多时候，有一张恶魔形态，能在战斗中获得很高的伤害输出。"
+    ]
   },
   {
     "id": "DEUSEXMACHINA",
@@ -3145,7 +3252,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Enemy loses 3 Strength.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：较优质的防御牌，但不需要选很多张。",
+      "战斗经验：通常用来降低伤害较高的敌人的力量，一般在打出本牌后再根据敌人的伤害做防御。"
+    ]
   },
   {
     "id": "DISCOVERY",
@@ -3174,7 +3285,12 @@
       "block": null,
       "magic_number": null,
       "description": "Choose 1 of 3 random cards to add into your hand. It costs 0 this turn."
-    }
+    },
+    "experience": [
+      "选牌经验：优质牌，有时能帮助你反败为胜。",
+      "战斗经验：可以优先打出此牌来选取一张比较需要的优质牌。",
+      "升级会去掉消耗词条，在卡组质量较好时不需要升级，反之可以优先升级。"
+    ]
   },
   {
     "id": "DISTRACTION",
@@ -3348,7 +3464,12 @@
       "block": null,
       "magic_number": "+1",
       "description": "This turn, your next 2 Attacks are played twice."
-    }
+    },
+    "experience": [
+      "选牌经验：在牌组中有高质量攻击牌，并且能量足够在一回合打出双发和这种攻击牌时，效果较好。",
+      "战斗经验：如果本回合能量不支持在打出双发后再打出对应的至少一张攻击牌，则不要浪费能量打出双发。",
+      "如果双发的攻击牌是消耗X能量的牌，第二次打出的X数值和第一次相同；双发的升级优先级比较高。"
+    ]
   },
   {
     "id": "DOUBT",
@@ -3406,7 +3527,10 @@
       "block": null,
       "magic_number": null,
       "description": "Innate.\nDeal 12 damage to ALL enemies.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：在前期是比较优质的过渡攻击牌；一般不会在商店中购买。"
+    ]
   },
   {
     "id": "DROPKICK",
@@ -3435,7 +3559,11 @@
       "block": null,
       "magic_number": null,
       "description": "Deal 8 damage.\nIf the enemy has Vulnerable,\ngain [R] and\ndraw 1 card."
-    }
+    },
+    "experience": [
+      "选牌经验：在牌组有足够施加易伤的手段时，是优质牌。",
+      "战斗经验：一般在敌人有易伤时才打出。"
+    ]
   },
   {
     "id": "DUALCAST",
@@ -3493,7 +3621,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Choose an Attack or Power card. Add 2 copies of that card into your hand."
-    }
+    },
+    "experience": [
+      "选牌经验：不算优质牌，如果有适合复制的高质量攻击牌或能力牌，可以考虑选择。",
+      "双持复制的卡牌也需要消耗能量打出。"
+    ]
   },
   {
     "id": "ECHO_FORM",
@@ -3702,7 +3834,11 @@
       "block": null,
       "magic_number": null,
       "description": "Reduce the cost of all cards in your hand to 1 this combat."
-    }
+    },
+    "experience": [
+      "选牌经验：在卡组中有高能量消耗的牌时才考虑，这种牌越多，“开悟“的价值越高。",
+      "升级的优先级较高。"
+    ]
   },
   {
     "id": "ENTRENCH",
@@ -3731,7 +3867,12 @@
       "block": null,
       "magic_number": null,
       "description": "Double your Block."
-    }
+    },
+    "experience": [
+      "选牌经验：防御流派的核心卡牌之一，在牌组获得格挡的能力较强是比较优质。",
+      "战斗经验：尽量在其他格挡牌之后使用该牌。",
+      "升级的优先级高。"
+    ]
   },
   {
     "id": "ENVENOM",
@@ -3934,7 +4075,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Whenever you draw a Status card, draw 2 cards."
-    }
+    },
+    "experience": [
+      "选牌经验：卡组中没有时一般都可以选取一张，可以缓解其他牌产生状态牌的负面效果；对付一些会塞状态牌的敌人效果很好。",
+      "升级的优先级不高。"
+    ]
   },
   {
     "id": "EXHUME",
@@ -3963,7 +4108,11 @@
       "block": null,
       "magic_number": null,
       "description": "Put a card from your exhaust pile into your hand.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌规则：牌组中有值得重复使用的高质量卡牌时才考虑选取。",
+      "战斗经验：在已经消耗过优质卡牌后，才使用本牌将其放回手牌。"
+    ]
   },
   {
     "id": "EXPERTISE",
@@ -4081,7 +4230,11 @@
       "block": null,
       "magic_number": "+1",
       "description": "Deal 12 damage.\nIf Fatal, raise your Max HP by 4. Exhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：在游戏前中期是优质牌，到游戏后期（Act 3及之后）就用处不大了。",
+      "战斗经验：尽量利用好本牌的斩杀时效果，由于有消耗效果（打出后便从本次战斗中移除），在不能斩杀时，可以保留此牌不使用，等到能够斩杀时再使用。"
+    ]
   },
   {
     "id": "FEEL_NO_PAIN",
@@ -4110,7 +4263,10 @@
       "block": null,
       "magic_number": "+1",
       "description": "Whenever a card is Exhausted,\ngain 4 Block."
-    }
+    },
+    "experience": [
+      "选牌经验：优质牌。"
+    ]
   },
   {
     "id": "FIEND_FIRE",
@@ -4139,7 +4295,11 @@
       "block": null,
       "magic_number": null,
       "description": "Exhaust your hand.\nDeal 10 damage for each card Exhausted.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：如果牌组较小，谨慎选取此牌；此牌还对抽牌能力有一定要求。",
+      "战斗经验：小心使用此牌，避免消耗手中的关键牌，尽量在手牌中关键牌都打出后再使用。"
+    ]
   },
   {
     "id": "FINESSE",
@@ -4168,7 +4328,10 @@
       "block": "+2",
       "magic_number": null,
       "description": "Gain 4 Block.\nDraw 1 card."
-    }
+    },
+    "experience": [
+      "选牌经验：可以不消耗能量获得少量格挡，如果出现在卡牌奖励中还算比较优质，如果出现在商店中就需要斟酌要不要花费金币购买。"
+    ]
   },
   {
     "id": "FINISHER",
@@ -4226,7 +4389,10 @@
       "block": null,
       "magic_number": "+4",
       "description": "Whenever you draw a Status or Curse card, deal 10 damage to ALL enemies."
-    }
+    },
+    "experience": [
+      "选牌经验：前中期是比较优质的输出牌，如果牌组中有生成状态牌的手段，则价值更高。"
+    ]
   },
   {
     "id": "FISSION",
@@ -4284,7 +4450,11 @@
       "block": "+4",
       "magic_number": "+2",
       "description": "Gain 16 Block.\nWhenever you are attacked this turn, deal 6 damage back."
-    }
+    },
+    "experience": [
+      "选牌经验：比较优质的防御牌。",
+      "战斗经验：在敌人有多段攻击伤害时效果更好。"
+    ]
   },
   {
     "id": "FLASH_OF_STEEL",
@@ -4313,7 +4483,10 @@
       "block": null,
       "magic_number": null,
       "description": "Deal 6 damage.\nDraw 1 card."
-    }
+    },
+    "experience": [
+      "选牌经验：不消耗能量造成少量伤害，如果出现在卡牌奖励中，则算优质，如果出现在商店中，就需要考虑花费金币购买是否值得。"
+    ]
   },
   {
     "id": "FLECHETTES",
@@ -4371,7 +4544,12 @@
       "block": null,
       "magic_number": "+2",
       "description": "Gain 4 Strength.\nAt the end of this turn, lose 2 Strength."
-    }
+    },
+    "experience": [
+      "选牌经验：前期是还算可以的增加伤害的牌，和多段伤害配合更佳。",
+      "战斗经验：一般在打出攻击牌前使用本牌。",
+      "升级优先级较高。"
+    ]
   },
   {
     "id": "FLURRYOFBLOWS",
@@ -4603,7 +4781,11 @@
       "block": null,
       "magic_number": null,
       "description": "Put any number of cards from your hand to the bottom of your draw pile. They cost 0 until played."
-    }
+    },
+    "experience": [
+      "选牌经验：牌组缺能量时比较有用，但对抽牌能力要求比较高，相当于把抽牌能力转化为能量。",
+      "战斗经验：可以用来把费用较高的手牌或者本回合没有能量打出的手牌能量降低为0并放回抽牌堆。"
+    ]
   },
   {
     "id": "FTL",
@@ -4748,7 +4930,11 @@
       "block": null,
       "magic_number": null,
       "description": "Gain 1 Intangible.\nExhaust."
-    }
+    },
+    "experience": [
+      "选牌经验：相当优质的防御牌。",
+      "战斗经验：基本相当于可以获得一回合的绝对防御。"
+    ]
   },
   {
     "id": "GHOSTLY_ARMOR",
@@ -4777,7 +4963,10 @@
       "block": "+3",
       "magic_number": null,
       "description": "Ethereal.\nGain 13 Block."
-    }
+    },
+    "experience": [
+      "选牌经验：数值较高，比较优质的格挡牌。"
+    ]
   },
   {
     "id": "GLACIER",
@@ -4980,7 +5169,11 @@
       "block": null,
       "magic_number": "+5",
       "description": "Deal 25 damage.\nIf Fatal, gain 25 Gold."
-    }
+    },
+    "experience": [
+      "选牌经验：前中期是比较优质的输出牌，还能获得金币。",
+      "战斗经验：如果卡组中有此牌，尽量用此牌击杀敌人来获得金币。"
+    ]
   },
   {
     "id": "HAVOC",
@@ -5009,7 +5202,11 @@
       "block": null,
       "magic_number": null,
       "description": "Play the top card of your draw pile and Exhaust it."
-    }
+    },
+    "experience": [
+      "选取经验：如果牌组和”消耗“有配合或者有一些高能量消耗的牌，则可以考虑选取。",
+      "和”头槌“、”战吼“这种可以控制抽牌堆顶部牌的卡牌有一定配合。"
+    ]
   },
   {
     "id": "HEADBUTT",
@@ -5038,7 +5235,11 @@
       "block": null,
       "magic_number": null,
       "description": "Deal 12 damage.\nPut a card from your discard pile on top of your draw pile."
-    }
+    },
+    "experience": [
+      "选牌经验：不算很优质的过渡牌，但没有其他优质牌可选时一般可以选取一张到卡组里。",
+      "战斗经验：可以用来将弃牌堆中比较优质或者比较需要的牌放到抽牌堆顶部以达到重复利用的效果。"
+    ]
   },
   {
     "id": "HEATSINKS",
@@ -5096,7 +5297,10 @@
       "block": null,
       "magic_number": "+2",
       "description": "Deal 14 damage.\nStrength affects this card 5 times."
-    }
+    },
+    "experience": [
+      "选牌经验：和力量有配合，不走力量流派时不考虑。"
+    ]
   },
   {
     "id": "HEEL_HOOK",

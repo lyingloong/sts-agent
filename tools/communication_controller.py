@@ -507,7 +507,6 @@ _DYNAMIC_DAMAGE_CARDS = frozenset(
         "FIENDFIRE",
         "FINISHER",
         "FLECHETTES",
-        "HEAVYBLADE",
         "MINDBLAST",
         "PERFECTEDSTRIKE",
         "RAMPAGE",
@@ -535,7 +534,9 @@ def _calculated_card_values(
     """Return per-hit damage and block after visible player modifiers."""
     effect = card_effect(card)
     card_type = _status_key(card.get("type") or (effect or {}).get("type"))
-    card_key = _status_key(card.get("id") or (effect or {}).get("id"))
+    # Card IDs in the protocol may be snake_case while the compact exception
+    # tables use the game's concatenated IDs (for example HEAVY_BLADE).
+    card_key = _status_key(card.get("id") or (effect or {}).get("id")).replace("_", "")
     modifiers = _combat_modifiers(player_powers)
     result: dict[str, int] = {}
 
@@ -550,7 +551,19 @@ def _calculated_card_values(
             or effect is not None and _numeric_value((effect or {}).get("base_damage")) is not None
         )
     ):
-        damage = base_damage if direct_damage is not None else base_damage + modifiers["strength"]
+        strength_multiplier = 1
+        if direct_damage is None and card_key == "HEAVYBLADE":
+            # Heavy Blade's static magic_number is the number of times
+            # Strength applies to this card (3, upgraded to 5), not ordinary
+            # card damage. The calculation is still per hit.
+            strength_multiplier = _integer_value(
+                _card_base_value(card, effect, "magic_number")
+            ) or 1
+        damage = (
+            base_damage
+            if direct_damage is not None
+            else base_damage + modifiers["strength"] * strength_multiplier
+        )
         if direct_damage is None and modifiers["weak"] > 0:
             damage = math.floor(damage * 0.75)
         result["final_single_hit_damage"] = max(0, math.floor(damage))

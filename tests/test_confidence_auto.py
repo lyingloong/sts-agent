@@ -314,6 +314,19 @@ class ConfidenceAutoTests(unittest.TestCase):
         observation = controller.normalize_state(message)
         self.assertNotIn("final_single_hit_damage", observation["combat"]["hand"][0])
 
+    def test_heavy_blade_applies_strength_three_or_five_times(self) -> None:
+        message = combat_message()
+        combat = message["game_state"]["combat_state"]
+        combat["player"] = {"powers": [{"id": "Strength", "amount": 2}]}
+        combat["hand"] = [
+            {"id": "HEAVY_BLADE", "type": "ATTACK", "upgrades": 0, "is_playable": True},
+            {"id": "HEAVY_BLADE", "type": "ATTACK", "upgrades": 1, "is_playable": True},
+        ]
+        observation = controller.normalize_state(message)
+        base, upgraded = observation["combat"]["hand"]
+        self.assertEqual(base["final_single_hit_damage"], 20)  # 14 + 2 * 3
+        self.assertEqual(upgraded["final_single_hit_damage"], 24)  # 14 + 2 * 5
+
     def test_environment_automation_leaves_relic_reward_for_policy(self) -> None:
         message = full_combat_reward_message()
         message["game_state"]["screen_state"]["rewards"] = [

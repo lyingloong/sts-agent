@@ -26,7 +26,13 @@ except ImportError as exc:  # pragma: no cover - Windows Python includes Tk by d
     raise SystemExit(f"Tkinter is required for the overlay client: {exc}") from exc
 
 from agent_config import ConfigError, load_agent_config
-from experience_knowledge import ExperienceError, list_all_entities, public_entity, replace_experience
+from experience_knowledge import (
+    ExperienceError,
+    list_all_entities,
+    normalize_entity_key,
+    public_entity,
+    replace_experience,
+)
 from prompt_evolution import skill_text_segments
 
 
@@ -553,11 +559,19 @@ class OverlayTerminal:
         self.knowledge_answer_dialog: tk.Toplevel | None = None
         self.knowledge_review_dialog: tk.Toplevel | None = None
         self.knowledge_editor: tk.Toplevel | None = None
+        self.knowledge_editor_all_entities: list[tuple[str, dict[str, Any]]] = []
         self.knowledge_editor_entities: list[tuple[str, dict[str, Any]]] = []
         self.knowledge_editor_index = 0
         self.knowledge_editor_original: list[str] = []
         self.knowledge_editor_fields: list[tk.Text] = []
         self.knowledge_editor_status: tk.StringVar | None = None
+        self.knowledge_editor_kind: tk.StringVar | None = None
+        self.knowledge_editor_color: tk.StringVar | None = None
+        self.knowledge_editor_search: tk.Entry | None = None
+        self.knowledge_editor_jump: tk.Entry | None = None
+        self.knowledge_editor_color_menu: tk.OptionMenu | None = None
+        self.knowledge_editor_filter_state: tuple[str, str, str] = ("全部", "全部", "")
+        self.knowledge_editor_color_labels: dict[str, str] = {}
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
@@ -1969,20 +1983,21 @@ class OverlayTerminal:
         if not entities:
             messagebox.showinfo("知识库", "当前没有可编辑实体。", parent=self.control)
             return
-        self.knowledge_editor_entities = entities
+        self.knowledge_editor_all_entities = entities
+        self.knowledge_editor_entities = list(entities)
         self.knowledge_editor_index = 0
         dialog = tk.Toplevel(self.root)
         self.knowledge_editor = dialog
         dialog.title("StS Agent - Knowledge Base Experience")
-        dialog.geometry("820x700+500+80")
-        dialog.minsize(620, 520)
+        dialog.geometry("1120x700+380+80")
+        dialog.minsize(820, 520)
         dialog.configure(background=BACKGROUND)
         dialog.attributes("-topmost", self.always_on_top)
         dialog.grid_rowconfigure(0, weight=1)
         dialog.grid_columnconfigure(0, weight=1)
         outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
         outer.grid(row=0, column=0, sticky="nsew")
-        outer.grid_rowconfigure(2, weight=1)
+        outer.grid_rowconfigure(3, weight=1)
         outer.grid_columnconfigure(0, weight=1)
 
         header = tk.Frame(outer, background=BACKGROUND)
@@ -2010,8 +2025,78 @@ class OverlayTerminal:
         )
         self.knowledge_editor_meta.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
+        filters = tk.Frame(outer, background=BACKGROUND)
+        filters.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        filters.grid_columnconfigure(5, weight=1)
+        filters.grid_columnconfigure(9, weight=1)
+        tk.Label(filters, text="类型", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self.knowledge_editor_kind = tk.StringVar(value="全部")
+        kind_menu = tk.OptionMenu(
+            filters,
+            self.knowledge_editor_kind,
+            "全部",
+            "卡牌",
+            "遗物",
+            "药水",
+            "怪物",
+            "事件",
+            "Power",
+            command=lambda _value: self._knowledge_editor_filters_changed(),
+        )
+        self._style_knowledge_editor_menu(kind_menu)
+        kind_menu.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+
+        tk.Label(filters, text="卡牌颜色", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
+            row=0, column=2, sticky="w", padx=(0, 4)
+        )
+        self.knowledge_editor_color = tk.StringVar(value="全部")
+        color_options = self._knowledge_editor_color_options()
+        color_menu = tk.OptionMenu(
+            filters,
+            self.knowledge_editor_color,
+            *color_options,
+            command=lambda _value: self._knowledge_editor_filters_changed(),
+        )
+        self.knowledge_editor_color_menu = color_menu
+        self._style_knowledge_editor_menu(color_menu)
+        color_menu.grid(row=0, column=3, sticky="ew", padx=(0, 10))
+
+        tk.Label(filters, text="搜索", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
+            row=0, column=4, sticky="w", padx=(0, 4)
+        )
+        self.knowledge_editor_search = tk.Entry(
+            filters,
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=(self.data_font, 9),
+        )
+        self.knowledge_editor_search.grid(row=0, column=5, sticky="ew", padx=(0, 6), ipady=4)
+        self.knowledge_editor_search.bind("<Return>", lambda _event: self._knowledge_editor_apply_filters())
+        self._button(filters, "筛选", self._knowledge_editor_apply_filters, compact=True).grid(row=0, column=6, padx=(0, 8))
+        self._button(filters, "重置", self._knowledge_editor_reset_filters, compact=True).grid(row=0, column=7, padx=(0, 12))
+
+        tk.Label(filters, text="跳转", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
+            row=0, column=8, sticky="e", padx=(0, 4)
+        )
+        self.knowledge_editor_jump = tk.Entry(
+            filters,
+            width=16,
+            background=FIELD,
+            foreground=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=(self.data_font, 9),
+        )
+        self.knowledge_editor_jump.grid(row=0, column=9, sticky="ew", padx=(0, 6), ipady=4)
+        self.knowledge_editor_jump.bind("<Return>", lambda _event: self._knowledge_editor_jump_to())
+        self._button(filters, "跳转", self._knowledge_editor_jump_to, compact=True).grid(row=0, column=10)
+
         content = tk.Frame(outer, background=BACKGROUND)
-        content.grid(row=2, column=0, sticky="nsew")
+        content.grid(row=3, column=0, sticky="nsew")
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=1)
@@ -2047,9 +2132,9 @@ class OverlayTerminal:
             self.knowledge_editor_fields.append(text)
 
         self.knowledge_editor_status = tk.StringVar(value="")
-        tk.Label(outer, textvariable=self.knowledge_editor_status, foreground=MUTED, background=BACKGROUND, font=(self.data_font, 9), anchor="w").grid(row=3, column=0, sticky="ew", pady=(9, 0))
+        tk.Label(outer, textvariable=self.knowledge_editor_status, foreground=MUTED, background=BACKGROUND, font=(self.data_font, 9), anchor="w").grid(row=4, column=0, sticky="ew", pady=(9, 0))
         buttons = tk.Frame(outer, background=BACKGROUND)
-        buttons.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        buttons.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         buttons.grid_columnconfigure(2, weight=1)
         self.knowledge_editor_previous = self._button(buttons, "上一个", lambda: self._knowledge_editor_navigate(-1), compact=True)
         self.knowledge_editor_previous.grid(row=0, column=0, padx=(0, 7))
@@ -2061,6 +2146,154 @@ class OverlayTerminal:
         self._render_knowledge_editor()
         dialog.lift()
 
+    def _style_knowledge_editor_menu(self, menu: tk.OptionMenu) -> None:
+        menu.configure(
+            background=BUTTON,
+            foreground=TEXT,
+            activebackground=BUTTON_ACTIVE,
+            activeforeground=TEXT,
+            highlightthickness=0,
+            relief="flat",
+            borderwidth=0,
+            font=(self.data_font, 9),
+        )
+        try:
+            menu["menu"].configure(
+                background=FIELD,
+                foreground=TEXT,
+                activebackground=BUTTON_ACTIVE,
+                activeforeground=TEXT,
+                font=(self.data_font, 9),
+            )
+        except tk.TclError:
+            pass
+
+    def _knowledge_editor_color_options(self) -> list[str]:
+        labels = {
+            "ironclad": "铁甲战士",
+            "silent": "静默猎手",
+            "defect": "故障机器人",
+            "watcher": "观者",
+            "colorless": "无色",
+            "curse": "诅咒",
+        }
+        values = {
+            str(entity.get("color")).strip().casefold()
+            for kind, entity in self.knowledge_editor_all_entities
+            if kind == "card" and entity.get("color")
+        }
+        self.knowledge_editor_color_labels = {"全部": ""}
+        options = ["全部"]
+        for value in sorted(values):
+            label = labels.get(value, value)
+            if label in self.knowledge_editor_color_labels:
+                label = value
+            self.knowledge_editor_color_labels[label] = value
+            options.append(label)
+        return options
+
+    @staticmethod
+    def _knowledge_editor_kind_value(label: str) -> str:
+        return {
+            "全部": "",
+            "卡牌": "card",
+            "遗物": "relic",
+            "药水": "potion",
+            "怪物": "monster",
+            "事件": "event",
+            "Power": "power",
+        }.get(label, "")
+
+    def _knowledge_editor_confirm_unsaved(self) -> bool:
+        if not self._knowledge_editor_is_dirty():
+            return True
+        choice = messagebox.askyesnocancel(
+            "未保存的经验",
+            "当前实体有未保存修改，是否先保存？",
+            parent=self.knowledge_editor,
+        )
+        if choice is None:
+            return False
+        return not choice or self._save_knowledge_editor()
+
+    def _knowledge_editor_apply_filters(self) -> None:
+        if not self.knowledge_editor_all_entities or not self._knowledge_editor_confirm_unsaved():
+            return
+        kind_label = self.knowledge_editor_kind.get() if self.knowledge_editor_kind is not None else "全部"
+        color_label = self.knowledge_editor_color.get() if self.knowledge_editor_color is not None else "全部"
+        kind = self._knowledge_editor_kind_value(kind_label)
+        color = self.knowledge_editor_color_labels.get(color_label, "")
+        query = self.knowledge_editor_search.get().strip().casefold() if self.knowledge_editor_search is not None else ""
+        filtered: list[tuple[str, dict[str, Any]]] = []
+        for entity_kind, entity in self.knowledge_editor_all_entities:
+            if kind and entity_kind != kind:
+                continue
+            if color and (entity_kind != "card" or str(entity.get("color") or "").casefold() != color):
+                continue
+            if query:
+                searchable = " ".join(
+                    str(entity.get(field) or "")
+                    for field in ("id", "name", "description")
+                ).casefold()
+                if query not in searchable:
+                    continue
+            filtered.append((entity_kind, entity))
+        self.knowledge_editor_entities = filtered
+        self.knowledge_editor_index = 0
+        self.knowledge_editor_filter_state = (kind_label, color_label, query)
+        self._render_knowledge_editor()
+
+    def _knowledge_editor_filters_changed(self) -> None:
+        kind_label = self.knowledge_editor_kind.get() if self.knowledge_editor_kind is not None else "全部"
+        if kind_label not in {"全部", "卡牌"} and self.knowledge_editor_color is not None:
+            self.knowledge_editor_color.set("全部")
+        self._knowledge_editor_apply_filters()
+
+    def _knowledge_editor_reset_filters(self) -> None:
+        if self.knowledge_editor_kind is not None:
+            self.knowledge_editor_kind.set("全部")
+        if self.knowledge_editor_color is not None:
+            self.knowledge_editor_color.set("全部")
+        if self.knowledge_editor_search is not None:
+            self.knowledge_editor_search.delete(0, "end")
+        self._knowledge_editor_apply_filters()
+
+    def _knowledge_editor_jump_to(self) -> None:
+        if not self.knowledge_editor_entities or not self._knowledge_editor_confirm_unsaved():
+            return
+        query = self.knowledge_editor_jump.get().strip() if self.knowledge_editor_jump is not None else ""
+        if not query:
+            if self.knowledge_editor_status is not None:
+                self.knowledge_editor_status.set("请输入筛选结果中的序号，或实体 ID/名称。")
+            return
+        target: int | None = None
+        if query.isdigit():
+            candidate = int(query) - 1
+            if 0 <= candidate < len(self.knowledge_editor_entities):
+                target = candidate
+        if target is None:
+            normalized_query = normalize_entity_key(query)
+            query_fold = query.casefold()
+            exact: list[int] = []
+            partial: list[int] = []
+            for index, (_kind, entity) in enumerate(self.knowledge_editor_entities):
+                values = [str(entity.get("id") or ""), str(entity.get("name") or "")]
+                normalized_values = [normalize_entity_key(value) for value in values]
+                folded_values = [value.casefold() for value in values]
+                if normalized_query and normalized_query in normalized_values or query_fold in folded_values:
+                    exact.append(index)
+                elif query_fold and any(query_fold in value for value in folded_values):
+                    partial.append(index)
+            matches = exact or partial
+            if matches:
+                target = matches[0]
+        if target is None:
+            if self.knowledge_editor_status is not None:
+                self.knowledge_editor_status.set(f"未找到“{query}”；当前筛选结果 {len(self.knowledge_editor_entities)} 个。")
+            return
+        self.knowledge_editor_index = target
+        self._render_knowledge_editor()
+
     def _knowledge_editor_values(self) -> list[str]:
         return [field.get("1.0", "end-1c").strip() for field in self.knowledge_editor_fields]
 
@@ -2068,7 +2301,22 @@ class OverlayTerminal:
         return self._knowledge_editor_values() != self.knowledge_editor_original
 
     def _render_knowledge_editor(self) -> None:
-        if not self.knowledge_editor_entities or not self.knowledge_editor_fields:
+        if not self.knowledge_editor_fields:
+            return
+        if not self.knowledge_editor_entities:
+            self.knowledge_editor_title.configure(text="知识库经验编辑器 · 无匹配实体")
+            self.knowledge_editor_meta.configure(text="当前筛选没有结果，请调整类型、颜色或搜索条件。")
+            self.knowledge_editor_static.configure(state="normal")
+            self.knowledge_editor_static.delete("1.0", "end")
+            self.knowledge_editor_static.insert("1.0", "（无匹配实体）")
+            self.knowledge_editor_static.configure(state="disabled")
+            self.knowledge_editor_original = ["", "", ""]
+            for field in self.knowledge_editor_fields:
+                field.delete("1.0", "end")
+            self.knowledge_editor_previous.configure(state="disabled")
+            self.knowledge_editor_next.configure(state="disabled")
+            if self.knowledge_editor_status is not None:
+                self.knowledge_editor_status.set("筛选结果为 0 个实体。")
             return
         kind, entity = self.knowledge_editor_entities[self.knowledge_editor_index]
         experience = entity.get("experience") if isinstance(entity.get("experience"), list) else []
@@ -2132,8 +2380,14 @@ class OverlayTerminal:
         except tk.TclError:
             pass
         self.knowledge_editor = None
+        self.knowledge_editor_all_entities = []
         self.knowledge_editor_entities = []
         self.knowledge_editor_fields = []
+        self.knowledge_editor_kind = None
+        self.knowledge_editor_color = None
+        self.knowledge_editor_search = None
+        self.knowledge_editor_jump = None
+        self.knowledge_editor_color_menu = None
 
     def _show_prompt_evolution_review(self, packet: dict[str, Any]) -> None:
         """Show either the pre-validation candidate gate or result gate."""
