@@ -26,7 +26,11 @@
       "block": null,
       "magic_number": "+2",
       "description": "Shivs deal 6 additional damage."
-    }
+    },
+    "experience": [
+      "选牌经验：如果卡组中有“刀刃之舞”、“斗篷与匕首”等小刀卡牌时，优先级较高；卡组为小刀体系时优先级极高。",
+      "战斗经验：战斗中一般优先使用。"
+    ]
   },
   {
     "id": "ACROBATICS",

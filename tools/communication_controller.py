@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -226,7 +227,10 @@ def game_state(message: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-REWARD_AUTOMATION_ORDER = ("RELIC", "GOLD", "POTION", "CARD")
+# Relic rewards remain policy decisions: a relic can compete with a key or
+# another mutually exclusive reward. Only deterministic, non-strategic reward
+# handling is automated here.
+REWARD_AUTOMATION_ORDER = ("GOLD", "POTION", "CARD")
 # In StS1 these are the only potions that can be deliberately consumed
 # outside combat. CommunicationMod may report ``can_use=true`` globally for
 # other potions, so do not treat that flag as context-independent.
@@ -278,9 +282,11 @@ def environment_auto_action(
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Choose one non-strategic progress action before calling a policy.
 
-    The controller owns only actions with no strategic trade-off: a visible
-    combat reward relic/gold, a potion when an inventory slot is free, opening
-    a visible card reward, and entering a just-reached shop. It also executes
+    The controller owns only actions with no strategic trade-off: visible
+    combat reward gold, a potion when an inventory slot is free, opening a
+    visible card reward, and entering a just-reached shop. Relic rewards stay
+    as policy decisions because they may compete with a key or another reward.
+    It also executes
     a sole legal action, because there is no remaining choice for a policy to
     make (for example, ``PROCEED`` after leaving a shop or ``END_TURN`` when a
     combat hand has no playable cards or usable potions). Card selection, boss
@@ -384,6 +390,224 @@ RELIC_MODEL_FIELDS = ("id", "name", "description", "counter", "experience")
 _MISSING = object()
 
 
+def _numeric_value(value: Any) -> float | int | None:
+    """Parse a protocol or knowledge value that represents one number."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(float(value)) else None
+    if isinstance(value, str):
+        match = re.fullmatch(r"\s*([+-]?\d+(?:\.\d+)?)\s*", value)
+        if match:
+            number = float(match.group(1))
+            if math.isfinite(number):
+                return int(number) if number.is_integer() else number
+    return None
+
+
+def _integer_value(value: Any) -> int | None:
+    number = _numeric_value(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _status_key(value: Any) -> str:
+    """Normalize English and localized Power names without dropping Unicode."""
+    text = str(value or "").strip().upper()
+    return re.sub(r"[^\w]+", "", text, flags=re.UNICODE)
+
+
+def _power_amount(powers: Any, aliases: tuple[str, ...]) -> int:
+    """Sum an effect amount for the named Power IDs/names."""
+    wanted = {_status_key(alias) for alias in aliases}
+    total = 0
+    if not isinstance(powers, list):
+        return total
+    for power in powers:
+        if not isinstance(power, dict):
+            continue
+        keys = {_status_key(power.get(field)) for field in ("id", "name")}
+        keys.discard("")
+        # CommunicationMod has used both ``Strength`` and ``StrengthPower``
+        # spellings across versions. Do not use substring matching: powers
+        # such as Strength Down must not be mistaken for Strength.
+        matched = any(
+            key in wanted or key in {f"{alias}POWER" for alias in wanted}
+            for key in keys
+        )
+        if matched:
+            amount = _integer_value(power.get("amount"))
+            if amount is not None:
+                total += amount
+    return total
+
+
+def _combat_modifiers(powers: Any) -> dict[str, int]:
+    return {
+        "strength": _power_amount(powers, ("STRENGTH", "力量")),
+        "weak": _power_amount(powers, ("WEAK", "WEAKENED", "虚弱")),
+        "dexterity": _power_amount(powers, ("DEXTERITY", "敏捷")),
+        "frail": _power_amount(powers, ("FRAIL", "脆弱")),
+        "vulnerable": _power_amount(powers, ("VULNERABLE", "易伤")),
+        "intangible": _power_amount(powers, ("INTANGIBLE", "无实体")),
+    }
+
+
+def _card_base_value(
+    card: dict[str, Any],
+    effect: dict[str, Any] | None,
+    field: str,
+) -> float | int | None:
+    """Read a card's unmodified value, applying its static upgrade delta."""
+    # A future CommunicationMod can expose a direct base_* field. Prefer it
+    # over the generic field, which may be a UI-derived value in some builds.
+    value = _numeric_value(card.get(f"base_{field}"))
+    if value is None:
+        value = _numeric_value(card.get(field))
+    if value is None and effect is not None:
+        value = _numeric_value(effect.get(f"base_{field}"))
+    if value is None:
+        return None
+    upgraded = _integer_value(card.get("upgrades")) or 0
+    if upgraded > 0 and effect is not None:
+        delta = _numeric_value(effect.get(f"upgrade_{field}"))
+        if delta is not None:
+            value += delta * upgraded
+    return value
+
+
+def _direct_final_value(card: dict[str, Any], field: str) -> float | int | None:
+    """Accept explicit final values from newer protocol versions if present."""
+    for key in (
+        f"final_{field}",
+        f"final_{field}_value",
+        f"{field}_after_modifiers",
+        f"adjusted_{field}",
+        f"calculated_{field}",
+    ):
+        value = _numeric_value(card.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+# These cards use a value that depends on combat history or another live
+# quantity not represented by the current helper signature. Do not emit a
+# misleading ``final_*`` value for them; their full description remains in the
+# observation until a dedicated state calculation is added.
+_DYNAMIC_DAMAGE_CARDS = frozenset(
+    {
+        "BARRAGE",
+        "BLIZZARD",
+        "BODYSLAM",
+        "BOWLINGBASH",
+        "BRILLIANCE",
+        "CORPSEEXPLOSION",
+        "FIENDFIRE",
+        "FINISHER",
+        "FLECHETTES",
+        "HEAVYBLADE",
+        "MINDBLAST",
+        "PERFECTEDSTRIKE",
+        "RAMPAGE",
+        "SEARINGBLOW",
+        "SKEWER",
+        "THUNDERSTRIKE",
+        "WHIRLWIND",
+    }
+)
+_DYNAMIC_BLOCK_CARDS = frozenset(
+    {
+        "REINFORCEDBODY",
+        "SECONDWIND",
+        "SPIRITSHIELD",
+        "STACK",
+    }
+)
+
+
+def _calculated_card_values(
+    card: dict[str, Any],
+    *,
+    player_powers: Any = None,
+) -> dict[str, int]:
+    """Return per-hit damage and block after visible player modifiers."""
+    effect = card_effect(card)
+    card_type = _status_key(card.get("type") or (effect or {}).get("type"))
+    card_key = _status_key(card.get("id") or (effect or {}).get("id"))
+    modifiers = _combat_modifiers(player_powers)
+    result: dict[str, int] = {}
+
+    direct_damage = _direct_final_value(card, "damage")
+    base_damage = direct_damage if direct_damage is not None else _card_base_value(card, effect, "damage")
+    if (
+        base_damage is not None
+        and (direct_damage is not None or card_key not in _DYNAMIC_DAMAGE_CARDS)
+        and (
+            "ATTACK" in card_type
+            or "攻击" in card_type
+            or effect is not None and _numeric_value((effect or {}).get("base_damage")) is not None
+        )
+    ):
+        damage = base_damage if direct_damage is not None else base_damage + modifiers["strength"]
+        if direct_damage is None and modifiers["weak"] > 0:
+            damage = math.floor(damage * 0.75)
+        result["final_single_hit_damage"] = max(0, math.floor(damage))
+
+    direct_block = _direct_final_value(card, "block")
+    base_block = direct_block if direct_block is not None else _card_base_value(card, effect, "block")
+    if base_block is not None and (direct_block is not None or card_key not in _DYNAMIC_BLOCK_CARDS):
+        block = base_block if direct_block is not None else base_block + modifiers["dexterity"]
+        if direct_block is None and modifiers["frail"] > 0:
+            block = math.floor(block * 0.75)
+        result["final_block"] = max(0, math.floor(block))
+    return result
+
+
+def _calculated_intent_values(monster: dict[str, Any], player_powers: Any) -> dict[str, int]:
+    """Calculate expected incoming damage for the current enemy intent.
+
+    ``move_adjusted_damage`` is already the game's per-hit value when the
+    protocol provides it. If it is unavailable, fall back to the base move
+    value and the enemy's visible Strength/Weak. Player Vulnerable and
+    Intangible are applied because the model needs the damage it will receive,
+    not merely the enemy's raw move number.
+    """
+    intent_key = _status_key(monster.get("intent"))
+    if intent_key and not any(token in intent_key for token in ("ATTACK", "DAMAGE", "攻击")):
+        return {}
+    adjusted = _integer_value(monster.get("move_adjusted_damage"))
+    base = _integer_value(monster.get("move_base_damage"))
+    if adjusted is not None and adjusted < 0:
+        adjusted = None
+    if base is not None and base < 0:
+        base = None
+    if adjusted is None and base is None:
+        return {}
+
+    if adjusted is not None:
+        per_hit = adjusted
+    else:
+        enemy_modifiers = _combat_modifiers(monster.get("powers"))
+        per_hit = base + enemy_modifiers["strength"]
+        if enemy_modifiers["weak"] > 0:
+            per_hit = math.floor(per_hit * 0.75)
+
+    player_modifiers = _combat_modifiers(player_powers)
+    if player_modifiers["intangible"] > 0:
+        per_hit = 1
+    elif player_modifiers["vulnerable"] > 0:
+        per_hit = math.floor(per_hit * 1.5)
+    per_hit = max(0, math.floor(per_hit))
+    hits = _integer_value(monster.get("move_hits")) or 1
+    hits = max(1, hits)
+    return {
+        "intent_final_damage": per_hit,
+        "intent_final_total_damage": per_hit * hits,
+    }
+
+
 # These are the relics whose static knowledge says that picking them up opens
 # a player-directed card selection. Effects such as Pandora's Box, War Paint,
 # and Whetstone are deliberately absent because their card changes are random
@@ -468,18 +692,27 @@ def merge_public_fields(
     return result
 
 
-def visible_card(card: dict[str, Any]) -> dict[str, Any]:
-    """Expose one canonical card schema without duplicate static subobjects."""
-    return merge_public_fields(
+def visible_card(
+    card: dict[str, Any],
+    *,
+    player_powers: Any = None,
+) -> dict[str, Any]:
+    """Expose one canonical card schema and optional live combat calculations."""
+    result = merge_public_fields(
         card,
         card_effect(card),
         CARD_MODEL_FIELDS,
     )
+    # Calculated values are only meaningful in combat. Keeping them opt-in
+    # prevents shop/reward cards from being mistaken for live card previews.
+    if player_powers is not None:
+        result.update(_calculated_card_values(card, player_powers=player_powers))
+    return result
 
 
-def card_effect_summary(card: dict[str, Any]) -> str:
+def card_effect_summary(card: dict[str, Any], *, player_powers: Any = None) -> str:
     """Render the structured card knowledge compactly for the human terminal."""
-    effect = visible_card(card)
+    effect = visible_card(card, player_powers=player_powers)
     fields = []
     for key, label in (
         ("type", "type"),
@@ -500,6 +733,10 @@ def card_effect_summary(card: dict[str, Any]) -> str:
             value = effect.get(f"base_{key}")
         if value is not None:
             fields.append(f"{label}={value}")
+    if effect.get("final_single_hit_damage") is not None:
+        fields.append(f"final_dmg/hit={effect['final_single_hit_damage']}")
+    if effect.get("final_block") is not None:
+        fields.append(f"final_block={effect['final_block']}")
     for key in ("exhaust", "ethereal", "innate", "retain", "self_retain", "purge_on_use"):
         if effect.get(key):
             fields.append(key)
@@ -1333,6 +1570,7 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
 
 def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False) -> dict[str, Any]:
     player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
+    player_powers = player.get("powers") if isinstance(player.get("powers"), list) else []
     monsters: list[dict[str, Any]] = []
     for monster in combat.get("monsters", []):
         if not isinstance(monster, dict):
@@ -1358,10 +1596,15 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
                     "intent_hits": monster.get("move_hits"),
                 }
             )
+            item.update(_calculated_intent_values(monster, player_powers))
         monsters.append(item)
     return {
         "turn": combat.get("turn"),
-        "hand": [visible_card(card) for card in combat.get("hand", []) if isinstance(card, dict)],
+        "hand": [
+            visible_card(card, player_powers=player_powers)
+            for card in combat.get("hand", [])
+            if isinstance(card, dict)
+        ],
         "player": {
             "current_hp": player.get("current_hp"),
             "max_hp": player.get("max_hp"),
@@ -2041,13 +2284,20 @@ def format_view(
         for index, monster in enumerate(combat.get("monsters", [])):
             if not isinstance(monster, dict):
                 continue
-            intent_damage = None if hide_enemy_intents else monster.get("move_adjusted_damage")
+            calculated_intent = {} if hide_enemy_intents else _calculated_intent_values(monster, player.get("powers", []))
+            intent_damage = None if hide_enemy_intents else calculated_intent.get(
+                "intent_final_damage",
+                monster.get("move_adjusted_damage"),
+            )
             intent_hits = None if hide_enemy_intents else monster.get("move_hits")
             intent_detail = ""
             if intent_damage is not None and intent_damage != -1:
                 intent_detail = f" dmg={intent_damage}"
                 if intent_hits not in (None, 1):
                     intent_detail += f"x{intent_hits}"
+                total_damage = calculated_intent.get("intent_final_total_damage")
+                if total_damage is not None and intent_hits not in (None, 1):
+                    intent_detail += f" total={total_damage}"
             intent = "HIDDEN" if hide_enemy_intents else monster.get("intent")
             lines.append(
                 f"  [{index}] {monster.get('name')} HP {monster.get('current_hp')}/{monster.get('max_hp')} "
@@ -2069,7 +2319,7 @@ def format_view(
                     target += "（单敌人可省略目标）"
             lines.append(
                 f"  [{index}] {card.get('name')} cost={card.get('cost')} {playable} {target}"
-                f"{card_effect_summary(card)}"
+                f"{card_effect_summary(card, player_powers=player.get('powers', []))}"
             )
         lines.append("药水")
         for index, potion in enumerate(state.get("potions", [])):

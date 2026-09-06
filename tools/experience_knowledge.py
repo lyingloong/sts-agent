@@ -156,6 +156,32 @@ def _load_payload(kind: str) -> tuple[Path, Any, list[dict[str, Any]]]:
     return path, payload, _entities(payload, normalized)
 
 
+def list_entities(kind: Any) -> list[dict[str, Any]]:
+    """Return all entities of one static-knowledge type as detached copies."""
+    normalized_kind = normalize_kind(kind)
+    _path, _payload, entities = _load_payload(normalized_kind)
+    return copy.deepcopy(
+        sorted(
+            entities,
+            key=lambda entity: (
+                normalize_entity_key(entity.get("id")),
+                normalize_entity_key(entity.get("name")),
+            ),
+        )
+    )
+
+
+def list_all_entities() -> list[tuple[str, dict[str, Any]]]:
+    """Return every editable entity in stable type/ID order for the editor."""
+    result: list[tuple[str, dict[str, Any]]] = []
+    for kind in KNOWLEDGE_PATHS:
+        result.extend((normalize_kind(kind), entity) for entity in list_entities(kind))
+    return sorted(
+        result,
+        key=lambda item: (item[0], normalize_entity_key(item[1].get("id")), normalize_entity_key(item[1].get("name"))),
+    )
+
+
 def find_entity(kind: Any, entity_id: Any) -> dict[str, Any] | None:
     """Find by ID or display name, returning a detached copy."""
     normalized_kind = normalize_kind(kind)

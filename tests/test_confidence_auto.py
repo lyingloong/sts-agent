@@ -214,9 +214,113 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         action, detail = result
-        self.assertEqual(action["command"], "CHOOSE 3")
-        self.assertEqual(detail["reward_type"], "RELIC")
-        self.assertEqual(action["label"], "自动拾取遗物 锚")
+        self.assertEqual(action["command"], "CHOOSE 0")
+        self.assertEqual(detail["reward_type"], "GOLD")
+        self.assertEqual(action["label"], "自动拾取金币 19")
+
+    def test_combat_observation_calculates_per_hit_card_values_and_intent(self) -> None:
+        message = combat_message()
+        combat = message["game_state"]["combat_state"]
+        combat["hand"] = [
+            {
+                "id": "STRIKE_R",
+                "name": "Strike",
+                "type": "Attack",
+                "damage": 6,
+                "upgrades": 0,
+                "is_playable": True,
+                "has_target": True,
+            },
+            {
+                "id": "DEFEND_R",
+                "name": "Defend",
+                "type": "Skill",
+                "block": 5,
+                "upgrades": 0,
+                "is_playable": True,
+                "has_target": False,
+            },
+        ]
+        combat["player"] = {
+            "current_hp": 75,
+            "max_hp": 88,
+            "block": 0,
+            "energy": 3,
+            "powers": [
+                {"id": "Strength", "name": "力量", "amount": 1},
+                {"id": "Weak", "name": "虚弱", "amount": 1},
+                {"id": "Dexterity", "name": "敏捷", "amount": 2},
+                {"id": "Frail", "name": "脆弱", "amount": 1},
+                {"id": "Vulnerable", "name": "易伤", "amount": 1},
+            ],
+        }
+        combat["monsters"] = [
+            {
+                "id": "Louse",
+                "name": "Louse",
+                "current_hp": 15,
+                "max_hp": 15,
+                "is_gone": False,
+                "intent": "ATTACK",
+                "move_base_damage": 6,
+                "move_adjusted_damage": 6,
+                "move_hits": 2,
+                "powers": [],
+            }
+        ]
+
+        observation = controller.normalize_state(message)
+        strike, defend = observation["combat"]["hand"]
+        monster = observation["combat"]["monsters"][0]
+        # floor((6 + Strength 1) * 0.75), per hit; it is not multiplied by
+        # the card's or enemy's hit count here.
+        self.assertEqual(strike["final_single_hit_damage"], 5)
+        self.assertEqual(defend["final_block"], 5)  # floor((5 + 2) * .75)
+        self.assertEqual(monster["intent_final_damage"], 9)  # floor(6 * 1.5)
+        self.assertEqual(monster["intent_final_total_damage"], 18)
+
+    def test_combat_observation_falls_back_to_base_intent_and_enemy_powers(self) -> None:
+        message = combat_message()
+        combat = message["game_state"]["combat_state"]
+        combat["player"] = {"powers": []}
+        combat["monsters"] = [
+            {
+                "id": "Louse",
+                "name": "Louse",
+                "is_gone": False,
+                "move_base_damage": 6,
+                "move_adjusted_damage": -1,
+                "move_hits": 2,
+                "powers": [{"id": "Strength", "amount": 1}],
+            }
+        ]
+        observation = controller.normalize_state(message)
+        monster = observation["combat"]["monsters"][0]
+        self.assertEqual(monster["intent_final_damage"], 7)
+        self.assertEqual(monster["intent_final_total_damage"], 14)
+
+    def test_dynamic_card_without_live_formula_does_not_claim_a_fixed_value(self) -> None:
+        message = combat_message()
+        combat = message["game_state"]["combat_state"]
+        combat["player"] = {"block": 12, "powers": []}
+        combat["hand"] = [
+            {
+                "id": "Body Slam",
+                "name": "Body Slam",
+                "type": "ATTACK",
+                "is_playable": True,
+            }
+        ]
+        observation = controller.normalize_state(message)
+        self.assertNotIn("final_single_hit_damage", observation["combat"]["hand"][0])
+
+    def test_environment_automation_leaves_relic_reward_for_policy(self) -> None:
+        message = full_combat_reward_message()
+        message["game_state"]["screen_state"]["rewards"] = [
+            {"reward_type": "RELIC", "relic": {"id": "Key", "name": "钥匙"}},
+        ]
+        message["game_state"]["choice_list"] = ["relic"]
+        self.assertIsNone(controller.environment_auto_action(message, controller.semantic_actions(message)))
 
     def test_environment_automation_skips_full_potion_and_opens_card_reward(self) -> None:
         message = full_combat_reward_message()

@@ -183,6 +183,20 @@ class KnowledgeExperienceTests(unittest.TestCase):
             finally:
                 experience_knowledge.KNOWLEDGE_PATHS["card"] = old
 
+    def test_list_all_entities_returns_stable_editable_snapshot(self) -> None:
+        entities = experience_knowledge.list_all_entities()
+        self.assertTrue(entities)
+        expected = sorted(
+            entities,
+            key=lambda item: (
+                item[0],
+                experience_knowledge.normalize_entity_key(item[1].get("id")),
+                experience_knowledge.normalize_entity_key(item[1].get("name")),
+            ),
+        )
+        self.assertEqual(entities, expected)
+        self.assertTrue(all(kind in experience_knowledge.KNOWLEDGE_PATHS for kind, _entity in entities))
+
 
 if __name__ == "__main__":
     unittest.main()

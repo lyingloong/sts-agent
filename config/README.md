@@ -89,6 +89,8 @@ python tools\overlay_terminal.py
 | `max_entries_per_entity` | 每个实体经验上限，当前限制为 3。 |
 | `max_question_chars` / `max_answer_chars` | 单次模型问题与人类回答的最大字符数。 |
 
+除游戏中的教师问答流程外，也可以在 Overlay 动作面板点击 `知识库`，逐个浏览所有静态实体并手动维护最多三条 `experience`。保存会直接更新对应的 `data/knowledge/sts1_*.json`，不创建额外经验补充文件。
+
 ### Prompt 演化
 
 `prompt_evolution` 是固定角色、进阶和游戏种子的人工审核式策略迭代模式。它与 `policy`、`posthoc_feedback` 互斥，使用同一份 `teacher` USTC API：教师只提出一个场景或角色 skill 的小型替换，候选先经过一次“验证前审核”，人工批准后才在同一种子上重跑，验证结果再经过第二次人工审核。首次 incumbent 可以使用随机种子，观察到游戏返回的真实种子后才建立候选复跑锚点。只有接受验证结果才会写入当前角色目录下 Git 跟踪的 `prompts/characters/<角色>/versions/pNNNN.json` 并更新 manifest；候选、轨迹、拒绝理由和 session 状态写入被忽略的 `data/prompt_evolution/`。

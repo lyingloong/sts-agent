@@ -70,12 +70,12 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 规范化状态中的两个重要字段：
 
 - `map.nodes`：当前 Act 已公开的完整地图节点及其 `x/y/symbol/children/parents` 关系；`map.current_node` 和 `map.next_nodes` 仍保留作快捷字段。
-- `combat.monsters[*].intent_damage`、`intent_hits`：从 CommunicationMod 的当前意图字段映射而来，用于表达敌人当前显示的攻击伤害和段数。
+- `combat.monsters[*].intent_damage`、`intent_hits`：从 CommunicationMod 的当前意图字段映射而来，用于表达敌人当前显示的攻击伤害和段数。`intent_final_damage` 是控制器按当前玩家 Vulnerable/Intangible 计算出的预计每段来袭伤害，`intent_final_total_damage` 是乘以 `intent_hits` 后的本次意图总伤害；未知或非攻击意图不会生成计算字段。
 - `act_boss` / `act_boss_profile`：当前 Act 地图公开的首领名称，以及从版本化怪物知识库提取的中文 Boss 前规划画像（`strategy`）；详细招式表不再注入全局动作上下文，Boss 战斗中的当前意图仍以 CommunicationMod 的实时字段为准。
 - `combat.monsters[*].knowledge`：仅在战斗观察中为已识别敌人补充版本化静态参考，包括类型、生命区间和可能招式。它不是当前意图预测；当前 HP、格挡、Powers 和意图字段始终以 CommunicationMod 实时状态为准，符文圆顶仍会隐藏实时意图。
 - `decision_constraints`：当前遗物带来的长期规则，例如苏祖禁止获得药水、灵体外质禁止获得金币、添水的本回合出牌余量，以及营火/宝箱限制。能由状态确定为无效的药水或金币奖励会直接从 `legal_actions` 移除；其余限制仅作为显式上下文保留。持有符文圆顶时，敌人当前意图字段也会从模型观察和终端视图隐藏。
 - `combat.player.powers`、`combat.monsters[*].powers`：保留 CommunicationMod 当前的 `id/name/amount/type`，并补充静态 `description`。description 优先来自 `sts1_powers.json`；缺失时才查询 `sts1_card_powers.json`，不使用关键词库。
-- `combat.hand[*]`：使用扁平卡牌 schema：`id/name/type/cost/description/upgrades/is_playable`。运行时非空字段优先；静态知识只补缺失字段，不再输出嵌套 `effect`。当前 CommunicationMod 版本未稳定提供实时 `damage/block/magic_number`，因此不把它们纳入训练 schema。
+- `combat.hand[*]`：使用扁平卡牌 schema：`id/name/type/cost/description/upgrades/is_playable`。运行时非空字段优先；静态知识只补缺失字段，不再输出嵌套 `effect`。战斗中额外提供 `final_single_hit_damage`（经过当前玩家 Strength/Weak 的攻击牌单段出伤）和 `final_block`（经过当前玩家 Dexterity/Frail 的本次获得格挡）。这些字段不乘多段次数，也不扣目标格挡；没有可解析基础数值时不会生成。若未来 CommunicationMod 提供明确的 `final_*`/`*_after_modifiers` 值，控制器优先采用该实时值。
 - 静态实体可选增加 `experience`（最多三条中文经验），随实体直接注入，不做跨实体检索。教师动作响应可返回带外 `knowledge_request`；controller 只接受当前公开实体，收集人类回答、调用 DeepSeek 整理完整替换列表并经人类审核后写库。该请求不产生游戏动作，审核通过后在同一状态重新请求教师。
 - `recent_actions`：模型观察和轨迹状态中保留当前局最近 6 个已被 CommunicationMod 确认且状态稳定的动作，包含执行前后界面、动作类型、规范 `action_id` 和简短语义。协议错误或尚未确认的动作不会进入历史；新局从空历史开始。
 - `screen_type=GRID`：若当前是事件/营火等触发的选牌界面，`screen_state.selection_mode` 和 `selection_instruction` 会明确表示 `PURGE`（移除）、`TRANSFORM`（变化）或 `UPGRADE`（升级）等目的。`for_purge` 等原始布尔字段仍保留作兼容。

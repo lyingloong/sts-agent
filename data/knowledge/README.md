@@ -38,3 +38,13 @@ recorded again in `manifest.json`, and covered by unit tests:
 
 These corrections are deliberately per-ID rather than heuristic text cleanup.
 Static data never overrides concrete state received from CommunicationMod.
+
+## Experience Fields
+
+The optional `experience` array is stored directly on the corresponding
+entity in `sts1_cards.json`, `sts1_relics.json`, `sts1_potions.json`,
+`sts1_monsters.json`, `sts1_events.json`, or `sts1_powers.json`. It contains at
+most three human-reviewed, decision-oriented notes and is injected together
+with that entity's normal static fields. The Overlay's `知识库` button opens a
+previous/next editor for all entities; saving uses an atomic replacement and
+refreshes the runtime knowledge caches immediately.

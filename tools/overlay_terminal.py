@@ -26,6 +26,7 @@ except ImportError as exc:  # pragma: no cover - Windows Python includes Tk by d
     raise SystemExit(f"Tkinter is required for the overlay client: {exc}") from exc
 
 from agent_config import ConfigError, load_agent_config
+from experience_knowledge import ExperienceError, list_all_entities, public_entity, replace_experience
 from prompt_evolution import skill_text_segments
 
 
@@ -551,6 +552,12 @@ class OverlayTerminal:
         self.attribution_dialog: tk.Toplevel | None = None
         self.knowledge_answer_dialog: tk.Toplevel | None = None
         self.knowledge_review_dialog: tk.Toplevel | None = None
+        self.knowledge_editor: tk.Toplevel | None = None
+        self.knowledge_editor_entities: list[tuple[str, dict[str, Any]]] = []
+        self.knowledge_editor_index = 0
+        self.knowledge_editor_original: list[str] = []
+        self.knowledge_editor_fields: list[tk.Text] = []
+        self.knowledge_editor_status: tk.StringVar | None = None
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
@@ -1030,6 +1037,10 @@ class OverlayTerminal:
             button = self._button(quick, label, lambda value=action: self.submit_action(value), compact=True)
             button.grid(row=1, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
             self.quick_buttons.append(button)
+        quick.grid_columnconfigure(3, weight=1)
+        self._button(quick, "知识库", self.open_knowledge_editor, compact=True).grid(
+            row=1, column=3, sticky="ew", padx=(5, 0)
+        )
         resize_bar = tk.Frame(outer, background=BACKGROUND, height=16)
         resize_bar.grid(row=5, column=0, sticky="nsew")
         resize_bar.grid_columnconfigure(0, weight=1)
@@ -1944,6 +1955,186 @@ class OverlayTerminal:
         dialog.protocol("WM_DELETE_WINDOW", lambda: finish("abandon"))
         dialog.lift()
 
+    def open_knowledge_editor(self) -> None:
+        """Open a local editor for experience fields in tracked knowledge JSON."""
+        if self.knowledge_editor is not None and self.knowledge_editor.winfo_exists():
+            self.knowledge_editor.deiconify()
+            self.knowledge_editor.lift()
+            return
+        try:
+            entities = list_all_entities()
+        except ExperienceError as exc:
+            messagebox.showerror("知识库读取失败", str(exc), parent=self.control)
+            return
+        if not entities:
+            messagebox.showinfo("知识库", "当前没有可编辑实体。", parent=self.control)
+            return
+        self.knowledge_editor_entities = entities
+        self.knowledge_editor_index = 0
+        dialog = tk.Toplevel(self.root)
+        self.knowledge_editor = dialog
+        dialog.title("StS Agent - Knowledge Base Experience")
+        dialog.geometry("820x700+500+80")
+        dialog.minsize(620, 520)
+        dialog.configure(background=BACKGROUND)
+        dialog.attributes("-topmost", self.always_on_top)
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.grid_rowconfigure(2, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        header = tk.Frame(outer, background=BACKGROUND)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header.grid_columnconfigure(0, weight=1)
+        self.knowledge_editor_title = tk.Label(
+            header,
+            text="知识库经验编辑器",
+            foreground=ACCENT,
+            background=BACKGROUND,
+            font=(self.ui_font, 12, "bold"),
+            anchor="w",
+        )
+        self.knowledge_editor_title.grid(row=0, column=0, sticky="w")
+        self._minimize_button(header, dialog, background=BACKGROUND).grid(row=0, column=1, sticky="e")
+
+        self.knowledge_editor_meta = tk.Label(
+            outer,
+            text="",
+            foreground=MUTED,
+            background=BACKGROUND,
+            font=(self.data_font, 9),
+            anchor="w",
+            justify="left",
+        )
+        self.knowledge_editor_meta.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        content = tk.Frame(outer, background=BACKGROUND)
+        content.grid(row=2, column=0, sticky="nsew")
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_columnconfigure(1, weight=1)
+
+        static_frame = tk.Frame(content, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
+        static_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        static_frame.grid_rowconfigure(1, weight=1)
+        static_frame.grid_columnconfigure(0, weight=1)
+        tk.Label(static_frame, text="静态资料（只读）", foreground=WARNING, background=FIELD, font=(self.ui_font, 10, "bold"), anchor="w", padx=9, pady=7).grid(row=0, column=0, sticky="ew")
+        self.knowledge_editor_static = tk.Text(static_frame, wrap="word", state="disabled", background=FIELD, foreground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 9))
+        self.knowledge_editor_static.grid(row=1, column=0, sticky="nsew")
+        static_scroll = tk.Scrollbar(static_frame, command=self.knowledge_editor_static.yview, relief="flat", borderwidth=0, background=BUTTON, troughcolor=FIELD)
+        static_scroll.grid(row=1, column=1, sticky="ns")
+        self.knowledge_editor_static.configure(yscrollcommand=static_scroll.set)
+
+        experience_frame = tk.Frame(content, background=BACKGROUND)
+        experience_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        experience_frame.grid_rowconfigure(1, weight=1)
+        experience_frame.grid_columnconfigure(0, weight=1)
+        tk.Label(experience_frame, text="经验（最多三条，直接写入原静态 JSON）", foreground=WARNING, background=BACKGROUND, font=(self.ui_font, 10, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        fields_frame = tk.Frame(experience_frame, background=BACKGROUND)
+        fields_frame.grid(row=1, column=0, sticky="nsew")
+        fields_frame.grid_columnconfigure(0, weight=1)
+        for index in range(3):
+            fields_frame.grid_rowconfigure(index, weight=1)
+            field_box = tk.Frame(fields_frame, background=BACKGROUND)
+            field_box.grid(row=index, column=0, sticky="nsew", pady=(0 if index == 0 else 8, 0))
+            field_box.grid_rowconfigure(1, weight=1)
+            field_box.grid_columnconfigure(0, weight=1)
+            tk.Label(field_box, text=f"经验 {index + 1}", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
+            text = tk.Text(field_box, height=4, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=8, pady=7, font=(self.data_font, 9))
+            text.grid(row=1, column=0, sticky="nsew")
+            self.knowledge_editor_fields.append(text)
+
+        self.knowledge_editor_status = tk.StringVar(value="")
+        tk.Label(outer, textvariable=self.knowledge_editor_status, foreground=MUTED, background=BACKGROUND, font=(self.data_font, 9), anchor="w").grid(row=3, column=0, sticky="ew", pady=(9, 0))
+        buttons = tk.Frame(outer, background=BACKGROUND)
+        buttons.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        buttons.grid_columnconfigure(2, weight=1)
+        self.knowledge_editor_previous = self._button(buttons, "上一个", lambda: self._knowledge_editor_navigate(-1), compact=True)
+        self.knowledge_editor_previous.grid(row=0, column=0, padx=(0, 7))
+        self.knowledge_editor_next = self._button(buttons, "下一个", lambda: self._knowledge_editor_navigate(1), compact=True)
+        self.knowledge_editor_next.grid(row=0, column=1, padx=(0, 7))
+        self._button(buttons, "保存经验", self._save_knowledge_editor, compact=True).grid(row=0, column=3, padx=(7, 0))
+        self._button(buttons, "关闭", lambda: self._close_knowledge_editor(dialog), compact=True).grid(row=0, column=4, padx=(7, 0))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_knowledge_editor(dialog))
+        self._render_knowledge_editor()
+        dialog.lift()
+
+    def _knowledge_editor_values(self) -> list[str]:
+        return [field.get("1.0", "end-1c").strip() for field in self.knowledge_editor_fields]
+
+    def _knowledge_editor_is_dirty(self) -> bool:
+        return self._knowledge_editor_values() != self.knowledge_editor_original
+
+    def _render_knowledge_editor(self) -> None:
+        if not self.knowledge_editor_entities or not self.knowledge_editor_fields:
+            return
+        kind, entity = self.knowledge_editor_entities[self.knowledge_editor_index]
+        experience = entity.get("experience") if isinstance(entity.get("experience"), list) else []
+        self.knowledge_editor_original = [str(value) for value in experience[:3]] + [""] * (3 - len(experience[:3]))
+        self.knowledge_editor_title.configure(text=f"知识库经验编辑器 · {kind} / {entity.get('name') or entity.get('id') or '?'}")
+        self.knowledge_editor_meta.configure(text=f"实体 ID：{entity.get('id', '?')}    |    {self.knowledge_editor_index + 1} / {len(self.knowledge_editor_entities)}")
+        self.knowledge_editor_status.set("经验保存到 data/knowledge/sts1_*.json；当前实体未修改。")
+        self.knowledge_editor_static.configure(state="normal")
+        self.knowledge_editor_static.delete("1.0", "end")
+        self.knowledge_editor_static.insert("1.0", json.dumps(public_entity(entity), ensure_ascii=False, indent=2))
+        self.knowledge_editor_static.configure(state="disabled")
+        for field, value in zip(self.knowledge_editor_fields, self.knowledge_editor_original):
+            field.delete("1.0", "end")
+            field.insert("1.0", value)
+        self.knowledge_editor_previous.configure(state="normal" if self.knowledge_editor_index > 0 else "disabled")
+        self.knowledge_editor_next.configure(state="normal" if self.knowledge_editor_index + 1 < len(self.knowledge_editor_entities) else "disabled")
+
+    def _save_knowledge_editor(self) -> bool:
+        if not self.knowledge_editor_entities:
+            return False
+        kind, entity = self.knowledge_editor_entities[self.knowledge_editor_index]
+        values = [value for value in self._knowledge_editor_values() if value]
+        try:
+            saved = replace_experience(kind, str(entity.get("id") or ""), values, max_entries=3)
+        except (ExperienceError, OSError) as exc:
+            messagebox.showerror("经验保存失败", str(exc), parent=self.knowledge_editor)
+            return False
+        if saved:
+            entity["experience"] = saved
+        else:
+            entity.pop("experience", None)
+        self.knowledge_editor_original = saved + [""] * (3 - len(saved))
+        self.knowledge_editor_status.set(f"已保存 {kind} / {entity.get('id')} 的 {len(saved)} 条经验。")
+        return True
+
+    def _knowledge_editor_navigate(self, delta: int) -> None:
+        if not self.knowledge_editor_entities:
+            return
+        if self._knowledge_editor_is_dirty():
+            choice = messagebox.askyesnocancel("未保存的经验", "当前实体有未保存修改，是否先保存？", parent=self.knowledge_editor)
+            if choice is None:
+                return
+            if choice and not self._save_knowledge_editor():
+                return
+        target = self.knowledge_editor_index + delta
+        if 0 <= target < len(self.knowledge_editor_entities):
+            self.knowledge_editor_index = target
+            self._render_knowledge_editor()
+
+    def _close_knowledge_editor(self, dialog: tk.Toplevel) -> None:
+        if self.knowledge_editor is not dialog:
+            return
+        if self._knowledge_editor_is_dirty():
+            choice = messagebox.askyesnocancel("未保存的经验", "当前实体有未保存修改，是否先保存？", parent=dialog)
+            if choice is None:
+                return
+            if choice and not self._save_knowledge_editor():
+                return
+        try:
+            dialog.destroy()
+        except tk.TclError:
+            pass
+        self.knowledge_editor = None
+        self.knowledge_editor_entities = []
+        self.knowledge_editor_fields = []
+
     def _show_prompt_evolution_review(self, packet: dict[str, Any]) -> None:
         """Show either the pre-validation candidate gate or result gate."""
 
@@ -2272,7 +2463,7 @@ class OverlayTerminal:
             except tk.TclError:
                 pass
             self.attribution_dialog = None
-        for attribute in ("knowledge_answer_dialog", "knowledge_review_dialog"):
+        for attribute in ("knowledge_answer_dialog", "knowledge_review_dialog", "knowledge_editor"):
             dialog = getattr(self, attribute)
             if dialog is not None:
                 try:
