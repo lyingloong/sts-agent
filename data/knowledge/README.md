@@ -36,6 +36,13 @@ recorded again in `manifest.json`, and covered by unit tests:
 - 21 `powers` entries: remove concatenated base/upgraded descriptions. The
   affected Power IDs are fully enumerated in `manifest.json`.
 
+The upstream event list does not contain the opening Neow screen. The tracked
+`sts1_events.json` therefore includes the local `NEOW_EVENT` entity (display
+name `Neow Event`). It intentionally contains no fixed choices because the
+actual Neow options are generated per run; the live screen is authoritative.
+The local entity is also declared in `tools/fetch_card_knowledge.py` and
+preserved by future snapshot refreshes.
+
 These corrections are deliberately per-ID rather than heuristic text cleanup.
 Static data never overrides concrete state received from CommunicationMod.
 

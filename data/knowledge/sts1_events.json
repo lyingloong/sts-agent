@@ -1,5 +1,11 @@
 [
   {
+    "id": "NEOW_EVENT",
+    "name": "Neow Event",
+    "act": "neow",
+    "description": "开局进入爬塔前的涅奥奖励界面。涅奥会提供若干带有不同奖励、代价或条件的选项；具体选项、数值和可选顺序以当前游戏界面为准。比较时应同时考虑当前角色、进阶、初始牌组、生命值、首领以及后续路线，不要把静态说明当作当前可选项。"
+  },
+  {
     "id": "NOTEFORYOURSELF",
     "name": "A Note For Yourself",
     "act": "shrines",

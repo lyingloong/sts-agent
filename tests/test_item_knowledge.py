@@ -112,6 +112,26 @@ class ItemKnowledgeTests(unittest.TestCase):
         revealed_reward = controller.normalize_reward({"reward_type": "RELIC", "id": "Burning Blood", "name": "燃烧之血"})
         self.assertEqual(revealed_reward["relic"]["description"], "At the end of combat, heal 6 HP.")
 
+    def test_neow_event_is_kept_as_local_static_entity(self) -> None:
+        payload = fetch_card_knowledge.normalized_payload("events.json", [])
+        self.assertEqual(payload[0]["id"], "NEOW_EVENT")
+        self.assertIsNotNone(controller.entity_profile("event", "Neow Event"))
+        normalized = controller.normalize_state(
+            {
+                "game_state": {
+                    "screen_type": "EVENT",
+                    "screen_state": {
+                        "event_id": "Neow Event",
+                        "event_name": "Neow Event",
+                        "options": [],
+                    },
+                }
+            }
+        )
+        self.assertEqual(normalized["screen_state"]["knowledge"]["id"], "NEOW_EVENT")
+        references = controller.visible_entity_references(normalized)
+        self.assertEqual(references[0]["entity_id"], "NEOW_EVENT")
+
     def test_drops_internal_reward_uuid(self) -> None:
         reward = controller.normalize_reward(
             {"reward_type": "POTION", "id": "AttackPotion", "name": "攻击药水", "uuid": "hidden-object-id"}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -100,6 +101,20 @@ ENTITY_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
     },
 }
 
+# A few game screens are not represented as ordinary random events in the
+# upstream archive. Keep them as local static entities so the runtime can use
+# the same entity/profile/experience path for every event-like screen.
+LOCAL_ENTITIES: dict[str, list[dict[str, Any]]] = {
+    "events": [
+        {
+            "id": "NEOW_EVENT",
+            "name": "Neow Event",
+            "act": "neow",
+            "description": "开局进入爬塔前的涅奥奖励界面。涅奥会提供若干带有不同奖励、代价或条件的选项；具体选项、数值和可选顺序以当前游戏界面为准。比较时应同时考虑当前角色、进阶、初始牌组、生命值、首领以及后续路线，不要把静态说明当作当前可选项。",
+        }
+    ]
+}
+
 
 def fetch_json(source_url: str) -> Any:
     """Read source JSON through curl, which is more reliable on this Windows host."""
@@ -151,14 +166,20 @@ def normalize_entity(kind: str, entity: dict[str, Any]) -> dict[str, Any]:
 def normalized_payload(relative_path: str, payload: Any) -> Any:
     """Normalize entity collections and apply their explicit corrections."""
     kind = Path(relative_path).stem
-    if kind not in ENTITY_OVERRIDES:
+    if kind not in ENTITY_OVERRIDES and kind not in LOCAL_ENTITIES:
         return payload
     entities = payload.get(kind, payload) if isinstance(payload, dict) else payload
     if isinstance(entities, dict):
         entities = list(entities.values())
     if not isinstance(entities, list):
         raise RuntimeError(f"{relative_path} does not contain an entity list")
-    return [normalize_entity(kind, entity) if isinstance(entity, dict) else entity for entity in entities]
+    result = [normalize_entity(kind, entity) if isinstance(entity, dict) else entity for entity in entities]
+    known_ids = {str(item.get("id") or "").strip().upper() for item in result if isinstance(item, dict)}
+    for local_entity in LOCAL_ENTITIES.get(kind, []):
+        local_id = str(local_entity.get("id") or "").strip().upper()
+        if local_id and local_id not in known_ids:
+            result.append(copy.deepcopy(local_entity))
+    return result
 
 
 def output_path(relative_path: str) -> Path:
@@ -185,6 +206,7 @@ def write_manifest() -> None:
         "source_base_url": SOURCE_BASE_URL,
         "files": [f"sts1_{path}" for path in (*KNOWLEDGE_FILES, *LOCALIZATION_FILES)],
         "local_entity_overrides": ENTITY_OVERRIDES,
+        "local_entities": LOCAL_ENTITIES,
         "notes": "Static snapshot is tracked in Git. Runtime fields from CommunicationMod remain authoritative.",
     }
     path = OUTPUT_DIR / "manifest.json"
