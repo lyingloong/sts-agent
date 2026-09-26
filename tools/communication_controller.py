@@ -3596,6 +3596,7 @@ class TeacherClient:
                 "latency_ms": selection.get("latency_ms"),
                 "attempt": selection.get("attempt"),
                 "finish_reason": selection.get("finish_reason"),
+                "truncated": bool(selection.get("truncated")),
                 "output": selection.get("output", ""),
                 "thinking": selection.get("thinking", ""),
                 "usage": selection.get("usage"),
@@ -3623,6 +3624,7 @@ class TeacherClient:
             "latency_ms": selection.get("latency_ms"),
             "attempt": selection.get("attempt"),
             "finish_reason": selection.get("finish_reason"),
+            "truncated": bool(selection.get("truncated")),
             "output": selection.get("output", ""),
             "thinking": selection.get("thinking", ""),
             "usage": selection.get("usage"),
@@ -3964,8 +3966,37 @@ def ask_action(
         and candidate_assist_allowed(message, teacher.screens)
     )
 
-    def send_teacher_update(decision_update: dict[str, Any]) -> None:
-        send_model_update(decision_update, auto_execute=True)
+    def send_teacher_update(
+        decision_update: dict[str, Any],
+        *,
+        lightweight: bool = True,
+    ) -> None:
+        """Send live teacher output without repainting the current game view.
+
+        A streaming completion can yield many small reasoning fragments.  The
+        regular ``model_update`` packet includes a formatted terminal view and
+        a full overlay state, which made each fragment rebuild the status
+        table.  Only the first/terminal status needs that complete packet.
+        """
+        if getattr(bridge, "connection", None) is None:
+            return
+        if not lightweight:
+            send_model_update(decision_update, model_pending=True)
+            return
+        packet: dict[str, Any] = {
+            "type": "teacher_update",
+            "decision": decision_update,
+            "model_pending": True,
+        }
+        evolution = getattr(teacher, "prompt_evolution", None)
+        if evolution is not None and evolution.enabled:
+            packet["prompt_evolution"] = evolution.status()
+        try:
+            bridge.send(packet)
+        except OSError:
+            # The game action can still be executed if the optional UI closes
+            # during a long streaming request.
+            return
 
     if teacher_active:
         send_teacher_update(
@@ -3986,7 +4017,8 @@ def ask_action(
                 "executed_action": None,
                 "source": None,
                 "overridden": None,
-            }
+            },
+            lightweight=False,
         )
         decision = teacher.rank(
             policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys),
@@ -3998,7 +4030,7 @@ def ask_action(
         # this update keeps the action panel from looking frozen during the
         # human-answer/teacher-curation round trip.
         if isinstance(decision, dict) and isinstance(decision.get("knowledge_request"), dict):
-            send_teacher_update(decision)
+            send_teacher_update(decision, lightweight=False)
         knowledge_results: list[dict[str, Any]] = []
         for _ in range(3):
             knowledge_request = decision.get("knowledge_request") if isinstance(decision, dict) else None

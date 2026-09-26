@@ -512,6 +512,8 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
     thinking = str(teacher.get("thinking") or "").strip()
     output = str(teacher.get("output") or "").strip()
     lines.extend(("", "教师思考", thinking or "（未返回思考内容）", "", "最终输出", output or "（未返回输出）"))
+    if teacher.get("truncated"):
+        lines.extend(("", "警告：模型输出达到上限，思考或最终动作可能被截断。"))
     if decision.get("assist_reason") and not decision.get("model_candidates"):
         lines.extend(("", f"回退原因：{decision.get('assist_reason')}"))
     if decision.get("knowledge_error"):
@@ -1286,6 +1288,8 @@ class OverlayTerminal:
         self.teacher_text.insert("end", f"\n{thinking}", "teacher_body")
         self.teacher_text.insert("end", "\n\n最终输出", "teacher_section")
         self.teacher_text.insert("end", f"\n{output}", "teacher_output")
+        if teacher.get("truncated"):
+            self.teacher_text.insert("end", "\n\n警告：模型输出达到上限，思考或最终动作可能被截断。", "teacher_warning")
         if decision.get("assist_reason") and not decision.get("model_candidates"):
             self.teacher_text.insert("end", f"\n\n回退原因：{decision.get('assist_reason')}", "teacher_warning")
         if decision.get("knowledge_error"):
@@ -1299,6 +1303,9 @@ class OverlayTerminal:
         if isinstance(request, dict):
             self.teacher_text.insert("end", "\n\n知识请求", "teacher_section")
             self.teacher_text.insert("end", f"\n{request.get('entity_type', '?')} / {request.get('entity_id', '?')}\n{request.get('question', '')}", "teacher_body")
+        # Streaming updates replace the whole read-only widget. Keep the
+        # viewport on the newest reasoning instead of jumping back to line 1.
+        self.teacher_text.see("end")
         self.teacher_text.configure(state="disabled")
 
     def _configure_teacher_tags(self) -> None:
@@ -1468,6 +1475,27 @@ class OverlayTerminal:
 
     def _show_view(self, packet: dict[str, Any]) -> None:
         if self.closing:
+            return
+        if packet.get("type") == "teacher_update":
+            # A stream fragment intentionally has no game-state payload.  Do
+            # not rebuild the status panel or candidate buttons for it: that
+            # redraw path is expensive enough to make the game feel stalled.
+            decision = packet.get("decision")
+            teacher_mode = isinstance(decision, dict) and decision.get("mode") in {"teacher_collection", "prompt_evolution"}
+            if not teacher_mode:
+                return
+            self.pending_view = True
+            self._set_connection("教师正在思考", WARNING)
+            mode_title, _mode_purpose = action_panel_mode_info(decision)
+            self.control.title(f"StS Agent - {mode_title}")
+            self.control_title_label.configure(text=mode_title)
+            self.candidate_frame.grid_remove()
+            self.teacher_frame.grid()
+            self._set_teacher_panel(decision)
+            if decision.get("mode") == "prompt_evolution":
+                self.online_rl.withdraw()
+                self._set_prompt_evolution_panel(packet.get("prompt_evolution"), decision.get("model_id"))
+            self._set_controls_enabled(False)
             return
         self.pending_view = True
         self._set_connection("等待操作", WARNING)

@@ -262,6 +262,15 @@ class OverlayFormattingTests(unittest.TestCase):
         self.assertIn("网络重试中", rendered)
         self.assertIn("第 2 次，等待 1.0 秒后继续", rendered)
 
+    def test_teacher_panel_text_shows_truncation_warning(self) -> None:
+        rendered = overlay_terminal.teacher_panel_text(
+            {
+                "mode": "prompt_evolution",
+                "teacher": {"truncated": True, "thinking": "思考", "output": "{}"},
+            }
+        )
+        self.assertIn("达到上限", rendered)
+
     def test_history_line_falls_back_to_action_id(self) -> None:
         self.assertEqual(overlay_terminal.history_line({"step_id": 2, "action_id": "END_TURN"}), "#2 END_TURN")
 

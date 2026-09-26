@@ -115,6 +115,16 @@ class TeacherClientTests(unittest.TestCase):
         self.assertIn("combat.monsters[*].knowledge", prompt)
         self.assertIn("不代表本回合一定会使用", prompt)
 
+    def test_common_prompt_explains_default_turn_and_healing_rules(self) -> None:
+        prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP"}, persona="player")
+        self.assertIn("获得 3 点能量", prompt)
+        self.assertIn("抽 5 张牌", prompt)
+        self.assertIn("失去所有未使用的能量", prompt)
+        self.assertIn("弃掉所有手牌", prompt)
+        self.assertIn("普通战斗结束后自动回复", prompt)
+        self.assertIn("回复 75% 最大生命", prompt)
+        self.assertIn("明确给出例外", prompt)
+
     def test_teacher_payload_uses_scenario_system_prompt(self) -> None:
         client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
         client.model = "deepseek-v4-pro"
@@ -130,6 +140,33 @@ class TeacherClientTests(unittest.TestCase):
         )
         self.assertIn("商店决策", payload["messages"][0]["content"])
         self.assertIn("A1 | 购买", payload["messages"][1]["content"])
+
+    def test_thinking_payload_uses_total_budget_and_low_reasoning_effort(self) -> None:
+        client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
+        client.model = "deepseek-v4-pro-0813"
+        client.temperature = 0.0
+        client.max_tokens = 1024
+        client.max_completion_tokens = 32768
+        client.max_input_chars = 32000
+        client.thinking = True
+        client.reasoning_effort = "low"
+        client.json_mode = True
+        client.streaming = True
+        payload = client._payload(
+            {"screen_type": "MAP"},
+            [{"id": "A1", "label": "选择"}],
+        )
+        self.assertEqual(payload["max_completion_tokens"], 32768)
+        self.assertNotIn("max_tokens", payload)
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertTrue(payload["stream"])
+
+    def test_live_reasoning_display_keeps_tail(self) -> None:
+        text = "开头" + ("中间" * 100) + "最新结论"
+        rendered = teacher_client.display_tail_text(text, limit=20)
+        self.assertIn("前文省略", rendered)
+        self.assertIn("最新结论", rendered)
+        self.assertNotEqual(rendered[:2], "开头")
 
     def test_select_can_override_temperature_for_deterministic_prompt_evolution(self) -> None:
         client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)

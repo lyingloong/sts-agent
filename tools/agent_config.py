@@ -74,10 +74,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "retry_max_backoff_seconds": 30.0,
         "temperature": 0.0,
         "max_tokens": 512,
+        # Optional total budget for thinking + final answer. Zero keeps the
+        # legacy max_tokens request for providers that do not support it.
+        "max_completion_tokens": 0,
         "max_input_chars": 32000,
         "thinking": True,
         "json_mode": True,
         "streaming": True,
+        "reasoning_effort": "",
+        "stream_update_interval_seconds": 0.3,
         "screens": ["ALL"],
     },
     "posthoc_feedback": {
@@ -314,12 +319,19 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     max_tokens = teacher["max_tokens"]
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 32 <= max_tokens <= 8192:
         raise ConfigError("teacher.max_tokens must be an integer from 32 to 8192")
+    max_completion_tokens = teacher["max_completion_tokens"]
+    if isinstance(max_completion_tokens, bool) or not isinstance(max_completion_tokens, int) or not 0 <= max_completion_tokens <= 131072:
+        raise ConfigError("teacher.max_completion_tokens must be an integer from 0 to 131072")
     max_input_chars = teacher["max_input_chars"]
     if isinstance(max_input_chars, bool) or not isinstance(max_input_chars, int) or not 0 <= max_input_chars <= 262144:
         raise ConfigError("teacher.max_input_chars must be an integer from 0 to 262144")
     _require_bool(teacher["thinking"], "teacher.thinking")
     _require_bool(teacher["json_mode"], "teacher.json_mode")
     _require_bool(teacher["streaming"], "teacher.streaming")
+    reasoning_effort = teacher["reasoning_effort"]
+    if not isinstance(reasoning_effort, str) or reasoning_effort.strip().lower() not in {"", "low", "medium", "high", "max"}:
+        raise ConfigError("teacher.reasoning_effort must be empty, low, medium, high, or max")
+    _require_number(teacher["stream_update_interval_seconds"], "teacher.stream_update_interval_seconds", 0.05, 2.0)
     teacher_screens = teacher["screens"]
     if not isinstance(teacher_screens, list) or not teacher_screens or not all(isinstance(item, str) for item in teacher_screens):
         raise ConfigError("teacher.screens must be a non-empty list of strings")

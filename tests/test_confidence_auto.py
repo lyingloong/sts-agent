@@ -19,6 +19,18 @@ class NoBridge:
         raise AssertionError(f"automatic decision unexpectedly requested terminal input: {packet}")
 
 
+class RecordingBridge:
+    """Bridge stand-in for verifying non-blocking UI status packets."""
+
+    connection = object()
+
+    def __init__(self) -> None:
+        self.packets: list[dict] = []
+
+    def send(self, packet: dict) -> None:
+        self.packets.append(packet)
+
+
 class FakePolicy:
     def __init__(self, decision):
         self.decision = decision
@@ -49,6 +61,20 @@ class FakeTeacher:
             "model_candidates": [{"action_id": "CHOOSE:index=1", "rank": 1}],
             "teacher": {"model_id": "teacher-test", "prompt_version": "test-v1", "latency_ms": 12},
         }
+
+
+class StreamingTeacher(FakeTeacher):
+    def rank(self, observation, legal_actions, on_update=None):
+        if on_update is not None:
+            on_update(
+                {
+                    "mode": "teacher_collection",
+                    "model_id": self.model,
+                    "teacher": {"model_id": self.model, "thinking": "正在比较事件选项"},
+                    "assist_status": "请求中",
+                }
+            )
+        return super().rank(observation, legal_actions, on_update)
 
 
 def event_message() -> dict:
@@ -662,6 +688,19 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(final["source"], "teacher_auto")
         self.assertFalse(final["overridden"])
         self.assertEqual(final["teacher"]["prompt_version"], "test-v1")
+
+    def test_teacher_stream_update_is_lightweight(self) -> None:
+        bridge = RecordingBridge()
+        with patch.object(controller.time, "sleep"):
+            controller.ask_action(bridge, event_message(), "run-1", teacher=StreamingTeacher())
+        updates = [packet for packet in bridge.packets if packet.get("type") == "teacher_update"]
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["decision"]["teacher"]["thinking"], "正在比较事件选项")
+        self.assertNotIn("text", updates[0])
+        self.assertNotIn("overlay", updates[0])
+        full_updates = [packet for packet in bridge.packets if packet.get("type") == "model_update"]
+        self.assertTrue(full_updates)
+        self.assertTrue(any("overlay" in packet for packet in full_updates))
 
     def test_disabled_teacher_does_not_shadow_policy(self) -> None:
         decision = {

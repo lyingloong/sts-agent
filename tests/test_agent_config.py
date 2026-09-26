@@ -126,6 +126,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config["overlay"]["status"]["divider_columns"], 36)
         self.assertEqual(config["policy"]["remote"]["inference_gpu"]["device"], "auto")
         self.assertEqual(config["posthoc_feedback"]["mode"], "human")
+        self.assertEqual(config["teacher"]["max_completion_tokens"], 32768)
+        self.assertEqual(config["teacher"]["reasoning_effort"], "low")
 
     def test_mode_profiles_are_valid_sparse_overrides(self) -> None:
         mode_root = TOOLS_DIR.parent / "config" / "modes"

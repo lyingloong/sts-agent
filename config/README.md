@@ -69,9 +69,9 @@ python tools\overlay_terminal.py
 | `<group>.api_key_file` | 相对项目根目录的密钥文件，必须被 Git 忽略。 |
 | `<group>.timeout_seconds` / `max_retries` | 单次 API 请求超时和失败后的最多重试次数；网络错误、超时、429 和 5xx 会重试，认证/参数类 4xx 立即失败。 |
 | `<group>.retry_backoff_seconds` / `retry_max_backoff_seconds` | 重试前的指数退避起始秒数和上限；默认第 1 次重试等待 5 秒，之后按 5、10、20... 秒增长。按 RPM=20 的远程服务限制设置。设为 `0` 可关闭等待但仍保留重试。 |
-| `<group>.temperature` / `max_tokens` | 教师/归因模型生成温度与最大输出 token。 |
+| `<group>.temperature` / `max_tokens` / `max_completion_tokens` | 教师/归因模型温度、最终回复上限，以及思考模式下“思考+最终回复”的总输出上限。启用思考时优先使用后者。 |
 | `teacher.max_input_chars` / `teacher.screens` | 教师单步上下文的最大字符数，以及请求教师的场景。 |
-| `teacher.thinking` / `json_mode` / `streaming` | 是否请求思考、结构化 JSON 和流式展示。 |
+| `teacher.thinking` / `json_mode` / `streaming` | 是否请求思考、结构化 JSON 和流式展示。`reasoning_effort` 可设为 `low`/`medium`/`high`/`max`；`stream_update_interval_seconds` 控制流式面板刷新频率。 |
 | `posthoc_feedback.max_input_chars` | 单局归因上下文最大字符数；动态状态和全动作列表会优先保留。 |
 | `posthoc_feedback.max_reflection_chars` | 玩家正/负反思文本的最大字符数。 |
 | `posthoc_feedback.max_candidates_per_direction` | 教师每个方向可提出的候选步骤数。 |

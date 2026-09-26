@@ -198,6 +198,16 @@ def display_text(value: Any, limit: int = 4000) -> str:
     return text if len(text) <= limit else text[:limit] + "...<truncated>"
 
 
+def display_tail_text(value: Any, limit: int = 4000) -> str:
+    """Bound live reasoning from the end so streaming panels show new text."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return "...<前文省略>\n" + text[-limit:]
+
+
 TeacherUpdate = Callable[[dict[str, Any]], None]
 
 
@@ -215,10 +225,13 @@ class RemoteTeacherClient:
         self.retry_max_backoff_seconds = float(config.get("retry_max_backoff_seconds", 8.0))
         self.temperature = float(config["temperature"])
         self.max_tokens = int(config["max_tokens"])
+        self.max_completion_tokens = int(config.get("max_completion_tokens", 0) or 0)
         self.max_input_chars = int(config["max_input_chars"])
         self.thinking = bool(config["thinking"])
         self.json_mode = bool(config["json_mode"])
         self.streaming = bool(config["streaming"])
+        self.reasoning_effort = str(config.get("reasoning_effort", "") or "").strip().lower()
+        self.stream_update_interval = float(config.get("stream_update_interval_seconds", 0.3))
         self.screens = tuple(item.strip().upper() for item in config["screens"])
         self.allow_knowledge_request = False
         self.knowledge_request_style = "encouraged"
@@ -276,9 +289,19 @@ class RemoteTeacherClient:
                 },
             ],
             "temperature": self.temperature if temperature is None else float(temperature),
-            "max_tokens": self.max_tokens,
             "stream": self.streaming,
         }
+        max_completion_tokens = int(getattr(self, "max_completion_tokens", 0) or 0)
+        if max_completion_tokens > 0:
+            # DeepSeek V4 thinking output and the final JSON share one output
+            # budget. max_completion_tokens is the provider's total-budget
+            # parameter; max_tokens alone can truncate reasoning first.
+            payload["max_completion_tokens"] = max_completion_tokens
+        else:
+            payload["max_tokens"] = self.max_tokens
+        reasoning_effort = str(getattr(self, "reasoning_effort", "") or "").strip().lower()
+        if self.thinking and reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
         if self.streaming:
             payload["stream_options"] = {"include_usage": True}
         # USTC's gateway suppresses reasoning_content when JSON mode is
@@ -317,11 +340,12 @@ class RemoteTeacherClient:
         if callback is None:
             return last_emit
         now = time.monotonic()
-        if not done and now - last_emit < 0.12:
+        interval = max(0.05, float(getattr(self, "stream_update_interval", 0.3)))
+        if not done and now - last_emit < interval:
             return last_emit
         callback(
             {
-                "thinking": display_text(thinking),
+                "thinking": display_tail_text(thinking, limit=5000),
                 "output": display_text(output, limit=1000),
                 "done": done,
             }
@@ -493,10 +517,21 @@ class RemoteTeacherClient:
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature if temperature is None else float(temperature),
-            "max_tokens": self.max_tokens if max_tokens is None else int(max_tokens),
             "stream": use_streaming,
             "thinking": {"type": "enabled" if use_thinking else "disabled"},
         }
+        requested_tokens = self.max_tokens if max_tokens is None else int(max_tokens)
+        # Generic analysis calls normally disable thinking and intentionally
+        # use their explicit max_tokens. Action calls use the configured total
+        # budget when thinking is enabled.
+        max_completion_tokens = int(getattr(self, "max_completion_tokens", 0) or 0)
+        if use_thinking and max_tokens is None and max_completion_tokens > 0:
+            payload["max_completion_tokens"] = max_completion_tokens
+        else:
+            payload["max_tokens"] = requested_tokens
+        reasoning_effort = str(getattr(self, "reasoning_effort", "") or "").strip().lower()
+        if use_thinking and reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
         if use_streaming:
             payload["stream_options"] = {"include_usage": True}
         if use_json_mode and not use_thinking:
@@ -517,6 +552,7 @@ class RemoteTeacherClient:
                 if not isinstance(content, str) or not content.strip():
                     raise TeacherError("teacher response contains no text content")
                 usage = response.get("usage")
+                finish_reason = str(choices[0].get("finish_reason") or "")
                 self.last_error = None
                 return {
                     "request_id": self.request_id,
@@ -524,7 +560,8 @@ class RemoteTeacherClient:
                     "prompt_version": prompt_version,
                     "latency_ms": round((time.monotonic() - started) * 1000),
                     "attempt": attempt + 1,
-                    "finish_reason": str(choice.get("finish_reason") or ""),
+                    "finish_reason": finish_reason,
+                    "truncated": finish_reason in {"length", "max_tokens"},
                     "output": display_text(content, limit=16000),
                     "usage": {
                         "prompt_tokens": _usage_value(usage, "prompt_tokens"),
@@ -578,14 +615,25 @@ class RemoteTeacherClient:
                     raise TeacherError("teacher returned knowledge_request while knowledge assistance is disabled", retryable=False)
                 reasoning = ""
                 if isinstance(message, dict):
-                    reasoning = display_text(
+                    reasoning_value = (
                         message.get("reasoning_content")
                         or message.get("reasoning")
                         or message.get("thinking")
                     )
+                    reasoning = (
+                        reasoning_value
+                        if isinstance(reasoning_value, str)
+                        else self._delta_text(reasoning_value)
+                    )
                 if not reasoning:
-                    reasoning = display_text(choices[0].get("reasoning_content"))
+                    reasoning_value = choices[0].get("reasoning_content")
+                    reasoning = (
+                        reasoning_value
+                        if isinstance(reasoning_value, str)
+                        else self._delta_text(reasoning_value)
+                    )
                 usage = response.get("usage")
+                finish_reason = str(choices[0].get("finish_reason") or "")
                 self.last_error = None
                 return {
                     "request_id": self.request_id,
@@ -596,9 +644,10 @@ class RemoteTeacherClient:
                     "prompt_version": prompt_version or PROMPT_VERSION,
                     "latency_ms": round((time.monotonic() - started) * 1000),
                     "attempt": attempt + 1,
-                    "finish_reason": str(choices[0].get("finish_reason") or ""),
+                    "finish_reason": finish_reason,
+                    "truncated": finish_reason in {"length", "max_tokens"},
                     "output": display_text(content, limit=1000),
-                    "thinking": reasoning,
+                    "thinking": display_tail_text(reasoning, limit=5000),
                     "usage": {
                         "prompt_tokens": _usage_value(usage, "prompt_tokens"),
                         "completion_tokens": _usage_value(usage, "completion_tokens"),
