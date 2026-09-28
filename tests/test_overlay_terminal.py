@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import overlay_terminal  # noqa: E402
+from sts_agent.ui import overlay as overlay_terminal
 
 
 class OverlayFormattingTests(unittest.TestCase):

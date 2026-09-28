@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import communication_controller as controller  # noqa: E402
-import card_knowledge  # noqa: E402
-import fetch_card_knowledge  # noqa: E402
-import item_knowledge  # noqa: E402
-import power_knowledge  # noqa: E402
+from sts_agent.runtime import controller
+from sts_agent.game.sts1 import card_knowledge, item_knowledge, power_knowledge
+from sts_agent.commands import fetch_knowledge as fetch_card_knowledge
 
 
 class ItemKnowledgeTests(unittest.TestCase):

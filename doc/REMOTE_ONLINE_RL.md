@@ -6,12 +6,12 @@ aliases to one GPU on the training machine. No public inference port is opened.
 
 ## Modes
 
-`policy.runtime` in `config/agent.json` selects one mode:
+`framework.policy_backend` and `framework.learning_method` select the runtime:
 
 | Runtime | Remote command | Behavior |
 | --- | --- | --- |
-| `remote_inference` | `tools/policy_server.py` | Loads one fixed SFT LoRA adapter. Existing Candidate Assist or confidence-auto behavior is unchanged. |
-| `remote_online_rl` | `tools/online_rl_worker.py` | Samples every action from a frozen adapter, collects `K=4` complete local episodes, then updates the resident LoRA adapter on the same remote GPU. |
+| `remote_qwen` + `learning_method=none` | `sts_agent.policy.local_qwen` | Loads one fixed SFT LoRA adapter. Existing Candidate Assist or confidence-auto behavior is unchanged. |
+| `remote_qwen` + `learning_method=online_rl` | `sts_agent.learning.online_rl.worker` | Samples every action from a frozen adapter, collects `K=4` complete local episodes, then updates the resident LoRA adapter on the same remote GPU. |
 
 `local` remains the existing on-machine Candidate Assist mode.
 
@@ -43,7 +43,7 @@ it does not migrate the resident model between groups.
 The remote Python environment needs the training dependencies:
 
 ```bash
-.venv/bin/pip install -r tools/requirements-train.txt
+.venv/bin/pip install -r requirements/train.txt
 ```
 
 On Windows, set `policy.enabled` to `true`, disable `teacher.enabled`, and set
@@ -189,7 +189,7 @@ allocating a GPU:
 ```bash
 cd /data/wanghao/sts-agent
 cp config/online_rl.example.json /tmp/sts-online-mock.json
-.venv/bin/python tools/online_rl_worker.py \
+.venv/bin/python -m sts_agent.learning.online_rl.worker \
   --config /tmp/sts-online-mock.json \
   --model mock --initial-adapter '' --initial-policy-version mock --mock
 ```

@@ -6,11 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import train_sft  # noqa: E402
+from sts_agent.learning import sft as train_sft
 
 
 class TrainSftTests(unittest.TestCase):

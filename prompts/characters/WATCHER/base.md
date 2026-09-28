@@ -1,6 +1,6 @@
 # Watcher 角色 Prompt
 
-这是只对 Watcher 生效的角色专属 skill。基础场景 skill 仍在 `tools/teacher_prompts.py`；本文件描述角色机制，不替代当前状态和合法动作。
+这是只对 Watcher 生效的角色专属 skill。基础场景 skill 由 `sts_agent.policy.teacher_prompts` 维护；本文件描述角色机制，不替代当前状态和合法动作。
 
 - 每一步先确认当前姿态及其进出代价：愤怒提高输出也提高承伤，平静提供能量，神格带来爆发；不要在无法结束威胁时盲目进入愤怒。
 - 评估姿态转换、抽牌、保留牌、预见和保留资源的完整循环；不要只按单张牌的高伤害选择。

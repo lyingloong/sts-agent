@@ -22,7 +22,7 @@
         -> action-trace (source=teacher_auto)
 ```
 
-教师只能看到 `normalize_state` 产生的公开状态；种子、抽牌顺序、对象 UUID 和 API 密钥不进入 prompt。教师使用 `tools/teacher_prompts.py` 中的中文场景化策略提示词：地图、战斗、卡牌奖励、战斗奖励、删牌、升级、变化、商店、事件、营火、首领遗物和过渡态分别采用不同决策框架。策略提示词只发送给远程教师，不进入本地 Qwen prompt、SFT observation 或 target。每条已接受 trace 额外记录教师模型 ID、prompt 版本、请求延迟、尝试次数、finish reason 和 token 用量。默认开启 thinking；Overlay 的 `MODEL / ACTION` 窗口会在教师模式下显示有界的思考内容和最终输出，本地 Qwen 模式仍使用候选/置信度界面。教师回复原文及 reasoning 只存在于当前内存中的 UI 决策，不写入 action trace 或 SFT 数据。
+教师只能看到 `normalize_state` 产生的公开状态；种子、抽牌顺序、对象 UUID 和 API 密钥不进入 prompt。教师使用 `sts_agent.policy.teacher_prompts` 中的中文场景化策略提示词：地图、战斗、卡牌奖励、战斗奖励、删牌、升级、变化、商店、事件、营火、首领遗物和过渡态分别采用不同决策框架。策略提示词只发送给远程教师，不进入本地 Qwen prompt、SFT observation 或 target。每条已接受 trace 额外记录教师模型 ID、prompt 版本、请求延迟、尝试次数、finish reason 和 token 用量。默认开启 thinking；Overlay 的 `MODEL / ACTION` 窗口会在教师模式下显示有界的思考内容和最终输出，本地 Qwen 模式仍使用候选/置信度界面。教师回复原文及 reasoning 只存在于当前内存中的 UI 决策，不写入 action trace 或 SFT 数据。
 
 单步 API 失败、超时、解析失败或返回未知别名时，该步进入人工 fallback；不能自动重试或猜测游戏命令。教师使用 `screens=["ALL"]` 时覆盖地图、战斗、事件、商店、奖励、休息和牌组选择等全局动作，不按游戏部分筛选。
 
@@ -35,7 +35,7 @@
 原始事实来源仍是每局独立的 `action-trace-*.jsonl`。运行：
 
 ```powershell
-python tools\export_teacher_sft.py
+python -m sts_agent.learning.export_teacher_sft
 ```
 
 导出器仅保留同时满足以下条件的 step：
@@ -118,4 +118,4 @@ R = 100 * victory
 
 3050 只承担游戏、CommunicationMod、controller、远程教师请求和 trace 写盘；教师 API 不占本地模型显存。Qwen SFT、离线评测和 GRPO 更新放在远程 8x 4090。对当前 Qwen3-0.6B 和 6,417 条样本，第一轮使用单张 4090 QLoRA；其余 GPU 用于并行消融和评测，而不是强行 DDP。游戏仍在本机，因此 rollout 要先把冻结 adapter 取回本机运行，再把新轨迹 bundle 回传训练机。
 
-当前仓库已实现教师采集、SFT 导出、训练 bundle 和 `tools/train_sft.py` 的 QLoRA alias-action SFT，也实现了远程固定 adapter 推理与单 GPU、K=4 的 episode-level 在线更新原型。固定种子自动评测、数据质量门槛和更完整的研究级 GRPO 对照尚未实现。训练逻辑保持在独立模块中，不放进 `communication_controller.py`。远程协议和运行方式见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。
+当前仓库已实现教师采集、SFT 导出、训练 bundle 和 `sts_agent.learning.sft` 的 QLoRA alias-action SFT，也实现了远程固定 adapter 推理与单 GPU、K=4 的 episode-level 在线更新原型。固定种子自动评测、数据质量门槛和更完整的研究级 GRPO 对照尚未实现。训练逻辑保持在独立模块中，不放进 controller。远程协议和运行方式见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。

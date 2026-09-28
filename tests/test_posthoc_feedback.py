@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import sys
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import posthoc_feedback  # noqa: E402
+from sts_agent.learning import posthoc_feedback
 
 
 def episode() -> dict:

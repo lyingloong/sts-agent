@@ -4,10 +4,16 @@
 
 ## 开关
 
-推荐在 `config/agent.json` 中设置 `"active_mode": "prompt_evolution"`。该文件内的 `mode_profiles.prompt_evolution` 保存本模式配置，CommunicationMod、controller 和 Overlay 会自动使用同一份配置；`config/modes/prompt_evolution.json` 仍可作为兼容的独立入口：
+在 `config/agent.json` 中直接设置 Prompt 演化的 framework，并启用对应配置：
 
 ```json
 {
+  "framework": {
+    "game": "sts1",
+    "control_mode": "autonomous",
+    "policy_backend": "remote_teacher",
+    "learning_method": "prompt_evolution"
+  },
   "policy": {"enabled": false},
   "teacher": {"enabled": true},
   "posthoc_feedback": {"enabled": false},
@@ -15,13 +21,13 @@
 }
 ```
 
-当前单文件 profile 使用阿里云 DeepSeek 配置；如需改服务，只修改 `mode_profiles.prompt_evolution.teacher`。四个开关有意互斥：本模式不同时启动 Qwen、在线 RL 或终局归因。
+当前配置使用阿里云 DeepSeek；如需改服务，直接修改顶层 `teacher`。四个开关有意互斥：本模式不同时启动 Qwen、在线 RL 或终局归因。
 
 教师请求支持配置化重试：网络断开、超时、429、503 等临时错误会按指数退避自动重试；认证或请求参数错误不会无意义地重复请求。达到 `teacher.max_retries` 后才回退为不可用并保留本局轨迹，不会使 controller 进程退出。相关参数见 [`config/README.md`](../config/README.md)。
 
 ## 初版 Prompt
 
-基础动作 Prompt 在 [`tools/teacher_prompts.py`](../tools/teacher_prompts.py)，包含通用决策要求和 MAP、COMBAT、EVENT、商店、奖励、删牌等场景化提示。教师 SFT 使用 `sts1-teacher-zh-v7` 的“远程教师”身份；本模式的实际动作请求使用 `sts1-player-zh-v3` 的“正在游玩的玩家”身份。角色基础 Prompt 位于 [`prompts/characters`](../prompts/characters)，每个角色拥有独立的 `base.md` 和 `p0001` 策略版本；后续人工接受的演化只影响当前角色，不会覆盖其他角色的 Prompt。
+基础动作 Prompt 在 [`sts_agent.policy.teacher_prompts`](../sts_agent/policy/teacher_prompts.py)，包含通用决策要求和 MAP、COMBAT、EVENT、商店、奖励、删牌等场景化提示。教师 SFT 使用 `sts1-teacher-zh-v7` 的“远程教师”身份；本模式的实际动作请求使用 `sts1-player-zh-v3` 的“正在游玩的玩家”身份。角色基础 Prompt 位于 [`prompts/characters`](../prompts/characters)，每个角色拥有独立的 `base.md` 和 `p0001` 策略版本；后续人工接受的演化只影响当前角色，不会覆盖其他角色的 Prompt。
 
 ## 动作 Prompt 组成
 

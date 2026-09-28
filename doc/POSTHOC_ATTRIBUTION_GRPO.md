@@ -52,7 +52,7 @@
 
 ## 运行流程
 
-1. 正常以 `policy.runtime: "remote_online_rl"` 启动游戏与 Overlay。
+1. 正常以 `framework.policy_backend: "remote_qwen"`、`framework.learning_method: "online_rl"` 启动游戏与 Overlay。
 2. 每个 rollout 的策略动作仍由冻结的远端 adapter 自动采样和执行。
 3. `mode="human"` 时，`GAME_OVER` 或 `VICTORY` 后 Overlay 弹出 `ROLLOUT REFLECTION`，其中按时间顺序显示本局全部已确认动作（`step_id`、Act-Floor、场景、模型/自动来源和动作语义）。两栏均可留空；点击“跳过本局”也可继续。`mode="auto"` 时不弹窗，教师直接根据终局状态、完整动作账本和各步骤公开动态状态独立生成双向归因。
 4. controller 保存人工文字或自动复盘标记，然后使用 DeepSeek 生成每个方向至多 10 个候选归因。

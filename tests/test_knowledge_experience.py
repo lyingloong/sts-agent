@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import experience_curator  # noqa: E402
-import experience_knowledge  # noqa: E402
-import communication_controller  # noqa: E402
-import teacher_client  # noqa: E402
-import teacher_prompts  # noqa: E402
+from sts_agent.game.sts1 import experience_curator
+from sts_agent.game.sts1 import experience as experience_knowledge
+from sts_agent.runtime import controller as communication_controller
+from sts_agent.policy import teacher as teacher_client
+from sts_agent.policy import teacher_prompts
 
 
 class KnowledgeExperienceTests(unittest.TestCase):

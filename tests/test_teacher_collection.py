@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import export_teacher_sft  # noqa: E402
-import teacher_client  # noqa: E402
-import teacher_prompts  # noqa: E402
+from sts_agent.learning import export_teacher_sft
+from sts_agent.policy import teacher as teacher_client
+from sts_agent.policy import teacher_prompts
 
 
 class TeacherClientTests(unittest.TestCase):

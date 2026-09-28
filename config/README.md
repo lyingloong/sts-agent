@@ -4,22 +4,29 @@
 
 ## 配置归属
 
-配置加载器以 `tools/agent_config.py` 的默认值为基线，对配置做严格稀疏合并。推荐直接编辑 `config/agent.json` 的 `active_mode`；各模式的覆盖写在同一个文件的 `mode_profiles` 下，因此 CommunicationMod 固定启动 controller 时不需要额外参数。`config/modes/*.json` 仍保留为兼容和独立实验入口。
+配置加载器以 `sts_agent.config` 的默认值为基线，对 `config/agent.json` 做严格合并。仓库只维护这一份运行配置；游戏接入、控制方式、策略后端和学习方法都在同一个文件中明确声明。
 
 例如：
 
 ```powershell
-python tools\communication_controller.py
-python tools\overlay_terminal.py
+python -m sts_agent.runtime.controller
+python -m sts_agent.ui.overlay
 ```
 
-单文件模式切换只需修改：
+直接修改 `framework` 和对应的详细配置即可切换运行方式：
 
 ```json
-"active_mode": "prompt_evolution"
+"framework": {
+  "game": "sts1",
+  "control_mode": "autonomous",
+  "policy_backend": "remote_teacher",
+  "learning_method": "prompt_evolution"
+}
 ```
 
-可选值为 `manual`、`candidate_assist`、`teacher_sft`、`prompt_evolution`、`remote_inference`、`remote_online_rl`。切换后必须重启 controller；Overlay 也应重启以读取同一份配置。
+修改后必须重启 controller；Overlay 也应重启以读取同一份配置。完整组合见 [运行模式与学习方法](../doc/MODES.md)。
+
+`recording` 是 `agent.json` 中的统一配置段，供 ActionRecorder 人类游玩采集接收端使用。`recording.listen.host` / `recording.listen.port` 必须和 ActionRecorder 的 TCP 地址一致（默认 `127.0.0.1:8766`），`recording.output_dir` 指定整理后的完整 sts-agent 轨迹目录。采集模式通过 `framework.learning_method=collect_human` 选择，不启动策略模型或教师模型。
 
 `policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 在所选模式配置中只设置一次。本机推理、远端固定推理、远端在线 RL 不会再从多个配置段重复读取同一 adapter。
 
@@ -33,6 +40,8 @@ python tools\overlay_terminal.py
 | --- | --- | --- |
 | `schema_version` | 当前配置格式，固定为 `1`。 | 全部 |
 | `server.host` / `server.port` | CommunicationMod controller 的本机监听地址与端口。 | 全部 |
+| `recording.listen.host` / `recording.listen.port` | ActionRecorder TCP 接收端地址和端口。 | `collect_human` |
+| `recording.output_dir` | 整理后的 sts-agent 人类轨迹输出目录。 | `collect_human` |
 | `policy.enabled` | 是否启动 Qwen 策略。教师采集时必须为 `false`。 | 全部 |
 | `policy.runtime` | `local` 本机推理；`remote_inference` 远端只推理；`remote_online_rl` 远端采样并更新。 | 全部 |
 | `policy.model.base` | Qwen 基座的本机路径、远端绝对路径或 Hugging Face ID；路径必须对当前 runtime 实际可见。 | 全部 |
@@ -139,3 +148,16 @@ python tools\overlay_terminal.py
 | `update.empty_cache_between_steps` | 变长动作更新间归还空闲 CUDA 缓存，降低碎片化。 |
 
 远端同步迁移见 [远程推理与在线 RL](../doc/REMOTE_ONLINE_RL.md)。
+
+## Framework 运行维度
+
+`framework` 是配置源字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `framework.game` | 当前固定为 `sts1`，选择游戏适配器。 |
+| `framework.control_mode` | `manual`、`candidate_assist` 或 `autonomous`，决定最终由谁确认动作。 |
+| `framework.policy_backend` | `none`、`local_qwen`、`remote_qwen`、`remote_teacher` 或 `mock`。 |
+| `framework.learning_method` | `none`、`collect_human`、`teacher_sft`、`dagger`、`prompt_evolution` 或 `online_rl`。`collect_human` 要求 `control_mode=manual` 且 `policy_backend=none`。 |
+
+加载器会依据 `framework` 自动设置运行组件的启用状态和 policy runtime；详细参数仍分别放在 `policy`、`teacher`、`posthoc_feedback` 和 `prompt_evolution` 配置段中。

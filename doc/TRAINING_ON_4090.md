@@ -11,7 +11,7 @@ controller + Overlay                     基础模型下载与 LoRA checkpoint �
 action-trace 采集                        数据校验、训练日志和 run manifest
 ```
 
-当前 controller 可通过持久 `ssh -T` 启动远程 `policy_server.py`，也可启动单 GPU `online_rl_worker.py` 进行冻结策略的 K=4 episode-level 在线更新。配置和操作见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。8 张 4090 不能自动产生 8 路游戏 rollout；每一路 rollout 仍需要一个真实、可控制的 StS 游戏进程。
+当前 controller 可通过持久 `ssh -T` 启动远程 Qwen policy，也可启动单 GPU online RL worker 进行冻结策略的 K=4 episode-level 在线更新。配置和操作见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。8 张 4090 不能自动产生 8 路游戏 rollout；每一路 rollout 仍需要一个真实、可控制的 StS 游戏进程。
 
 截至 2026-08-26，第一批数据为 30 条完整终局轨迹、6,417 条可导出教师 SFT 样本。它们全部是 Ironclad A0 且均以死亡结束，适合验证 SFT 管线和接口学习，不适合作为最终策略质量结论。
 
@@ -31,7 +31,7 @@ action-trace 采集                        数据校验、训练日志和 run ma
 先在项目根目录执行：
 
 ```powershell
-python tools\prepare_training_bundle.py `
+python -m sts_agent.learning.training_bundle `
   --output data\transfer\sft-v0-<YYYYMMDD>-r1 `
   --include-traces
 ```
@@ -85,7 +85,7 @@ git checkout <source-commit>
 
 uv venv .venv
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu128
-uv pip install --python .venv/bin/python -r tools/requirements-train.txt
+uv pip install --python .venv/bin/python -r requirements/train.txt
 .venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count()); print(torch.cuda.get_device_name(0))"
 ```
 
@@ -131,7 +131,7 @@ Qwen 基础模型应在训练机下载到明确目录，训练记录固定 revis
 
 ## 5.1 首次 SFT 运行
 
-仓库提供 `tools/train_sft.py`，其训练输入严格匹配线上 selector：先按 `screen_type` 路由 trace 中的 observation，再拼接本步动态 `A1/A2/...` 合法动作表，输出只监督目标 alias 与结束标记。不会将动作 ID 直接训练为跨样本固定含义。
+仓库提供 `sts_agent.learning.sft`，其训练输入严格匹配线上 selector：先按 `screen_type` 路由 trace 中的 observation，再拼接本步动态 `A1/A2/...` 合法动作表，输出只监督目标 alias 与结束标记。不会将动作 ID 直接训练为跨样本固定含义。
 
 先从 bundle 目录运行 checksum，再执行一轮单卡 smoke test：
 
@@ -139,7 +139,7 @@ Qwen 基础模型应在训练机下载到明确目录，训练记录固定 revis
 cd /data/wanghao/sts-agent
 source .venv/bin/activate
 
-CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
+CUDA_VISIBLE_DEVICES=0 python -m sts_agent.learning.sft \
   --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
   --output outputs/sft/qwen3-0.6b/sft-v0-smoke \
   --max-train-samples 128 \
@@ -149,7 +149,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
 成功完成 smoke test 后，换一个新的输出目录执行完整首训：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
+CUDA_VISIBLE_DEVICES=0 python -m sts_agent.learning.sft \
   --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
   --output outputs/sft/qwen3-0.6b/sft-v0-r001 \
   --validation-runs 0 \
@@ -182,7 +182,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/train_sft.py \
 CUDA_VISIBLE_DEVICES=1 \
 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-.venv/bin/python tools/train_sft.py \
+.venv/bin/python -m sts_agent.learning.sft \
   --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
   --model /data/wanghao/sts-agent/models/base/Qwen3-0.6B \
   --initial-adapter outputs/sft/qwen3-0.6b/sft-v0-r001 \

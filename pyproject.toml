@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sts-agent"
+version = "0.1.0"
+description = "CommunicationMod-based agent framework for Slay the Spire 1"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+sts-agent-controller = "sts_agent.runtime.controller:main"
+sts-agent-overlay = "sts_agent.ui.overlay:main"
+sts-agent-terminal = "sts_agent.ui.terminal:main"
+sts-agent-policy = "sts_agent.policy.local_qwen:main"
+sts-agent-download-model = "sts_agent.commands.download_model:main"
+sts-agent-fetch-knowledge = "sts_agent.commands.fetch_knowledge:main"
+sts-agent-record-human = "sts_agent.recording.action_recorder:main"
+sts-agent-export-sft = "sts_agent.learning.export_teacher_sft:main"
+sts-agent-bundle = "sts_agent.learning.training_bundle:main"
+sts-agent-train-sft = "sts_agent.learning.sft:main"
+sts-agent-online-rl = "sts_agent.learning.online_rl.worker:main"
+
+[tool.setuptools.packages.find]
+include = ["sts_agent*"]

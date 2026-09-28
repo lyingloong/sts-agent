@@ -1,89 +1,149 @@
 # StS Agent
 
-《Slay the Spire 1》结构化游戏 Agent。项目用 CommunicationMod 采集可回放的状态-合法动作-结果轨迹，以远程教师构建冷启动 SFT，并为后续离线评测和 GRPO 保留数据契约。
-
-当前阶段是“本地采集 + 远程 8x RTX 4090 训练”：游戏与 CommunicationMod 继续运行在本机，训练机只接收版本化数据集和模型产物。
+基于 CommunicationMod 的《Slay the Spire 1》Agent 框架。它把游戏接入、状态与合法动作、策略后端、UI、轨迹和学习流程组织在同一个 Python 包中；运行方式由一份配置选择，而不是由不同脚本分叉实现。
 
 ## 当前能力
 
-- 支持原版四角色、A0-A20、固定/随机显示种子，以及单游戏进程中的连续多局采集。
-- controller 对 CommunicationMod 的状态进行规范化，提供完整公开地图、战斗意图、牌组、合法动作、最近动作和静态知识库补全。
-- 支持人工终端、透明 Overlay、Qwen Candidate Assist/置信度自动执行，以及 OpenAI 兼容远程教师采集。
-- 轨迹按局保存；教师 SFT 导出只接受稳定、合法且 `source=teacher_auto` 的动作。
-- `data/knowledge/` 是受 Git 跟踪的 StS1 静态知识快照；轨迹、数据集、模型和运行时文件均不提交。
-- 支持实体经验知识闭环：开启 `knowledge_experience` 后，动作教师可在游戏过程中请求当前公开卡牌、药水、遗物、怪物、事件或 Power 的解释，由人类回答、DeepSeek 整理并审核后写回对应实体，最多保留三条；审核后在同一状态继续决策。
+- 支持原版四角色、A0-A20、随机或指定种子，以及同一游戏进程连续运行多局。
+- 从 CommunicationMod 构建公开状态、合法动作、地图、战斗数值、牌组、历史动作和静态知识。
+- 支持人工控制、Candidate Assist、置信度自动执行、远程教师、Prompt Evolution、固定远端 Qwen 和在线 RL。
+- 每局独立保存轨迹；可导出教师 SFT 数据和带校验和的迁移 bundle。
+- 静态知识快照和人工审核的实体经验位于 `data/knowledge/`，并受 Git 跟踪。
+- 可接收独立 ActionRecorder Mod 的人类游戏动作，并用在线 agent 同一套适配器生成完整训练轨迹。
 
-`tools/train_sft.py` 已实现第一版 SFT；远程固定 adapter 推理和单 GPU、K=4 的 episode-level 在线更新已实现。固定种子自动评测仍待实现。训练逻辑不放入 `communication_controller.py`。
+## 安装
 
-## 快速入口
+```powershell
+uv venv
+uv pip install --python .venv\Scripts\python.exe -e .
+uv pip install --python .venv\Scripts\python.exe -r requirements\policy.txt
+```
 
-### 本地采集
+训练机改用 `requirements/train.txt`。CUDA 版 PyTorch 应按机器驱动单独安装，不应从普通 PyPI 镜像误装 CPU wheel。
 
-1. 在 CommunicationMod 的 `config.properties` 设置 controller（默认读取 `config/agent.json`）：
+## 启动
+
+CommunicationMod 的 `config.properties`：
 
 ```properties
-command=D\:/miniconda3/python.exe D\:/Code/spire-mod/sts-agent/tools/communication_controller.py
+command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/python.exe -m sts_agent.runtime.controller
 runAtGameStart=true
 maxInitializationTimeout=300
 ```
 
-2. 启动游戏后运行一个控制客户端：
+启动游戏后，在项目根目录打开 Overlay：
 
 ```powershell
-python tools\overlay_terminal.py
-# 或 python tools\human_terminal.py
+.\.venv\Scripts\python.exe -m sts_agent.ui.overlay
 ```
 
-3. 在主菜单输入 `s [character] [ascension] [seed]`，例如 `s IRONCLAD 0 4QTKQ7VBMFX47`；Prompt Evolution 模式首次也可以省略 seed，让游戏生成随机种子。游戏内输入 `h` 查看动作帮助。
-
-`communication_controller.py` 必须由 CommunicationMod 启动；Overlay 与文本终端不能同时连接。默认模式由 [config/agent.json](config/agent.json) 的 `active_mode` 决定，切换模式后需要重启游戏/controller 和控制客户端。旧的 `--config config/modes/*.json` 用法仍兼容。完整字段说明和远端在线 RL 配置归属见[配置指南](config/README.md)。API 密钥只放在被忽略的 `*_api.txt` 文件中。
-
-### 导出与迁移训练数据
+也可使用纯文本客户端：
 
 ```powershell
-python tools\prepare_training_bundle.py `
+.\.venv\Scripts\python.exe -m sts_agent.ui.terminal
+```
+
+controller 必须由 CommunicationMod 启动，两个客户端不能同时连接。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。具体模式由 [config/agent.json](config/agent.json) 的 `framework` 决定，修改配置后重启游戏/controller 和 UI。
+
+### 人类游玩采集
+
+人类直接在游戏界面操作时，将 `config/agent.json` 的 framework 设置为：
+
+```json
+{
+"framework": {
+  "game": "sts1",
+  "control_mode": "manual",
+  "policy_backend": "none",
+  "learning_method": "collect_human"
+}
+}
+```
+
+此模式不启动上面的 CommunicationMod controller。启动统一配置驱动的 ActionRecorder 轨迹接收端：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.recording.action_recorder --config config/agent.json
+```
+
+然后通过 ModTheSpire 同时启用 ActionRecorder 和 CommunicationMod。CommunicationMod 只作为游戏进程内的状态提供者，其 `runAtGameStart` 应设为 `false`。ActionRecorder 的 TCP 地址由 [config/agent.json](config/agent.json) 的 `recording.listen` 配置。
+
+完整轨迹写入 `data/trajectories/human/`。每步包含：
+
+- `pre_state`：完整、规范化并注入知识和历史的审计状态；
+- `policy_observation`：模型实际可见的状态，完整地图仅在地图界面保留；
+- `legal_actions`：与在线 agent 相同的目标展开语义动作列表；
+- `action` 和 `selected_action_id`：映射到上述动作空间的人类动作；
+- `raw_action`：ActionRecorder 捕获的原始游戏内动作；
+- `post_state`：动作后稳定状态。
+
+只有 `usable_for_sft=true` 的步骤才同时具备有效状态和可验证的合法动作标签，应进入后续 SFT 数据集。若未同时启用 CommunicationMod，接收器会在终端明确告警并将对应步骤标记为不可训练，而不是静默生成空状态样本。
+
+TCP 断开不影响 ActionRecorder 的本地原始文件。之后可以离线补做同样的转换：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.recording.action_recorder `
+  --input "D:\Steam\steamapps\common\SlayTheSpire\data\actionrecorder\run-....jsonl"
+```
+
+## 数据与训练
+
+生成迁移 bundle：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.learning.training_bundle `
   --output data\transfer\sft-v0-<YYYYMMDD>-r1 `
   --include-traces
 ```
 
-该命令生成可校验 bundle：SFT JSONL、可选的原始 action traces、`manifest.json` 和 `SHA256SUMS`。不包含 API 密钥、`data/raw/`、模型缓存、`.venv` 或 `.uv-cache`。完整流程见 [训练机与迁移指南](doc/TRAINING_ON_4090.md)。
+SFT：
 
-训练入口是 `tools/train_sft.py`：它复用线上 alias selector prompt，按完整 run 切分验证集，并只训练 LoRA adapter。训练机运行方式见迁移指南中的“首次 SFT 运行”。
+```bash
+.venv/bin/python -m sts_agent.learning.sft \
+  --dataset data/transfer/<bundle>/dataset/teacher-sft.jsonl \
+  --model /path/to/Qwen \
+  --output outputs/sft/<run>
+```
+
+训练与远端运行参数见 [训练机指南](doc/TRAINING_ON_4090.md) 和 [远端在线 RL](doc/REMOTE_ONLINE_RL.md)。API key、轨迹、数据集、模型和运行时状态均被忽略，不应提交。
 
 ## 目录
 
 ```text
-config/                 运行时配置
-data/knowledge/         受版本控制的静态 StS1 知识快照
-data/trajectories/      本地 action trace，忽略
-data/raw/               原始 CommunicationMod 消息，仅排错，忽略
-data/datasets/          导出的训练数据，忽略
-data/transfer/          可迁移训练 bundle，忽略
-doc/                    架构、协议、训练与设计文档
-tests/                  不依赖游戏的单元测试
-tools/                  controller、知识库、导出与客户端工具
+sts_agent/
+  core/          公共 observation/action/policy 契约与模式校验
+  runtime/       CommunicationMod controller 和运行协调
+  game/sts1/     StS1 适配器与静态知识补全
+  policy/        本地 Qwen、远程教师和策略 Prompt
+  learning/      SFT、Prompt Evolution、反馈归因和在线 RL
+  ui/            Overlay 与文本客户端
+  commands/      模型下载、知识刷新和协议探针
+config/          唯一运行配置及远端 RL 示例
+data/knowledge/  版本化静态知识快照
+prompts/         角色与场景 skill
+requirements/    推理与训练依赖
+tests/           无需启动游戏的单元测试
+doc/             架构、协议和实验说明
 ```
 
-## 文档
+## 核心文档
 
-- [实施计划](doc/PLAN.md)
-- [通信协议与数据 schema](doc/PROTOCOL.md)
-- [教师 SFT 与 GRPO 路线](doc/TEACHER_SFT_GRPO.md)
-- [8x RTX 4090 训练机与迁移指南](doc/TRAINING_ON_4090.md)
-- [在线纠正式模仿学习设计参考](doc/ONLINE_DAGGER.md)
-- [教师场景化提示词说明](doc/TEACHER_PROMPTS.md)
-- [远程推理与单 GPU 在线 RL](doc/REMOTE_ONLINE_RL.md)
-- [固定种子 Prompt 演化](doc/PROMPT_EVOLUTION.md)
-- [按模式运行配置](config/modes/README.md)
+- [架构与依赖边界](doc/ARCHITECTURE.md)
+- [命令入口](doc/COMMANDS.md)
+- [运行配置](config/README.md)
+- [运行模式](doc/MODES.md)
+- [通信协议](doc/PROTOCOL.md)
+- [数据与轨迹契约](doc/DATA_AND_TRACE_SCHEMA.md)
+- [策略 Prompt](doc/POLICY_PROMPT.md)
+- [教师 SFT 与 GRPO](doc/TEACHER_SFT_GRPO.md)
+- [Prompt Evolution](doc/PROMPT_EVOLUTION.md)
 - [实体经验知识库](doc/KNOWLEDGE_EXPERIENCE.md)
-- [终局人类反思归因 GRPO](doc/POSTHOC_ATTRIBUTION_GRPO.md)
-- [数据目录和保留策略](data/README.md)
 
 ## 验证
 
 ```powershell
-python -m py_compile tools\communication_controller.py tools\teacher_client.py tools\export_teacher_sft.py tools\prepare_training_bundle.py tools\human_terminal.py tools\overlay_terminal.py
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q sts_agent tests
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-完整游戏测试仍需启动 ModTheSpire。CommunicationMod 协议限制见其[官方仓库](https://github.com/ForgottenArbiter/CommunicationMod)。
+完整端到端测试仍需启动 ModTheSpire。CommunicationMod 的协议约束见其[官方仓库](https://github.com/ForgottenArbiter/CommunicationMod)。

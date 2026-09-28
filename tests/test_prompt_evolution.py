@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import agent_config  # noqa: E402
-import prompt_evolution  # noqa: E402
+from sts_agent import config as agent_config
+from sts_agent.learning import prompt_evolution
 
 
 class PromptEvolutionTests(unittest.TestCase):
@@ -38,7 +33,8 @@ class PromptEvolutionTests(unittest.TestCase):
                     "version": "p0001",
                     "character": "IRONCLAD",
                     "parent_version": None,
-                    "skills": {},
+                    "role_skill": "",
+                    "scene_skills": {},
                 }
             ),
             encoding="utf-8",
@@ -296,7 +292,8 @@ class PromptEvolutionTests(unittest.TestCase):
         manager, _root = self.make_manager()
         manager.candidate = {
             "candidate_id": "c0001",
-            "skills": {"COMBAT": "只在有威胁时先防御。"},
+            "role_skill": "",
+            "scene_skills": {"COMBAT": "只在有威胁时先防御。"},
             "target_skill": "COMBAT",
             "instruction": "只在有威胁时先防御。",
         }

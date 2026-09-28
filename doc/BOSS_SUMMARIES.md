@@ -1,6 +1,6 @@
 # Act Boss 应对画像
 
-`act_boss_profile.strategy` 会在已知当前 Act Boss 时全局提供给动作模型。它是用于路线、选牌、商店、营火、药水保留和战斗资源分配的规划画像，而不是逐回合的行动说明。运行时文本以 [`tools/monster_knowledge.py`](../tools/monster_knowledge.py) 的 `BOSS_STRATEGIES` 为准。
+`act_boss_profile.strategy` 会在已知当前 Act Boss 时全局提供给动作模型。它是用于路线、选牌、商店、营火、药水保留和战斗资源分配的规划画像，而不是逐回合的行动说明。运行时文本以 [`sts_agent/game/sts1/monster_knowledge.py`](../sts_agent/game/sts1/monster_knowledge.py) 的 `BOSS_STRATEGIES` 为准。
 
 内容根据灰机 Wiki 的[首领图鉴](https://sts.huijiwiki.com/wiki/%E9%A6%96%E9%A2%86)及各 Boss 条目的“策略”或“应对策略”整理。建议本身不是硬规则，必须结合当前卡组、HP、遗物、药水、路线和实时战斗意图判断。
 

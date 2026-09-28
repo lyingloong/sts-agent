@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-
-TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
-
-import prepare_training_bundle  # noqa: E402
+from sts_agent.learning import training_bundle as prepare_training_bundle
 
 
 class TrainingBundleTests(unittest.TestCase):

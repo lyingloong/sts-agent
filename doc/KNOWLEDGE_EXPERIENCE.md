@@ -29,14 +29,14 @@
 }
 ```
 
-默认单文件配置中已为教师 profile 开启该能力；只需将 `config/agent.json` 的 `active_mode` 设为 `teacher_sft` 或 `prompt_evolution`。旧的分文件启动方式仍兼容：
+在使用教师的配置中开启该能力；同时将 `framework.policy_backend` 设为 `remote_teacher`，并把 `framework.learning_method` 设为 `teacher_sft` 或 `prompt_evolution`：
 
 ```powershell
-python tools\communication_controller.py --config config\modes\teacher_sft.json
-python tools\overlay_terminal.py --config config\modes\teacher_sft.json
+python -m sts_agent.runtime.controller
+python -m sts_agent.ui.overlay
 ```
 
-1. 教师正常接收状态和合法动作。当它确实缺少某个当前公开实体的决策依据时，才返回一个 `knowledge_request`，而不是执行动作。controller 暂停当前状态，通过 Overlay 或 `human_terminal.py` 收集人类回答。
+1. 教师正常接收状态和合法动作。当它对某个当前公开实体有不明白之处时，可以返回一个 `knowledge_request`，而不是执行动作。controller 暂停当前状态，通过 Overlay 或文本客户端收集人类回答。
 2. DeepSeek 根据实体静态资料、已有最多三条经验、当前场景和人类回答，输出新的完整 `experience` 列表。整理阶段复用现有教师客户端的超时、重试和限流退避。
 3. 人类审核候选列表。接受后 controller 原子更新对应 JSON，并立即清空运行时知识缓存；拒绝或放弃不会改动知识库。随后在同一个游戏状态重新请求动作。
 
@@ -50,4 +50,4 @@ python tools\overlay_terminal.py --config config\modes\teacher_sft.json
 
 ## 数据与 Git
 
-静态知识库快照由 `tools/fetch_card_knowledge.py` 维护并纳入 Git。经验字段是本项目的人工维护内容，刷新上游快照时必须审查 diff，生成器应保留已有经验。审计日志是否提交由实验需要决定；它不参与模型输入，只用于追踪谁在何时接受了哪次替换。
+静态知识库快照由 `sts_agent.commands.fetch_knowledge` 维护并纳入 Git。经验字段是本项目的人工维护内容，刷新上游快照时必须审查 diff，生成器应保留已有经验。审计日志是否提交由实验需要决定；它不参与模型输入，只用于追踪谁在何时接受了哪次替换。

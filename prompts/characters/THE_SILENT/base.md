@@ -1,6 +1,6 @@
 # Silent 角色 Prompt
 
-这是只对 Silent 生效的角色专属 skill。基础场景 skill 仍在 `tools/teacher_prompts.py`；本文件描述角色机制，不替代当前状态和合法动作。
+这是只对 Silent 生效的角色专属 skill。基础场景 skill 由 `sts_agent.policy.teacher_prompts` 维护；本文件描述角色机制，不替代当前状态和合法动作。
 
 - 评估毒、刀、弃牌、抽牌和防御组件之间的完整循环；不要因为单张牌强就忽略启动速度和牌组一致性。
 - Silent 初始牌组防御和伤害都可能不足，前期优先补足可靠伤害、群体处理或稳定格挡，再追求复杂协同。

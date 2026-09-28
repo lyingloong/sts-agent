@@ -4,7 +4,7 @@
 
 ## 目的
 
-远程教师和 Prompt 演化动作模型共用 `tools/teacher_prompts.py` 中的中文场景策略。教师 SFT 请求使用“远程教师”身份；Prompt 演化的实际动作请求使用“正在游玩的玩家”身份，并在末尾追加当前角色已接受的 skill。提示词只进入远程请求，不进入本地 Qwen 的 observation、SFT target 或 GRPO 输入；动作模型仍然只能从 controller 提供的合法动作中选择一个 `A<n>`。
+远程教师和 Prompt 演化动作模型共用 `sts_agent.policy.teacher_prompts` 中的中文场景策略。教师 SFT 请求使用“远程教师”身份；Prompt 演化的实际动作请求使用“正在游玩的玩家”身份，并在末尾追加当前角色已接受的 skill。提示词只进入远程请求，不进入本地 Qwen 的 observation、SFT target 或 GRPO 输入；动作模型仍然只能从 controller 提供的合法动作中选择一个 `A<n>`。
 
 教师 SFT 当前版本：`sts1-teacher-zh-v7`；Prompt 演化动作版本：`sts1-player-zh-v3`。
 
