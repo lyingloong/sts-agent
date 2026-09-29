@@ -4,7 +4,7 @@
     "game": "sts1",
     "control_mode": "autonomous",
     "policy_backend": "remote_teacher",
-    "learning_method": "prompt_evolution"
+    "learning_method": "collect_human"
   },
   "server": {
     "host": "127.0.0.1",

@@ -238,6 +238,53 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(detail["reward_type"], "GOLD")
         self.assertEqual(action["label"], "自动拾取金币 19")
 
+    def test_campfire_exposes_one_smith_action_per_card(self) -> None:
+        message = {
+            "in_game": True,
+            "available_commands": ["choose"],
+            "game_state": {
+                "screen_type": "REST",
+                "choice_list": ["rest", "smith", "recall"],
+                "screen_state": {"rest_options": ["rest", "smith", "recall"]},
+                "deck": [
+                    {"uuid": "strike-1", "id": "Strike_R", "name": "打击"},
+                    {"uuid": "bash-1", "id": "Bash", "name": "痛击"},
+                ],
+            },
+        }
+        actions = controller.semantic_actions(message)
+        self.assertEqual(
+            [action["id"] for action in actions],
+            ["CAMPFIRE:REST", "CAMPFIRE:SMITH:card=strike-1", "CAMPFIRE:SMITH:card=bash-1", "CAMPFIRE:RECALL"],
+        )
+        smith = actions[1]
+        self.assertEqual(smith["command"], "CHOOSE 1")
+        self.assertEqual(smith["execution"]["type"], "campfire_smith")
+
+    def test_semantic_smith_executor_selects_and_confirms_card(self) -> None:
+        pending = {
+            "action": {
+                "id": "CAMPFIRE:SMITH:card=bash-1",
+                "command": "CHOOSE 1",
+                "kind": "campfire_smith",
+                "execution": {"type": "campfire_smith", "card_uuid": "bash-1", "phase": "await_grid"},
+            }
+        }
+        grid = {
+            "available_commands": ["choose", "confirm"],
+            "game_state": {
+                "screen_type": "GRID",
+                "screen_state": {"cards": [{"uuid": "strike-1"}, {"uuid": "bash-1"}]},
+            },
+        }
+        self.assertEqual(controller.advance_semantic_execution(pending, grid), "CHOOSE 1")
+        self.assertEqual(pending["action"]["execution"]["phase"], "await_confirm")
+        grid["game_state"]["screen_state"]["confirm_up"] = True
+        self.assertEqual(controller.advance_semantic_execution(pending, grid), "CONFIRM")
+        self.assertEqual(pending["action"]["execution"]["phase"], "await_done")
+        done = {"available_commands": ["proceed"], "game_state": {"screen_type": "REST"}}
+        self.assertIsNone(controller.advance_semantic_execution(pending, done))
+
     def test_combat_observation_calculates_per_hit_card_values_and_intent(self) -> None:
         message = combat_message()
         combat = message["game_state"]["combat_state"]

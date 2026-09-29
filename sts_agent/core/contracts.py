@@ -22,6 +22,10 @@ class Action(TypedDict, total=False):
     command: str
     target: Any
     payload: dict[str, Any]
+    execution: dict[str, Any]
+    index: int
+    card_uuid: str
+    card_name: str
 
 
 class PolicyCandidate(TypedDict, total=False):

@@ -1741,6 +1741,111 @@ def semantic_actions(
         if "return" in commands:
             result.append({"id": "RETURN", "command": "RETURN", "kind": "return"})
         return result
+
+    # Room-level decisions are exposed as semantic actions.  CommunicationMod
+    # still receives the original CHOOSE index, but the policy never has to
+    # infer that (for example) option 1 means "smith" and then repeat the
+    # card-selection protocol itself.  The execution metadata is consumed by
+    # the controller after the first command and is deliberately ignored by
+    # policy prompt builders.
+    screen_type = str(state.get("screen_type") or "").upper()
+    if screen_type == "REST" and "choose" in commands and isinstance(choices, list):
+        for index, choice in enumerate(choices):
+            normalized = "".join(str(choice).casefold().split())
+            if normalized in {"rest", "休息"}:
+                result.append({"id": "CAMPFIRE:REST", "command": f"CHOOSE {index}", "kind": "campfire_rest", "label": "休息"})
+            elif normalized in {"smith", "upgrade", "锻造", "升级"}:
+                # One visible action per card is easier to train than a
+                # generic "smith" action followed by an unlabelled GRID.
+                for card in state.get("deck", []):
+                    if not isinstance(card, dict) or card.get("uuid") is None:
+                        continue
+                    card_id = str(card.get("uuid"))
+                    name = card.get("name") or card.get("id") or card_id
+                    result.append({
+                        "id": f"CAMPFIRE:SMITH:card={card_id}",
+                        "command": f"CHOOSE {index}",
+                        "kind": "campfire_smith",
+                        "label": f"锻造 {name}",
+                        "card_uuid": card_id,
+                        "card_name": name,
+                        "execution": {"type": "campfire_smith", "card_uuid": card_id, "phase": "await_grid"},
+                    })
+            elif normalized in {"recall", "回忆"}:
+                result.append({"id": "CAMPFIRE:RECALL", "command": f"CHOOSE {index}", "kind": "campfire_recall", "label": "回忆"})
+            elif normalized in {"lift", "举重"}:
+                result.append({"id": "CAMPFIRE:LIFT", "command": f"CHOOSE {index}", "kind": "campfire_lift", "label": "举重"})
+            elif normalized in {"dig", "挖掘"}:
+                result.append({"id": "CAMPFIRE:DIG", "command": f"CHOOSE {index}", "kind": "campfire_dig", "label": "挖掘"})
+        # A used campfire exposes only a continue/proceed control, which is a
+        # deterministic transition and remains handled below.
+        if result:
+            return result
+
+    if screen_type == "SHOP_SCREEN" and "choose" in commands:
+        screen_state = state.get("screen_state") if isinstance(state.get("screen_state"), dict) else {}
+        structured = False
+        mapped_indices: set[int] = set()
+        cards = screen_state.get("cards") if isinstance(screen_state.get("cards"), list) else []
+        potions = screen_state.get("potions") if isinstance(screen_state.get("potions"), list) else []
+        relics = screen_state.get("relics") if isinstance(screen_state.get("relics"), list) else []
+        blocked_indices = blocked_potion_reward_indices(message) | blocked_gold_reward_indices(message)
+        for index, choice in enumerate(choices if isinstance(choices, list) else []):
+            if index in blocked_indices:
+                continue
+            label = str(choice)
+            # The final purge entry is represented separately from shop cards.
+            if label.casefold() in {"purge", "删牌", "移除卡牌"} or label.startswith("purge"):
+                for card in state.get("deck", []):
+                    if not isinstance(card, dict) or card.get("uuid") is None:
+                        continue
+                    structured = True
+                    uuid = str(card["uuid"])
+                    name = card.get("name") or card.get("id") or uuid
+                    result.append({
+                        "id": f"SHOP:PURGE:card={uuid}",
+                        "command": f"CHOOSE {index}",
+                        "kind": "shop_purge",
+                        "label": f"删除 {name}",
+                        "card_uuid": uuid,
+                        "card_name": name,
+                        "execution": {"type": "shop_purge", "card_uuid": uuid, "phase": "await_grid"},
+                    })
+                if any(isinstance(card, dict) and card.get("uuid") is not None for card in state.get("deck", [])):
+                    mapped_indices.add(index)
+                continue
+            # Match the visible shop entries by stable order.  If a mod
+            # version does not expose structured entities, retain the generic
+            # CHOOSE fallback below for compatibility.
+            entity = None
+            kind = None
+            # Choice-list order is not stable across CommunicationMod
+            # versions (and may omit unaffordable items), so match by the
+            # visible entity name instead of assuming cards/potions/relics
+            # occupy contiguous ranges.
+            for candidate, candidate_kind in (
+                *((item, "shop_buy_card") for item in cards),
+                *((item, "shop_buy_potion") for item in potions),
+                *((item, "shop_buy_relic") for item in relics),
+            ):
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_name = str(candidate.get("name") or candidate.get("id") or "")
+                if candidate_name and (candidate_name in label or label in candidate_name):
+                    entity, kind = candidate, candidate_kind
+                    break
+            if isinstance(entity, dict):
+                structured = True
+                entity_id = str(entity.get("uuid") or entity.get("id") or entity.get("name") or index)
+                name = entity.get("name") or entity.get("id") or label
+                price = entity.get("price")
+                price_text = f" ({price} 金币)" if price is not None else ""
+                prefix = {"shop_buy_card": "SHOP:BUY_CARD", "shop_buy_potion": "SHOP:BUY_POTION", "shop_buy_relic": "SHOP:BUY_RELIC"}[kind]
+                result.append({"id": f"{prefix}:{entity_id}", "command": f"CHOOSE {index}", "kind": kind, "index": index, "label": f"购买 {name}{price_text}"})
+                mapped_indices.add(index)
+        visible_indices = set(range(len(choices))) - blocked_indices if isinstance(choices, list) else set()
+        if structured and isinstance(choices, list) and mapped_indices == visible_indices:
+            return result
     # Potions can be used before a non-map screen's primary choice, such as
     # freeing a full slot before taking a reward. Enemy-target potions are not
     # emitted here because there is no combat target list on these screens.
@@ -2048,6 +2153,16 @@ def parse_human_input(
     op = parts[0].lower()
     actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
 
+    # Semantic actions may share one underlying CHOOSE command (for example,
+    # each possible card to smith at a campfire).  Accept the stable action ID
+    # itself so terminal and accessibility clients can select the intended
+    # entity without relying on a duplicated protocol index.
+    if len(parts) == 1:
+        normalized_input = stripped.casefold()
+        for candidate in actions:
+            if normalized_input == str(candidate.get("id") or "").casefold():
+                return str(candidate["command"]), candidate, None
+
     if op in {"q", "quit", "exit"}:
         return "__QUIT__", None, None
     if op in {"h", "help"}:
@@ -2195,6 +2310,8 @@ def overlay_input_hint(action: dict[str, Any]) -> str:
         return f"d {action.get('slot')}"
     if kind == "choose" and isinstance(action.get("index"), int):
         return str(action["index"])
+    if kind.startswith("campfire_") or kind.startswith("shop_"):
+        return str(action.get("id") or action.get("command") or "")
     if kind == "end_turn":
         return "e"
     if kind == "confirm":
@@ -2234,6 +2351,12 @@ def overlay_action_row(message: dict[str, Any], action: dict[str, Any]) -> dict[
         action_type = "使用药水" if kind == "potion_use" else "丢弃药水"
     elif kind == "choose":
         action_type = "选择"
+        selection = str(action.get("label") or "")
+    elif kind.startswith("campfire_"):
+        action_type = "营火"
+        selection = str(action.get("label") or "")
+    elif kind.startswith("shop_"):
+        action_type = "商店"
         selection = str(action.get("label") or "")
     else:
         action_type = {
@@ -4477,6 +4600,16 @@ def main() -> int:
                             }
                         )
 
+                # A semantic room action may own several protocol-level
+                # commands.  Consume those continuation packets before the
+                # ordinary pending-step acknowledgement is recorded; the
+                # whole sequence remains one policy decision in the trace.
+                if pending is not None and pending.get("action", {}).get("execution"):
+                    continuation = advance_semantic_execution(pending, message)
+                    if continuation is not None:
+                        print(continuation, flush=True)
+                        continue
+
                 if pending is not None:
                     smoke_bomb_used = is_smoke_bomb_potion_use(pending)
                     if remember_declined_combat_card_reward(pending, message, declined_card_reward_keys):
@@ -5010,6 +5143,65 @@ def make_pending(
         "action": action,
         "command": action.get("command"),
     }
+
+
+def advance_semantic_execution(pending: dict[str, Any], message: dict[str, Any]) -> str | None:
+    """Expand one room-level action into CommunicationMod commands.
+
+    ``None`` means that the semantic action has reached its terminal state and
+    the normal pending-step completion path should run.  A command string
+    means an internal continuation was sent and the caller must skip policy
+    inference for this message.  This keeps multi-click UI details out of the
+    model while retaining one trace item for the user's actual decision.
+    """
+    action = pending.get("action") if isinstance(pending.get("action"), dict) else {}
+    execution = action.get("execution") if isinstance(action.get("execution"), dict) else None
+    if execution is None:
+        return None
+    phase = str(execution.get("phase") or "await_grid")
+    kind = str(execution.get("type") or "")
+    state = game_state(message)
+    screen = str(state.get("screen_type") or "").upper()
+    screen_state = state.get("screen_state") if isinstance(state.get("screen_state"), dict) else {}
+
+    def send(command: str, next_phase: str) -> str:
+        execution["phase"] = next_phase
+        execution["last_command"] = command
+        action["execution"] = execution
+        return command
+
+    if kind not in {"campfire_smith", "shop_purge"}:
+        return None
+    card_uuid = str(execution.get("card_uuid") or "")
+    if phase == "await_grid":
+        if screen != "GRID":
+            return None
+        cards = screen_state.get("cards") if isinstance(screen_state.get("cards"), list) else []
+        card_index = next(
+            (index for index, card in enumerate(cards) if isinstance(card, dict) and str(card.get("uuid") or "") == card_uuid),
+            None,
+        )
+        if card_index is None:
+            return None
+        return send(f"CHOOSE {card_index}", "await_confirm")
+    if phase == "await_confirm":
+        if screen != "GRID":
+            return None
+        confirm_up = bool(screen_state.get("confirm_up") or screen_state.get("confirm_screen_up"))
+        commands = command_set(message)
+        if confirm_up and "confirm" in commands:
+            return send("CONFIRM", "await_done")
+        # Some CommunicationMod versions expose the confirm overlay one
+        # update after the card click.  Keep the executor alive rather than
+        # asking the model to operate the raw GRID.
+        return "STATE"
+    if phase == "await_done":
+        # The action is complete when the grid closes.  If a lagging packet
+        # still reports GRID, leave the pending execution in place and poll.
+        if screen == "GRID":
+            return "STATE"
+        return None
+    return None
 
 
 if __name__ == "__main__":

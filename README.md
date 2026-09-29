@@ -77,6 +77,8 @@ controller 必须由 CommunicationMod 启动，两个客户端不能同时连接
 - `raw_action`：ActionRecorder 捕获的原始游戏内动作；
 - `post_state`：动作后稳定状态。
 
+ActionRecorder 事件格式 0.2 直接输出“锻造指定卡牌”和“删除指定卡牌”的完整语义决策，携带进入流程前的状态；接收端直接匹配动作 ID。中间的 `decision_started/detail/cancelled` 属于 Mod 的辅助记录，不生成训练样本，也不参与重建动作。旧版细粒度日志应单独迁移，不会在这里自动拼接。
+
 只有 `usable_for_sft=true` 的步骤才同时具备有效状态和可验证的合法动作标签，应进入后续 SFT 数据集。若未同时启用 CommunicationMod，接收器会在终端明确告警并将对应步骤标记为不可训练，而不是静默生成空状态样本。
 
 TCP 断开不影响 ActionRecorder 的本地原始文件。之后可以离线补做同样的转换：
@@ -147,3 +149,7 @@ doc/             架构、协议和实验说明
 ```
 
 完整端到端测试仍需启动 ModTheSpire。CommunicationMod 的协议约束见其[官方仓库](https://github.com/ForgottenArbiter/CommunicationMod)。
+
+## 语义动作接口
+
+策略层使用按场景定义的语义动作，而不是直接学习 Communication Mod 的按钮和下标。例如营火会暴露 `CAMPFIRE:REST` 或 `CAMPFIRE:SMITH:card=<uuid>`，商店会暴露 `SHOP:BUY_CARD:<id>`、`SHOP:PURGE:card=<uuid>`。控制器负责把一个语义动作展开为选择、确认等底层协议步骤，并只将完整流程记为一个训练决策。详细约定见 [`doc/SEMANTIC_ACTIONS.md`](doc/SEMANTIC_ACTIONS.md)。

@@ -45,6 +45,51 @@ def combat_state() -> dict:
 
 
 class ActionRecorderRecordingTests(unittest.TestCase):
+    def test_complete_room_decisions_need_no_click_or_confirmation_events(self) -> None:
+        for screen, prefix, kind, choices in (
+            ("REST", "CAMPFIRE:SMITH", "campfire_smith", ["rest", "smith"]),
+            ("SHOP_SCREEN", "SHOP:PURGE", "shop_purge", ["purge"]),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                receiver = ActionRecorderEnricher(Path(directory))
+                before = combat_state() | {
+                    "screen_type": screen, "room_phase": "INCOMPLETE",
+                    "choice_list": choices, "screen_state": {},
+                    "deck": [{"id": "Strike_R", "name": "打击", "uuid": "card-1", "upgrades": 0}],
+                }
+                selected_id = prefix + ":card=card-1"
+                # The mod can emit auxiliary lifecycle events, but the receiver
+                # must not need any of them to reconstruct the actual decision.
+                receiver.consume({"type": "decision_started", "run_id": "r", "decision": prefix})
+                receiver.consume({
+                    "type": "action_observed", "run_id": "r", "step_id": "r:1",
+                    "observation_before": before,
+                    "available_actions": {"commands": ["choose"], "choices": choices},
+                    "chosen_action": {"id": selected_id, "kind": kind, "card_uuid": "card-1"},
+                })
+                record = receiver.consume({
+                    "type": "step_resolved", "run_id": "r", "step_id": "r:1",
+                    "observation_after": before, "resolution": "stable_state",
+                })
+                receiver.close()
+                self.assertIsNotNone(record)
+                self.assertTrue(record["usable_for_sft"])
+                self.assertEqual(record["action_resolution"], "exact_id")
+                self.assertEqual(record["selected_action_id"], selected_id)
+                self.assertEqual(record["pre_state"]["screen_type"], screen)
+                self.assertEqual(len(receiver.runs["r"].action_history), 1)
+                lines = next(Path(directory).glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(lines), 1)
+
+    def test_cancelled_room_decision_creates_no_success_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receiver = ActionRecorderEnricher(Path(directory))
+            receiver.consume({"type": "decision_started", "run_id": "r", "decision": "CAMPFIRE:SMITH"})
+            receiver.consume({"type": "decision_cancelled", "run_id": "r", "reason": "cancelled_by_player"})
+            receiver.close()
+            self.assertEqual(receiver.runs["r"].action_history, [])
+            self.assertEqual(list(Path(directory).glob("*.jsonl")), [])
+
     def test_enricher_uses_live_agent_observation_and_action_builder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             enricher = ActionRecorderEnricher(Path(directory))
@@ -85,6 +130,92 @@ class ActionRecorderRecordingTests(unittest.TestCase):
         self.assertTrue(legal)
         self.assertEqual(action["id"], "CHOOSE:index=0")
         self.assertEqual(reason, "choice_label")
+
+    def test_card_reward_claim_is_one_opening_choice(self) -> None:
+        action, legal, reason = resolve_recorded_action(
+            {"id": "REWARD:TAKE:CARD", "kind": "reward_card_claimed"},
+            [
+                {"id": "CHOOSE:index=0", "kind": "choose", "label": "Gold: 25"},
+                {"id": "CHOOSE:index=1", "kind": "choose", "label": "Card Reward"},
+                {"id": "CHOOSE:index=2", "kind": "choose", "label": "Potion"},
+            ],
+        )
+        self.assertTrue(legal)
+        self.assertEqual(action["id"], "CHOOSE:index=1")
+        self.assertEqual(reason, "choice_label")
+
+    def test_discovery_and_choose_one_use_card_reward_choice_index(self) -> None:
+        choices = [
+            {"id": "CHOOSE:index=0", "kind": "choose", "label": "卡牌甲"},
+            {"id": "CHOOSE:index=1", "kind": "choose", "label": "卡牌乙"},
+        ]
+        for mode in ("discovery", "choose_one"):
+            with self.subTest(mode=mode):
+                action, legal, reason = resolve_recorded_action(
+                    {"id": "CHOOSE:index=1", "kind": "card_option_selected",
+                     "selection_mode": mode, "card_id": "SomeCard"},
+                    choices,
+                )
+                self.assertTrue(legal)
+                self.assertEqual(action["id"], "CHOOSE:index=1")
+                self.assertEqual(reason, "exact_id")
+
+    def test_discovery_choice_becomes_a_usable_sft_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receiver = ActionRecorderEnricher(Path(directory))
+            before = combat_state() | {
+                "screen_type": "CARD_REWARD", "room_phase": "COMBAT",
+                "choice_list": ["卡牌甲", "卡牌乙"],
+                "screen_state": {"cards": [
+                    {"id": "A", "name": "卡牌甲"},
+                    {"id": "B", "name": "卡牌乙"},
+                ]},
+            }
+            receiver.consume({
+                "type": "action_observed", "run_id": "r", "step_id": "r:1",
+                "observation_before": before,
+                "available_actions": {"commands": ["choose"], "choices": before["choice_list"]},
+                "chosen_action": {"id": "CHOOSE:index=1", "kind": "card_option_selected",
+                                  "selection_mode": "discovery", "card_id": "B"},
+            })
+            record = receiver.consume({
+                "type": "step_resolved", "run_id": "r", "step_id": "r:1",
+                "observation_after": combat_state(), "resolution": "next_decision",
+            })
+            receiver.close()
+            self.assertIsNotNone(record)
+            self.assertTrue(record["usable_for_sft"])
+            self.assertEqual(record["selected_action_id"], "CHOOSE:index=1")
+            self.assertEqual(record["pre_state"]["screen_type"], "CARD_REWARD")
+
+    def test_single_card_grid_choice_becomes_a_usable_sft_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receiver = ActionRecorderEnricher(Path(directory))
+            cards = [
+                {"id": "A", "name": "卡牌甲", "uuid": "a"},
+                {"id": "B", "name": "卡牌乙", "uuid": "b"},
+            ]
+            before = combat_state() | {
+                "screen_type": "GRID", "room_phase": "COMBAT",
+                "choice_list": ["卡牌甲", "卡牌乙"],
+                "screen_state": {"cards": cards, "selected_cards": [], "num_cards": 1},
+            }
+            receiver.consume({
+                "type": "action_observed", "run_id": "r", "step_id": "r:1",
+                "observation_before": before,
+                "available_actions": {"commands": ["choose"], "choices": before["choice_list"]},
+                "chosen_action": {"id": "SELECT_CARDS:grid:b;", "kind": "card_selection_changed",
+                                  "screen": "grid", "selected_cards": [{"card_id": "B", "card_uuid": "b"}]},
+            })
+            record = receiver.consume({
+                "type": "step_resolved", "run_id": "r", "step_id": "r:1",
+                "observation_after": combat_state(), "resolution": "next_decision",
+            })
+            receiver.close()
+            self.assertIsNotNone(record)
+            self.assertTrue(record["usable_for_sft"])
+            self.assertEqual(record["selected_action_id"], "CHOOSE:index=1")
+            self.assertEqual(record["pre_state"]["screen_type"], "GRID")
 
     def test_resolves_map_click_by_public_node_coordinates(self) -> None:
         action, legal, reason = resolve_recorded_action(

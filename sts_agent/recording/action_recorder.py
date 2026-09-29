@@ -1,9 +1,11 @@
 """Enrich ActionRecorder events with the exact StS agent state/action adapter.
 
-ActionRecorder owns durable, game-side raw capture.  This module is an optional
-consumer: it turns each raw decision pair into the same normalized observation
-and expanded legal-action list used by live policy inference.  It can listen to
-the mod's TCP stream or rebuild data later from its local JSONL files.
+ActionRecorder owns durable, game-side raw capture. This module is an optional
+consumer: it turns raw decision pairs into the normalized observations and
+semantic actions used by live policy inference. ActionRecorder supplies complete
+campfire smithing and shop purge decisions, including their original room state
+and chosen card. No reconstruction from UI clicks is needed. This consumer can
+listen to TCP or rebuild trajectories later from local JSONL files.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ def _choice_keywords(action: dict[str, Any]) -> tuple[str, ...]:
     kind = str(action.get("kind") or "")
     fixed = {
         "card_reward_opened": ("card", "cards", "卡牌", "卡牌奖励"),
+        "reward_card_claimed": ("card", "cards", "卡牌", "卡牌奖励"),
         "shop_opened": ("shop", "merchant", "商店", "商人"),
         "chest_opened": ("open", "chest", "打开", "开启", "宝箱"),
         "reward_gold_claimed": ("gold", "金币"),
@@ -268,7 +271,7 @@ class ActionRecorderEnricher:
         action, is_legal, resolution = resolve_recorded_action(recorded, legal_actions, state)
         step_id = str(event.get("step_id") or "")
         context.pending[step_id] = {
-            "schema_version": "0.3",
+            "schema_version": "0.4",
             "source": "human_action_recorder",
             "run_id": context.run_id,
             "run_config": copy.deepcopy(context.metadata),
@@ -300,24 +303,7 @@ class ActionRecorderEnricher:
                 key = shop_visit_key(post_message)
                 if key is not None:
                     context.visited_shop_rooms.add(key)
-            history_pending = {
-                "step_id": step_id,
-                "screen_type": pending.get("screen_type"),
-                "pre_state": pending.get("pre_state"),
-                "action": pending.get("action"),
-            }
-            remember_declined_combat_card_reward(
-                history_pending, post_message, context.declined_card_reward_keys
-            )
-            context.action_history.append(accepted_action_history_item(history_pending, post_message))
-            del context.action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
             post_state = normalize_state(post_message)
-            attach_runtime_context(
-                post_state,
-                context.visited_shop_rooms,
-                context.action_history,
-                context.declined_card_reward_keys,
-            )
 
         record = {key: value for key, value in pending.items() if key not in {"pre_message"}}
         record.update(
@@ -329,8 +315,28 @@ class ActionRecorderEnricher:
                 "resolved_at_ms": event.get("timestamp_ms"),
             }
         )
+
+        if post_message["in_game"] and isinstance(record.get("post_state"), dict):
+            history_pending = {
+                "step_id": record.get("step_id"),
+                "screen_type": record.get("screen_type"),
+                "pre_state": record.get("pre_state"),
+                "action": record.get("action"),
+            }
+            remember_declined_combat_card_reward(
+                history_pending, post_message, context.declined_card_reward_keys
+            )
+            context.action_history.append(accepted_action_history_item(history_pending, post_message))
+            del context.action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
+            attach_runtime_context(
+                record["post_state"],
+                context.visited_shop_rooms,
+                context.action_history,
+                context.declined_card_reward_keys,
+            )
         self._write(context, record)
         return record
+
 
     def _flush_unresolved(self, context: RunContext, reason: str) -> None:
         for pending in list(context.pending.values()):
