@@ -9,6 +9,7 @@
 | `manual` | 不请求策略，人类选择合法动作。 |
 | `candidate_assist` | 策略提供候选，人类确认；置信度满足配置时可自动执行。 |
 | `autonomous` | 直接执行策略或教师选出的动作。 |
+| `codex` | 本地 Codex 会话通过 MCP 工具读取结构化状态并提交合法动作；controller 不启动内部策略模型。 |
 
 ## 策略后端
 
@@ -26,6 +27,7 @@
 | --- | --- |
 | `none` | 只运行策略，不写训练更新。 |
 | `collect_human` | 接收 ActionRecorder 的原始状态和语义动作，并整理为包含 `pre_state`、`policy_observation`、`legal_actions`、`action` 和 `post_state` 的 sts-agent 人类轨迹。 |
+| `collect_codex` | 将 Codex 通过 sts-agent controller 执行的对局单独记录到 `data/trajectories/codex/`，轨迹带 `actor=codex` 标记。 |
 | `teacher_sft` | 用教师动作导出 response-only SFT 数据。 |
 | `dagger` | 模型提出动作，人类纠正后保存状态-专家动作。 |
 | `prompt_evolution` | 在固定角色/种子上由教师生成候选 skill，人工审核后更新 Prompt。 |
@@ -37,6 +39,7 @@
 | --- | --- | --- | --- |
 | 人工游玩 | manual | none | none |
 | 人类轨迹采集 | manual | none | collect_human |
+| Codex A0 战士自动游玩 | codex | none | collect_codex |
 | Candidate Assist | candidate_assist | local_qwen | none |
 | 教师冷启动 | autonomous | remote_teacher | teacher_sft |
 | 在线纠正式模仿 | candidate_assist | local_qwen/remote_qwen | dagger |

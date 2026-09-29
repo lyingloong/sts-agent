@@ -22,6 +22,10 @@ sts-agent-export-sft = "sts_agent.learning.export_teacher_sft:main"
 sts-agent-bundle = "sts_agent.learning.training_bundle:main"
 sts-agent-train-sft = "sts_agent.learning.sft:main"
 sts-agent-online-rl = "sts_agent.learning.online_rl.worker:main"
+sts-agent-codex-mcp = "sts_agent.codex_mcp:main"
+
+[project.optional-dependencies]
+codex = ["mcp>=1.9,<2"]
 
 [tool.setuptools.packages.find]
 include = ["sts_agent*"]

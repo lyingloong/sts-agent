@@ -28,6 +28,8 @@ python -m sts_agent.ui.overlay
 
 `recording` 是 `agent.json` 中的统一配置段，供 ActionRecorder 人类游玩采集接收端使用。`recording.listen.host` / `recording.listen.port` 必须和 ActionRecorder 的 TCP 地址一致（默认 `127.0.0.1:8766`），`recording.output_dir` 指定整理后的完整 sts-agent 轨迹目录。采集模式通过 `framework.learning_method=collect_human` 选择，不启动策略模型或教师模型。
 
+Codex 自动游玩选择 `framework.control_mode=codex`、`framework.policy_backend=none`、`framework.learning_method=collect_codex`。该模式使用现有 controller 的状态和动作编译链路，由本地 MCP 服务将结构化 observation 与合法动作交给 Codex；本机策略和远程教师都保持关闭。角色、进阶、种子、输出目录、动作上限和等待超时由 `codex` 配置段管理。A0 Ironclad 是当前唯一支持的配置。
+
 `policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 在所选模式配置中只设置一次。本机推理、远端固定推理、远端在线 RL 不会再从多个配置段重复读取同一 adapter。
 
 远端被忽略的 `online_rl.json` 只描述一次在线训练如何执行，不能包含 `model`、`initial_adapter` 或 `initial_policy_version`。controller 通过 SSH 启动 worker 时显式传入这三个值，因此远端文件不能覆盖本机选择的初始策略。
@@ -42,6 +44,12 @@ python -m sts_agent.ui.overlay
 | `server.host` / `server.port` | CommunicationMod controller 的本机监听地址与端口。 | 全部 |
 | `recording.listen.host` / `recording.listen.port` | ActionRecorder TCP 接收端地址和端口。 | `collect_human` |
 | `recording.output_dir` | 整理后的 sts-agent 人类轨迹输出目录。 | `collect_human` |
+| `codex.actor_id` | Codex 轨迹的 actor 标签，写入每局 `run_config`。 | `codex` |
+| `codex.character` / `codex.ascension` | Codex 采集角色和进阶，目前固定为 `IRONCLAD` / `0`。 | `codex` |
+| `codex.seed` | 固定字母数字种子；空字符串表示每次随机种子。 | `codex` |
+| `codex.output_dir` | Codex 轨迹和 run-events 的独立输出目录。 | `codex` |
+| `codex.max_actions_per_run` | 一个 Codex 会话可提交的动作上限，防止卡死时无限循环。 | `codex` |
+| `codex.transition_timeout_seconds` | 等待游戏状态推进的最长时间。 | `codex` |
 | `policy.enabled` | 是否启动 Qwen 策略。教师采集时必须为 `false`。 | 全部 |
 | `policy.runtime` | `local` 本机推理；`remote_inference` 远端只推理；`remote_online_rl` 远端采样并更新。 | 全部 |
 | `policy.model.base` | Qwen 基座的本机路径、远端绝对路径或 Hugging Face ID；路径必须对当前 runtime 实际可见。 | 全部 |
@@ -156,8 +164,8 @@ python -m sts_agent.ui.overlay
 | 字段 | 含义 |
 | --- | --- |
 | `framework.game` | 当前固定为 `sts1`，选择游戏适配器。 |
-| `framework.control_mode` | `manual`、`candidate_assist` 或 `autonomous`，决定最终由谁确认动作。 |
+| `framework.control_mode` | `manual`、`candidate_assist`、`autonomous` 或 `codex`，决定最终由谁确认动作。 |
 | `framework.policy_backend` | `none`、`local_qwen`、`remote_qwen`、`remote_teacher` 或 `mock`。 |
-| `framework.learning_method` | `none`、`collect_human`、`teacher_sft`、`dagger`、`prompt_evolution` 或 `online_rl`。`collect_human` 要求 `control_mode=manual` 且 `policy_backend=none`。 |
+| `framework.learning_method` | `none`、`collect_human`、`collect_codex`、`teacher_sft`、`dagger`、`prompt_evolution` 或 `online_rl`。`collect_human` 要求 `manual + none`；`collect_codex` 要求 `codex + none`。 |
 
 加载器会依据 `framework` 自动设置运行组件的启用状态和 policy runtime；详细参数仍分别放在 `policy`、`teacher`、`posthoc_feedback` 和 `prompt_evolution` 配置段中。

@@ -2,9 +2,9 @@
   "schema_version": 1,
   "framework": {
     "game": "sts1",
-    "control_mode": "autonomous",
-    "policy_backend": "remote_teacher",
-    "learning_method": "collect_human"
+    "control_mode": "codex",
+    "policy_backend": "none",
+    "learning_method": "collect_codex"
   },
   "server": {
     "host": "127.0.0.1",
@@ -16,6 +16,15 @@
       "port": 8766
     },
     "output_dir": "data/trajectories/human"
+  },
+  "codex": {
+    "actor_id": "codex",
+    "character": "IRONCLAD",
+    "ascension": 0,
+    "seed": "",
+    "output_dir": "data/trajectories/codex",
+    "max_actions_per_run": 2000,
+    "transition_timeout_seconds": 90.0
   },
   "policy": {
     "model": {
@@ -100,7 +109,7 @@
     "auto_continue": true
   },
   "knowledge_experience": {
-    "enabled": true,
+    "enabled": false,
     "request_style": "encouraged",
     "max_entries_per_entity": 3,
     "max_question_chars": 2000,

@@ -10,6 +10,7 @@
 - 每局独立保存轨迹；可导出教师 SFT 数据和带校验和的迁移 bundle。
 - 静态知识快照和人工审核的实体经验位于 `data/knowledge/`，并受 Git 跟踪。
 - 可接收独立 ActionRecorder Mod 的人类游戏动作，并用在线 agent 同一套适配器生成完整训练轨迹。
+- 可通过本地 MCP 将 Codex 接入 controller，以 A0 战士配置单独采集 AI 游玩轨迹。
 
 ## 安装
 
@@ -26,7 +27,7 @@ uv pip install --python .venv\Scripts\python.exe -r requirements\policy.txt
 CommunicationMod 的 `config.properties`：
 
 ```properties
-command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/python.exe -m sts_agent.runtime.controller
+command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
 runAtGameStart=true
 maxInitializationTimeout=300
 ```
@@ -43,7 +44,13 @@ maxInitializationTimeout=300
 .\.venv\Scripts\python.exe -m sts_agent.ui.terminal
 ```
 
-controller 必须由 CommunicationMod 启动，两个客户端不能同时连接。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。具体模式由 [config/agent.json](config/agent.json) 的 `framework` 决定，修改配置后重启游戏/controller 和 UI。
+controller 必须由 CommunicationMod 启动，一次只接受一个终端类客户端。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。具体模式由 [config/agent.json](config/agent.json) 的 `framework` 决定，修改配置后重启游戏/controller 和 UI。
+
+### Codex 自动游玩采集
+
+设置 `framework` 为 `codex / none / collect_codex` 后，启动游戏使 CommunicationMod 拉起 controller，再在 Codex 会话中启用 `sts-agent-codex-mcp`。Codex 通过 MCP 获取当前模型可见 observation 和合法动作，并以动作 ID 提交选择；轨迹写入 `data/trajectories/codex/`，与人类数据分开。配置 MCP 的客户端步骤和逐步游玩规程见 [A0 战士 Codex 游玩说明](doc/CODEX_PLAY_A0_IRONCLAD.md)。
+
+controller 会在向 MCP 提供决策状态前完成已有的环境自动动作。自动动作保留在轨迹和 `recent_actions` 中，但不会作为待选动作交给 Codex；Codex 不应重复执行它们。
 
 ### 人类游玩采集
 

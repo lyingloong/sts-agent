@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +61,10 @@ SMOKE_BOMB_STATE_POLL_SECONDS = 1.0
 SMOKE_BOMB_TRANSITION_TIMEOUT_SECONDS = 15.0
 # Give the overlay a brief frame to show an automatic decision before the
 # command is sent to the game.
-AUTOMATIC_ACTION_DELAY_SECONDS = 0.1
+# Give the game UI enough time to visibly settle before a controller-owned
+# action is sent. This affects only environment automation, not model calls or
+# human/Codex actions.
+AUTOMATIC_ACTION_DELAY_SECONDS = 0.25
 
 
 PLAYER_CLASSES = {
@@ -374,11 +378,41 @@ def environment_auto_action(
                     "reason": "自动打开商人界面",
                 }
 
+    # Map navigation is safe to automate only after semantic action
+    # generation has resolved all route choices.  In particular, do not use
+    # ``screen_state.next_nodes`` directly: relics such as Winged Greaves can
+    # alter the route action space, and stale protocol fields may coexist with
+    # the current map view.  Requiring exactly one final CHOOSE action keeps
+    # this conservative and makes potion operations irrelevant here (they are
+    # filtered by semantic_actions before this function is called).
+    if is_map_screen(state):
+        route_actions = [
+            action for action in actions
+            if str(action.get("kind") or "") == "choose"
+            and str(action.get("command") or "").upper().startswith("CHOOSE ")
+        ]
+        if len(actions) == 1 and len(route_actions) == 1:
+            action = dict(route_actions[0])
+            label = str(action.get("label") or action.get("id") or "地图节点")
+            action["label"] = f"自动选择唯一可达节点：{label}"
+            return action, {
+                "rule": "map_single_reachable_node",
+                "reason": label,
+                "screen_type": screen_type,
+            }
+        # Multiple route actions are meaningful choices (including routes
+        # exposed by Winged Greaves), so leave them to the policy.
+        return None
+
     # Do this last so explicit reward/shop rules retain their useful labels.
     # The semantic action compiler has already filtered unavailable cards,
     # targets, potions, and blocked choices, so one remaining action is safe to
     # execute without an inference request.
-    if len(actions) == 1 and actions[0].get("kind") not in {"potion_use", "potion_discard"}:
+    if (
+        len(actions) == 1
+        and not is_map_screen(state)
+        and actions[0].get("kind") not in {"potion_use", "potion_discard"}
+    ):
         action = dict(actions[0])
         label = str(action.get("label") or action.get("command") or action.get("id") or "唯一动作")
         action["label"] = f"自动执行 {label}"
@@ -2643,13 +2677,21 @@ class TerminalBridge:
     def send(self, packet: dict[str, Any]) -> None:
         self.accept()
         assert self.writer is not None
-        self.writer.write(json.dumps(packet, ensure_ascii=False) + "\n")
-        self.writer.flush()
+        try:
+            self.writer.write(json.dumps(packet, ensure_ascii=False) + "\n")
+            self.writer.flush()
+        except OSError:
+            self.close_client()
+            raise
 
     def receive(self) -> dict[str, Any] | None:
         self.accept()
         assert self.reader is not None
-        line = self.reader.readline()
+        try:
+            line = self.reader.readline()
+        except OSError:
+            self.close_client()
+            return None
         if not line:
             self.close_client()
             return None
@@ -4326,11 +4368,32 @@ def ask_action(
                 "decision": decision,
                 "overlay": overlay_view_data(message, run_id, actions, action_history),
             }
+        if config is not None and config["framework"]["control_mode"] == "codex":
+            packet["state_id"] = uuid.uuid4().hex
+            # START is a session command, not an in-run semantic action.
+            # Preserve the protocol capabilities so MCP can identify a menu
+            # even when CommunicationMod supplies no game_state at all.
+            packet["available_commands"] = sorted(command_set(message))
+            packet["ready_for_command"] = message.get("ready_for_command")
+            packet["error"] = error or message.get("error")
+            packet["observation"] = policy_observation(
+                message,
+                visited_shop_rooms,
+                action_history,
+                declined_card_reward_keys,
+            )
+            packet["legal_actions"] = actions
         evolution = getattr(teacher, "prompt_evolution", None)
         if evolution is not None and evolution.enabled:
             packet["prompt_evolution"] = evolution.status()
-        bridge.send(packet)
-        response = bridge.receive()
+        try:
+            bridge.send(packet)
+            response = bridge.receive()
+        except OSError:
+            # Re-publish this decision after a client reconnects. Never replay
+            # a game command just because its client connection was lost.
+            bridge.close_client()
+            continue
         if response is None:
             continue
         text = str(response.get("text", ""))
@@ -4357,7 +4420,17 @@ def ask_action(
         if command == "STATE":
             print(command, flush=True)
             return command, {"id": "STATE", "kind": "state_request", "command": command}, None
-        source = candidate_source_for_input(text, decision)
+        codex_control = config is not None and config["framework"]["control_mode"] == "codex"
+        source = "codex" if codex_control else candidate_source_for_input(text, decision)
+        if codex_control:
+            decision = {
+                "mode": "codex_collection",
+                "candidate_source": "codex",
+                "model_action": str(action.get("id") or ""),
+                "model_candidates": [],
+                "source": "codex",
+                "overridden": False,
+            }
         return command, action, finalize_decision(decision, action, source)
 
 
@@ -4425,7 +4498,9 @@ def main() -> int:
         nonlocal trace_output, event_output, trace_path, event_path
         close_run_outputs()
         assert run_config is not None
-        trace_path, event_path = run_output_paths(trace_dir, session_id, run_index, run_config)
+        output_dir = run_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        trace_path, event_path = run_output_paths(output_dir, session_id, run_index, run_config)
         trace_output = trace_path.open("w", encoding="utf-8")
         event_output = event_path.open("w", encoding="utf-8")
 
@@ -4433,7 +4508,7 @@ def main() -> int:
         nonlocal trace_output, event_output, trace_path, event_path
         if run_config is None or run_config.get("seed") is None or trace_path is None or event_path is None:
             return
-        final_trace_path, final_event_path = run_output_paths(trace_dir, session_id, run_index, run_config)
+        final_trace_path, final_event_path = run_output_paths(run_output_dir(), session_id, run_index, run_config)
         if final_trace_path == trace_path and final_event_path == event_path:
             return
         close_run_outputs()
@@ -4442,6 +4517,11 @@ def main() -> int:
         trace_path, event_path = final_trace_path, final_event_path
         trace_output = trace_path.open("a", encoding="utf-8")
         event_output = event_path.open("a", encoding="utf-8")
+
+    def run_output_dir() -> Path:
+        if run_config is not None and run_config.get("collection_mode") == "codex":
+            return project_root / config["codex"]["output_dir"]
+        return trace_dir
 
     def write_trace(value: dict[str, Any]) -> None:
         if trace_output is not None:
@@ -4474,6 +4554,9 @@ def main() -> int:
             "seed_source": "requested" if action.get("seed") else "random",
             "internal_seed": None,
             "collection_mode": collection_mode,
+            "actor": config["codex"]["actor_id"] if collection_mode == "codex" else (
+                "human" if collection_mode in {"interactive", "collect_human"} else collection_mode
+            ),
         }
         if prompt_evolution.enabled:
             run_config["prompt_evolution"] = prompt_evolution.begin_run(run_config)
@@ -5088,9 +5171,11 @@ def main() -> int:
                     return 0
                 command, action, decision = result
                 if action.get("kind") == "start_run":
-                    collection_mode = "prompt_evolution" if prompt_evolution.enabled else ("teacher_sft" if teacher.enabled else (
-                        "remote_online_rl" if policy.runtime == "remote_online_rl" else "interactive"
-                    ))
+                    collection_mode = "codex" if config["framework"]["control_mode"] == "codex" else (
+                        "prompt_evolution" if prompt_evolution.enabled else ("teacher_sft" if teacher.enabled else (
+                            "remote_online_rl" if policy.runtime == "remote_online_rl" else "interactive"
+                        ))
+                    )
                     print(begin_run(action, collection_mode), flush=True)
                     pending = None
                 elif command == "STATE":

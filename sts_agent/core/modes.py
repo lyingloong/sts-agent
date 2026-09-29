@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
-CONTROL_MODES = frozenset({"manual", "candidate_assist", "autonomous"})
+CONTROL_MODES = frozenset({"manual", "candidate_assist", "autonomous", "codex"})
 POLICY_BACKENDS = frozenset({"none", "local_qwen", "remote_qwen", "remote_teacher", "mock"})
-LEARNING_METHODS = frozenset({"none", "collect_human", "teacher_sft", "dagger", "prompt_evolution", "online_rl"})
+LEARNING_METHODS = frozenset({"none", "collect_human", "collect_codex", "teacher_sft", "dagger", "prompt_evolution", "online_rl"})
 
 
 @dataclass(frozen=True, slots=True)

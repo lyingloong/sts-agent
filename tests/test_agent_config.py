@@ -72,6 +72,32 @@ class AgentConfigTests(unittest.TestCase):
         with self.assertRaises(agent_config.ConfigError):
             agent_config.validate_config(config)
 
+    def test_collect_codex_mode_routes_to_its_own_run_directory(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {
+                "framework": {
+                    "control_mode": "codex",
+                    "policy_backend": "none",
+                    "learning_method": "collect_codex",
+                },
+            },
+        )
+        validated = agent_config.validate_config(config)
+        self.assertFalse(validated["policy"]["enabled"])
+        self.assertFalse(validated["teacher"]["enabled"])
+        self.assertEqual(validated["codex"]["character"], "IRONCLAD")
+        self.assertEqual(validated["codex"]["ascension"], 0)
+        self.assertEqual(validated["codex"]["output_dir"], "data/trajectories/codex")
+
+    def test_collect_codex_requires_external_codex_control(self) -> None:
+        config = agent_config._merge(
+            agent_config.DEFAULT_CONFIG,
+            {"framework": {"learning_method": "collect_codex"}},
+        )
+        with self.assertRaises(agent_config.ConfigError):
+            agent_config.validate_config(config)
+
     def test_unknown_framework_field_is_rejected(self) -> None:
         with self.assertRaises(agent_config.ConfigError):
             agent_config._merge(agent_config.DEFAULT_CONFIG, {"framework": {"mode": "manual"}})

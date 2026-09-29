@@ -32,6 +32,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "output_dir": "data/trajectories/human",
     },
+    "codex": {
+        "actor_id": "codex",
+        "character": "IRONCLAD",
+        "ascension": 0,
+        "seed": "",
+        "output_dir": "data/trajectories/codex",
+        "max_actions_per_run": 2000,
+        "transition_timeout_seconds": 90.0,
+    },
     "policy": {
         "enabled": True,
         "runtime": "local",
@@ -219,6 +228,8 @@ def _validate_framework_combination(framework: dict[str, str]) -> None:
     learning = framework["learning_method"]
     if control == "manual" and backend != "none":
         raise ConfigError("manual control requires framework.policy_backend=none")
+    if control == "codex" and (backend != "none" or learning != "collect_codex"):
+        raise ConfigError("codex control requires policy_backend=none and learning_method=collect_codex")
     if control == "candidate_assist" and backend not in {"local_qwen", "remote_qwen", "mock"}:
         raise ConfigError("candidate_assist requires a Qwen or mock policy backend")
     if learning in {"teacher_sft", "prompt_evolution"} and backend != "remote_teacher":
@@ -231,6 +242,8 @@ def _validate_framework_combination(framework: dict[str, str]) -> None:
         raise ConfigError("dagger requires candidate_assist control")
     if learning == "collect_human" and (control != "manual" or backend != "none"):
         raise ConfigError("collect_human requires manual control and framework.policy_backend=none")
+    if learning == "collect_codex" and (control != "codex" or backend != "none"):
+        raise ConfigError("collect_codex requires codex control and framework.policy_backend=none")
 
 
 def _apply_framework_runtime(config: dict[str, Any], framework: dict[str, str]) -> None:
@@ -310,6 +323,26 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     recording_path = Path(str(recording["output_dir"]))
     if recording_path.is_absolute() or ".." in recording_path.parts:
         raise ConfigError("recording.output_dir must be a project-relative path")
+
+    codex = config["codex"]
+    _require_string(codex["actor_id"], "codex.actor_id")
+    if codex["character"] != "IRONCLAD":
+        raise ConfigError("codex.character is currently fixed to IRONCLAD")
+    if isinstance(codex["ascension"], bool) or codex["ascension"] != 0:
+        raise ConfigError("codex.ascension is currently fixed to 0")
+    seed = codex["seed"]
+    if not isinstance(seed, str) or (seed and not re.fullmatch(r"[A-Za-z0-9]+", seed)):
+        raise ConfigError("codex.seed must be empty for random seed or contain only letters and digits")
+    _require_string(codex["output_dir"], "codex.output_dir")
+    codex_output_path = Path(str(codex["output_dir"]))
+    if codex_output_path.is_absolute() or ".." in codex_output_path.parts:
+        raise ConfigError("codex.output_dir must be a project-relative path")
+    max_actions = codex["max_actions_per_run"]
+    if isinstance(max_actions, bool) or not isinstance(max_actions, int) or not 1 <= max_actions <= 10000:
+        raise ConfigError("codex.max_actions_per_run must be an integer from 1 to 10000")
+    _require_number(codex["transition_timeout_seconds"], "codex.transition_timeout_seconds", 1.0, 600.0)
+    if framework["control_mode"] == "codex" and (policy["enabled"] or teacher["enabled"]):
+        raise ConfigError("codex mode uses Codex as the external policy; disable policy and teacher backends")
 
     _require_bool(policy["enabled"], "policy.enabled")
     if policy["runtime"] not in {"local", "remote_inference", "remote_online_rl"}:

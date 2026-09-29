@@ -469,6 +469,48 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual([action["id"] for action in actions], ["CHOOSE:index=0", "CHOOSE:index=2", "RETURN"])
         self.assertTrue(all(controller.is_map_potion_action(action) for action in leaked))
 
+    def test_map_single_reachable_node_is_automated(self) -> None:
+        message = {
+            "in_game": True,
+            "available_commands": ["choose", "potion"],
+            "game_state": {
+                "screen_type": "MAP",
+                "room_phase": "COMPLETE",
+                "choice_list": ["x=2 y=4"],
+                "screen_state": {
+                    "next_nodes": [{"x": 2, "y": 4}],
+                },
+            },
+        }
+        actions = controller.semantic_actions(message)
+        self.assertEqual([action["id"] for action in actions], ["CHOOSE:index=0"])
+        result = controller.environment_auto_action(message, actions)
+        self.assertIsNotNone(result)
+        assert result is not None
+        action, detail = result
+        self.assertEqual(action["command"], "CHOOSE 0")
+        self.assertEqual(detail["rule"], "map_single_reachable_node")
+
+    def test_map_multiple_nodes_are_not_automated_even_if_next_nodes_is_one(self) -> None:
+        # A relic or a protocol-specific map rule may expose additional route
+        # choices beyond the basic next_nodes summary. The final legal action
+        # list, not that summary, is the source of truth.
+        message = {
+            "in_game": True,
+            "available_commands": ["choose"],
+            "game_state": {
+                "screen_type": "MAP",
+                "room_phase": "COMPLETE",
+                "choice_list": ["x=2 y=4", "x=3 y=4"],
+                "screen_state": {
+                    "next_nodes": [{"x": 2, "y": 4}],
+                },
+            },
+        }
+        actions = controller.semantic_actions(message)
+        self.assertEqual([action["id"] for action in actions], ["CHOOSE:index=0", "CHOOSE:index=1"])
+        self.assertIsNone(controller.environment_auto_action(message, actions))
+
     def test_non_map_choice_screen_exposes_potion_operations(self) -> None:
         message = {
             "in_game": True,

@@ -5,9 +5,11 @@
 CommunicationMod 启动外部进程，进程 stdout 只能用于协议。控制器启动时发送 `ready`，随后接收 JSON 状态并输出协议命令；诊断写入 stderr 和项目日志。
 
 ```properties
-command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/python.exe -m sts_agent.runtime.controller
+command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
 runAtGameStart=true
 ```
+
+Windows 后台入口使用 `pythonw.exe`，避免启动时弹出控制台窗口；CommunicationMod 提供的 stdin/stdout/stderr 管道仍用于协议和诊断。手动在终端排错时使用 `python.exe`。
 
 协议支持的关键命令包括 `START`、`PLAY`、`END`、`POTION`、`CHOOSE`、`PROCEED`、`RETURN` 和 `STATE`。详细定义以 [CommunicationMod README](https://github.com/ForgottenArbiter/CommunicationMod) 为准。
 
@@ -83,7 +85,7 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 - `screen_type=TRANSITION`：CommunicationMod 返回地图界面但 `room_phase` 仍不是 `COMPLETE` 时的保护态。该状态不包含可训练的地图选择动作，只允许等待刷新或返回当前房间。
 - `screen_name=SETTINGS` 且 `is_screen_up=true`：表示设置/暂停覆盖层挡住了当前房间。此时 CommunicationMod 通常只暴露 `KEY`、`WAIT`、`STATE` 等通用命令，controller 将其显示为 `KEY:CANCEL`，终端输入 `x` 会发送 `KEY Cancel`；关闭覆盖层后才恢复战斗动作。
 - 药水栏已满或持有苏祖时，controller 不会把 `COMBAT_REWARD` 中的 `POTION` 或商店中已识别的药水商品列为合法动作。持有灵体外质时，`COMBAT_REWARD` 中的金币也会被移除。CommunicationMod 对这类操作可能不返回错误或状态变化；终端会说明对应原因。
-- `COMBAT_REWARD` 在请求模型前按“遗物、金币、药水、卡牌奖励入口”的顺序自动推进：遗物和金币必取；药水仅在有空位时必取；卡牌奖励只自动打开，选牌或跳过仍交给模型。除地图和地图过渡态外，只要 CommunicationMod 当前声明支持 `potion` 命令，合法动作中还会保留可使用或可丢弃的持有药水；战斗中的目标药水展开为敌人目标。非战斗场景只允许主动使用 `BLOODPOTION`（鲜血药水）和 `FRUITJUICE`（果汁），其他药水即使通信层误报 `can_use=true` 也只保留丢弃动作。这样在领取新药水前，可以先由模型决定使用或丢弃旧药水。首次进入 `SHOP_ROOM` 也会自动打开商人界面，购买和移除仍是模型决策。环境动作完成后，如果语义合法动作列表只剩一个动作（例如离开商人后的 `PROCEED`，或战斗中没有可出牌、可用药水时的 `END_TURN`），controller 直接执行该动作，不请求模型；自动执行前会短暂停顿约 `0.1` 秒，让界面先显示动作。每个这类动作都以 `decision.source=environment_auto` 正常写入 trace 和 recent_actions，但不会进入教师 SFT 或在线 RL 的策略更新；`BOSS_REWARD` 的遗物选择始终保留为策略决策。
+- `COMBAT_REWARD` 在请求模型前按“遗物、金币、药水、卡牌奖励入口”的顺序自动推进：遗物和金币必取；药水仅在有空位时必取；卡牌奖励只自动打开，选牌或跳过仍交给模型。除地图和地图过渡态外，只要 CommunicationMod 当前声明支持 `potion` 命令，合法动作中还会保留可使用或可丢弃的持有药水；战斗中的目标药水展开为敌人目标。非战斗场景只允许主动使用 `BLOODPOTION`（鲜血药水）和 `FRUITJUICE`（果汁），其他药水即使通信层误报 `can_use=true` 也只保留丢弃动作。这样在领取新药水前，可以先由模型决定使用或丢弃旧药水。首次进入 `SHOP_ROOM` 也会自动打开商人界面，购买和移除仍是模型决策。环境动作完成后，如果语义合法动作列表只剩一个动作（例如离开商人后的 `PROCEED`，或战斗中没有可出牌、可用药水时的 `END_TURN`），controller 直接执行该动作，不请求模型；自动执行前会短暂停顿 `0.25` 秒，让界面先显示动作。每个这类动作都以 `decision.source=environment_auto` 正常写入 trace 和 recent_actions，但不会进入教师 SFT 或在线 RL 的策略更新；`BOSS_REWARD` 的遗物选择始终保留为策略决策。
 - 启用 `posthoc_feedback.enabled` 且远端 `attribution.enabled` 后，在线 RL 的每个终局会额外产生本地 `data/reflections/` 与 `data/attributions/` artifact。`posthoc_feedback.mode="human"` 时前者保存人类的可强化/应弱化复盘；`mode="auto"` 时保存自动复盘标记，教师根据账本独立给出双向候选。后者保存本地校验过的 `step_id/direction/confidence/severity`；只有后者的已应用字段进入远端 episode。教师原始 completion 与思考不写入 artifact 或更新协议。详情见[终局反思归因 GRPO](POSTHOC_ATTRIBUTION_GRPO.md)。
 
 Candidate Assist 由 controller 在 CommunicationMod 启动握手前预热独立的 `sts_agent.policy.local_qwen`。模型、端口、超时和模式全部由 `config/agent.json` 管理；模型必须先通过 `sts_agent.commands.download_model` 从 `policy.model.hub_endpoint` 预下载。脚本会在没有显式代理变量时读取 Windows 系统代理。游戏运行时 policy server 只从本地缓存加载，以免网络问题阻塞回合。默认对所有游戏内场景请求候选；可将 `policy.request.screens` 配置为 `["COMBAT"]` 收窄。`MAP` 才发送完整公开 `map.nodes`、当前位置和可选节点；战斗、事件、商店、奖励、休息和地图过渡态都移除地图。controller 维护显式环境记忆 `run_memory.visited_shop_rooms`。首次观察到 `SHOP_SCREEN` 时按 `(Act, Floor)` 记录该商店；之后同层 `SHOP_ROOM` 从合法动作中移除 `CHOOSE shop`，只保留 `PROCEED` 等离开动作，人工输入也不能绕过。它把其余真实合法动作映射为本请求内短别名 `A1/A2/...`，policy server 返回至多三个别名，controller 再映射、校验并编译 CommunicationMod 命令。这避免小模型复制长的卡牌/目标 ID 时产生空候选。终端 `a` 接受首选，`pick <序号>` 选择其他候选；裸数字不被候选逻辑截获，保留给游戏界面自己的选项。模型无候选、超时或加载失败时，`decision` 会记录 `assist_status` 和 `assist_reason`，终端显示原因后退回人工操作。将 `policy.enabled` 设为 `false` 可关闭，`policy.development.mock=true` 可在不加载模型时测试协议。

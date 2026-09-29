@@ -1,0 +1,2 @@
+# Install this optional dependency only when enabling the local Codex MCP bridge.
+mcp>=1.9,<2
