@@ -1,0 +1,20 @@
+{
+  "posthoc_feedback": {
+    "enabled": true,
+    "mode": "human",
+    "base_url": "https://api.llm.ustc.edu.cn/v1",
+    "model": "deepseek-v4-pro",
+    "api_key_file": "ustc_api.txt",
+    "timeout_seconds": 180.0,
+    "max_retries": 3,
+    "retry_backoff_seconds": 5.0,
+    "retry_max_backoff_seconds": 30.0,
+    "temperature": 0.0,
+    "max_tokens": 2048,
+    "max_input_chars": 96000,
+    "max_reflection_chars": 4000,
+    "max_candidates_per_direction": 10,
+    "max_applied_per_direction": 8,
+    "min_confidence": 0.75
+  }
+}

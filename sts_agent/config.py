@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from sts_agent.core.modes import resolve_framework_mode
+from sts_agent.core.modes import MODE_FRAMEWORKS, resolve_framework_mode
 from sts_agent.paths import PROJECT_ROOT
 
 
@@ -527,7 +527,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_agent_config(root: Path | None = None, config_file: str | Path | None = None) -> dict[str, Any]:
-    """Load the single direct framework configuration."""
+    """Load the active named mode plus shared settings into runtime config."""
     path = config_path(root, config_file)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -539,5 +539,38 @@ def load_agent_config(root: Path | None = None, config_file: str | Path | None =
         raise ConfigError(f"invalid JSON in {path}: {exc.msg} (line {exc.lineno})") from exc
     if not isinstance(provided, dict):
         raise ConfigError(f"{path} must contain one JSON object")
-    merged = _merge(DEFAULT_CONFIG, provided)
+    unknown_keys = set(provided) - {"schema_version", "active_mode", "shared"}
+    if unknown_keys:
+        unknown = ", ".join(sorted(str(key) for key in unknown_keys))
+        raise ConfigError(f"unknown config field(s) in {path}: {unknown}; mode-specific settings belong in config/modes/<mode>.json")
+    if provided.get("schema_version") != 2:
+        raise ConfigError("config/agent.json schema_version must be 2")
+    mode_name = provided.get("active_mode")
+    if not isinstance(mode_name, str) or mode_name not in MODE_FRAMEWORKS:
+        choices = ", ".join(sorted(MODE_FRAMEWORKS))
+        raise ConfigError(f"active_mode must be one of: {choices}")
+
+    shared = provided.get("shared", {})
+    if not isinstance(shared, dict):
+        raise ConfigError("shared must be an object")
+    if "framework" in shared:
+        raise ConfigError("shared.framework is not allowed; choose one active_mode instead")
+    merged = _merge(DEFAULT_CONFIG, shared, "shared")
+
+    profile_path = path.parent / "modes" / f"{mode_name}.json"
+    try:
+        profile_raw = profile_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ConfigError(f"missing mode profile for {mode_name}: {profile_path}") from exc
+    try:
+        profile = json.loads(profile_raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid JSON in {profile_path}: {exc.msg} (line {exc.lineno})") from exc
+    if not isinstance(profile, dict):
+        raise ConfigError(f"{profile_path} must contain one JSON object")
+    if "framework" in profile:
+        raise ConfigError(f"{profile_path} must not define framework; mode combinations are fixed in sts_agent.core.modes")
+    merged = _merge(merged, profile, f"mode.{mode_name}")
+    merged["schema_version"] = DEFAULT_CONFIG["schema_version"]
+    merged["framework"] = MODE_FRAMEWORKS[mode_name]
     return validate_config(merged)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,13 +17,14 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config["framework"]["control_mode"], "manual")
         self.assertEqual(config["framework"]["policy_backend"], "none")
 
-    def test_current_project_config_is_direct_prompt_evolution(self) -> None:
+    def test_current_project_selects_human_collection(self) -> None:
         config = agent_config.load_agent_config(PROJECT_ROOT)
-        self.assertEqual(config["framework"]["policy_backend"], "remote_teacher")
-        self.assertEqual(config["framework"]["learning_method"], "prompt_evolution")
-        self.assertTrue(config["teacher"]["enabled"])
+        self.assertEqual(config["framework"]["control_mode"], "manual")
+        self.assertEqual(config["framework"]["policy_backend"], "none")
+        self.assertEqual(config["framework"]["learning_method"], "collect_human")
+        self.assertFalse(config["teacher"]["enabled"])
         self.assertFalse(config["policy"]["enabled"])
-        self.assertTrue(config["prompt_evolution"]["enabled"])
+        self.assertFalse(config["prompt_evolution"]["enabled"])
 
     def test_framework_backend_projects_to_runtime_components(self) -> None:
         config = agent_config._merge(
@@ -120,10 +122,60 @@ class AgentConfigTests(unittest.TestCase):
 
     def test_json_file_is_strict_and_valid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "agent.json"
-            path.write_text(json.dumps(agent_config.DEFAULT_CONFIG), encoding="utf-8")
-            loaded = agent_config.load_agent_config(Path(directory), path)
+            root = Path(directory)
+            (root / "modes").mkdir()
+            path = root / "agent.json"
+            path.write_text(json.dumps({"schema_version": 2, "active_mode": "collect_human"}), encoding="utf-8")
+            (root / "modes" / "collect_human.json").write_text("{}", encoding="utf-8")
+            loaded = agent_config.load_agent_config(root, path)
             self.assertEqual(loaded["framework"]["game"], "sts1")
+
+    def test_mode_profile_applies_mode_specific_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "modes").mkdir()
+            config_file = root / "agent.json"
+            config_file.write_text(json.dumps({"schema_version": 2, "active_mode": "online_rl"}), encoding="utf-8")
+            (root / "modes" / "online_rl.json").write_text(
+                json.dumps({"posthoc_feedback": {"enabled": True, "mode": "auto"}, "policy": {"model": {"initial_adapter": "adapter"}}}),
+                encoding="utf-8",
+            )
+            loaded = agent_config.load_agent_config(root, config_file)
+            self.assertEqual(loaded["framework"]["learning_method"], "online_rl")
+            self.assertTrue(loaded["policy"]["enabled"])
+            self.assertEqual(loaded["policy"]["runtime"], "remote_online_rl")
+            self.assertEqual(loaded["posthoc_feedback"]["mode"], "auto")
+
+    def test_mode_selector_rejects_framework_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_file = root / "agent.json"
+            config_file.write_text(
+                json.dumps({"schema_version": 2, "active_mode": "collect_human", "framework": {"control_mode": "manual"}}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(agent_config.ConfigError):
+                agent_config.load_agent_config(root, config_file)
+
+    def test_every_named_mode_profile_resolves(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            modes_dir = root / "modes"
+            shutil.copytree(PROJECT_ROOT / "config" / "modes", modes_dir)
+            config_file = root / "agent.json"
+            descriptor = {
+                "schema_version": 2,
+                "shared": {"policy": {"model": {"initial_adapter": "outputs/sft/test"}}},
+            }
+            for mode_name in agent_config.MODE_FRAMEWORKS:
+                descriptor["active_mode"] = mode_name
+                config_file.write_text(json.dumps(descriptor), encoding="utf-8")
+                resolved = agent_config.load_agent_config(root, config_file)
+                self.assertEqual(
+                    resolved["framework"],
+                    agent_config.MODE_FRAMEWORKS[mode_name],
+                    mode_name,
+                )
 
 
 if __name__ == "__main__":

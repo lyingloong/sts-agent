@@ -1,0 +1,8 @@
+{
+  "policy": {
+    "confidence_auto": {
+      "enabled": false,
+      "min_probability": 0.85
+    }
+  }
+}

@@ -17,7 +17,7 @@
 
 ## 运行流程
 
-知识问答是教师动作流程中的可选能力，不需要切换成另一种决策模式。推荐在当前使用的教师配置中加入：
+知识问答是教师动作流程中的可选能力，不需要切换成另一种决策模式。在 `config/modes/prompt_evolution.json` 的 `knowledge_experience` 配置段中开启：
 
 ```json
 "knowledge_experience": {
@@ -29,7 +29,7 @@
 }
 ```
 
-在使用教师的配置中开启该能力；同时将 `framework.policy_backend` 设为 `remote_teacher`，并把 `framework.learning_method` 设为 `teacher_sft` 或 `prompt_evolution`：
+选择 `prompt_evolution`（或 `teacher_sft`）活动模式；教师后端会由模式 profile 自动选择，不需要再分别设置 framework 字段：
 
 ```powershell
 python -m sts_agent.runtime.controller

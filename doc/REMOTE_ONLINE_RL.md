@@ -6,14 +6,14 @@ aliases to one GPU on the training machine. No public inference port is opened.
 
 ## Modes
 
-`framework.policy_backend` and `framework.learning_method` select the runtime:
+Select one `active_mode` in `config/agent.json`; the mode profile chooses the matching runtime:
 
 | Runtime | Remote command | Behavior |
 | --- | --- | --- |
-| `remote_qwen` + `learning_method=none` | `sts_agent.policy.local_qwen` | Loads one fixed SFT LoRA adapter. Existing Candidate Assist or confidence-auto behavior is unchanged. |
-| `remote_qwen` + `learning_method=online_rl` | `sts_agent.learning.online_rl.worker` | Samples every action from a frozen adapter, collects `K=4` complete local episodes, then updates the resident LoRA adapter on the same remote GPU. |
+| `remote_inference` | `sts_agent.policy.local_qwen` | Loads one fixed SFT LoRA adapter. Existing confidence-auto behavior is unchanged. |
+| `online_rl` | `sts_agent.learning.online_rl.worker` | Samples every action from a frozen adapter, collects `K=4` complete local episodes, then updates the resident LoRA adapter on the same remote GPU. |
 
-`local` remains the existing on-machine Candidate Assist mode.
+`local_inference` runs the fixed policy on the game machine; `candidate_assist_local` keeps the player in the action-confirmation loop.
 
 ## Preparation
 

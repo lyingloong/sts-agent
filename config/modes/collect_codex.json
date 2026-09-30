@@ -1,0 +1,11 @@
+{
+  "codex": {
+    "actor_id": "codex",
+    "character": "IRONCLAD",
+    "ascension": 0,
+    "seed": "",
+    "output_dir": "data/trajectories/codex",
+    "max_actions_per_run": 2000,
+    "transition_timeout_seconds": 90.0
+  }
+}

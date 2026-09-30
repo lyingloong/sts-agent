@@ -2,12 +2,25 @@
 
 ## CommunicationMod 配置
 
-CommunicationMod 启动外部进程，进程 stdout 只能用于协议。控制器启动时发送 `ready`，随后接收 JSON 状态并输出协议命令；诊断写入 stderr 和项目日志。
+CommunicationMod 启动外部进程，进程 stdout 只能用于协议。controller 和人类
+采集 bridge 都在启动时发送 `ready`，随后接收 JSON 状态并输出协议命令；诊断
+写入 stderr 和项目日志。
 
 ```properties
 command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
 runAtGameStart=true
 ```
+
+人类直接在游戏内采集时，将 `command` 改为：
+
+```properties
+command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.recording.communication_bridge --config D\:/Code/spire-mod/sts-agent/config/agent.json
+runAtGameStart=true
+```
+
+此 bridge 被动发送 `WAIT`，CommunicationMod 的状态是唯一 observation 来源；
+ActionRecorder 通过 `recording.listen` 端口发送动作事务标记。当前采集链路只
+允许这一套 bridge，旧的独立 TCP 接收器已移除。
 
 Windows 后台入口使用 `pythonw.exe`，避免启动时弹出控制台窗口；CommunicationMod 提供的 stdin/stdout/stderr 管道仍用于协议和诊断。手动在终端排错时使用 `python.exe`。
 

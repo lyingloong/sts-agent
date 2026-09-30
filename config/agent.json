@@ -1,139 +1,87 @@
 {
-  "schema_version": 1,
-  "framework": {
-    "game": "sts1",
-    "control_mode": "codex",
-    "policy_backend": "none",
-    "learning_method": "collect_codex"
-  },
-  "server": {
-    "host": "127.0.0.1",
-    "port": 8765
-  },
-  "recording": {
-    "listen": {
+  "schema_version": 2,
+  "active_mode": "collect_human",
+  "shared": {
+    "server": {
       "host": "127.0.0.1",
-      "port": 8766
+      "port": 8765
     },
-    "output_dir": "data/trajectories/human"
-  },
-  "codex": {
-    "actor_id": "codex",
-    "character": "IRONCLAD",
-    "ascension": 0,
-    "seed": "",
-    "output_dir": "data/trajectories/codex",
-    "max_actions_per_run": 2000,
-    "transition_timeout_seconds": 90.0
-  },
-  "policy": {
-    "model": {
-      "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
-      "initial_adapter": "",
-      "initial_policy_version": "sft-v0",
-      "hub_endpoint": "https://huggingface.co"
-    },
-    "request": {
-      "top_k": 3,
-      "response_timeout_seconds": 8.0,
-      "startup_timeout_seconds": 300.0,
-      "screens": ["ALL"]
-    },
-    "local": {
-      "python": "auto"
-    },
-    "remote": {
-      "ssh_host": "linke84090",
-      "project_root": "/data/wanghao/sts-agent",
-      "python": ".venv/bin/python",
-      "online_rl_config": "config/online_rl.json",
-      "connect_timeout_seconds": 30.0,
-      "update_timeout_seconds": 1800.0,
-      "inference_gpu": {
-        "device": "auto",
-        "minimum_free_memory_mib": 6000
+    "policy": {
+      "model": {
+        "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+        "initial_adapter": "",
+        "initial_policy_version": "sft-v0",
+        "hub_endpoint": "https://huggingface.co"
+      },
+      "request": {
+        "top_k": 3,
+        "response_timeout_seconds": 8.0,
+        "startup_timeout_seconds": 300.0,
+        "screens": ["ALL"]
+      },
+      "local": {
+        "python": "auto"
+      },
+      "remote": {
+        "ssh_host": "linke84090",
+        "project_root": "/data/wanghao/sts-agent",
+        "python": ".venv/bin/python",
+        "online_rl_config": "config/online_rl.json",
+        "connect_timeout_seconds": 30.0,
+        "update_timeout_seconds": 1800.0,
+        "inference_gpu": {
+          "device": "auto",
+          "minimum_free_memory_mib": 6000
+        }
+      },
+      "development": {
+        "mock": false,
+        "debug": false
+      },
+      "confidence_auto": {
+        "enabled": true,
+        "min_probability": 0.85
       }
     },
-    "development": {
-      "mock": false,
-      "debug": false
+    "teacher": {
+      "base_url": "https://ws-1ha2dqzqhcry4uty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "model": "deepseek-v4-pro-0813",
+      "api_key_file": "ali_api.txt",
+      "timeout_seconds": 90.0,
+      "max_retries": 3,
+      "retry_backoff_seconds": 5.0,
+      "retry_max_backoff_seconds": 30.0,
+      "temperature": 0.0,
+      "max_tokens": 1024,
+      "max_completion_tokens": 32768,
+      "max_input_chars": 32000,
+      "thinking": false,
+      "json_mode": true,
+      "streaming": false,
+      "reasoning_effort": "low",
+      "stream_update_interval_seconds": 0.3,
+      "screens": ["ALL"]
     },
-    "confidence_auto": {
-      "enabled": true,
-      "min_probability": 0.85
-    }
-  },
-  "teacher": {
-    "base_url": "https://ws-1ha2dqzqhcry4uty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    "model": "deepseek-v4-pro-0813",
-    "api_key_file": "ali_api.txt",
-    "timeout_seconds": 90.0,
-    "max_retries": 3,
-    "retry_backoff_seconds": 5.0,
-    "retry_max_backoff_seconds": 30.0,
-    "temperature": 0.0,
-    "max_tokens": 1024,
-    "max_completion_tokens": 32768,
-    "max_input_chars": 32000,
-    "thinking": false,
-    "json_mode": true,
-    "streaming": false,
-    "reasoning_effort": "low",
-    "stream_update_interval_seconds": 0.3,
-    "screens": ["ALL"]
-  },
-  "posthoc_feedback": {
-    "mode": "human",
-    "base_url": "https://api.llm.ustc.edu.cn/v1",
-    "model": "deepseek-v4-pro",
-    "api_key_file": "ustc_api.txt",
-    "timeout_seconds": 180.0,
-    "max_retries": 3,
-    "retry_backoff_seconds": 5.0,
-    "retry_max_backoff_seconds": 30.0,
-    "temperature": 0.0,
-    "max_tokens": 2048,
-    "max_input_chars": 96000,
-    "max_reflection_chars": 4000,
-    "max_candidates_per_direction": 10,
-    "max_applied_per_direction": 8,
-    "min_confidence": 0.75
-  },
-  "prompt_evolution": {
-    "policy_dir": "prompts/characters",
-    "output_dir": "data/prompt_evolution",
-    "max_skill_chars": 2400,
-    "max_analysis_input_chars": 900000,
-    "max_analysis_tokens": 8192,
-    "max_revisions_per_cycle": 3,
-    "auto_continue": true
-  },
-  "knowledge_experience": {
-    "enabled": false,
-    "request_style": "encouraged",
-    "max_entries_per_entity": 3,
-    "max_question_chars": 2000,
-    "max_answer_chars": 6000
-  },
-  "overlay": {
-    "always_on_top": true,
-    "frameless": false,
-    "status": {
-      "geometry": "540x680+24+84",
-      "opacity": 0.96,
-      "divider_columns": 36
-    },
-    "control": {
-      "geometry": "500x440+580+84",
-      "opacity": 0.97
-    },
-    "online_rl": {
-      "geometry": "360x240+1090+84",
-      "opacity": 0.97
-    },
-    "prompt_evolution": {
-      "geometry": "420x300+1090+340",
-      "opacity": 0.97
+    "overlay": {
+      "always_on_top": true,
+      "frameless": false,
+      "status": {
+        "geometry": "540x680+24+84",
+        "opacity": 0.96,
+        "divider_columns": 36
+      },
+      "control": {
+        "geometry": "500x440+580+84",
+        "opacity": 0.97
+      },
+      "online_rl": {
+        "geometry": "360x240+1090+84",
+        "opacity": 0.97
+      },
+      "prompt_evolution": {
+        "geometry": "420x300+1090+340",
+        "opacity": 0.97
+      }
     }
   }
 }

@@ -4,18 +4,9 @@
 
 ## 开始前
 
-1. 在 `config/agent.json` 中设置：
+1. 在 `config/agent.json` 中设置 `"active_mode": "collect_codex"`。Codex 专属选项在 `config/modes/collect_codex.json`；共享 controller/Overlay 设置仍放在 `agent.json`。
 
-   ```json
-   "framework": {
-     "game": "sts1",
-     "control_mode": "codex",
-     "policy_backend": "none",
-     "learning_method": "collect_codex"
-   }
-   ```
-
-2. 保持 `codex.character=IRONCLAD`、`codex.ascension=0`；空 `codex.seed` 表示随机种子。将 `knowledge_experience.enabled` 设为 `false`（这项功能需要内部教师，Codex 模式未接入它）。
+2. `config/modes/collect_codex.json` 默认使用 `IRONCLAD`、A0 和随机种子；如需固定种子，只改该 profile 的 `codex.seed`。Codex 模式不启用内部教师的实体经验问答。
 3. 安装可选 MCP 依赖：
 
    ```powershell

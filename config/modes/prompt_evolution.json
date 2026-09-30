@@ -1,0 +1,19 @@
+{
+  "prompt_evolution": {
+    "enabled": true,
+    "policy_dir": "prompts/characters",
+    "output_dir": "data/prompt_evolution",
+    "max_skill_chars": 2400,
+    "max_analysis_input_chars": 900000,
+    "max_analysis_tokens": 8192,
+    "max_revisions_per_cycle": 3,
+    "auto_continue": true
+  },
+  "knowledge_experience": {
+    "enabled": false,
+    "request_style": "encouraged",
+    "max_entries_per_entity": 3,
+    "max_question_chars": 2000,
+    "max_answer_chars": 6000
+  }
+}

@@ -32,7 +32,7 @@ LEARNING_METHODS = {
 }
 
 LEARNING_ENTRYPOINTS = {
-    "collect_human": LearningEntrypoint("collect_human", "sts_agent.recording.action_recorder", "data/trajectories/human"),
+    "collect_human": LearningEntrypoint("collect_human", "sts_agent.recording.communication_bridge", "data/trajectories/human"),
     "teacher_sft": LearningEntrypoint("teacher_sft", "sts_agent.learning.sft", "outputs/sft"),
     "dagger": LearningEntrypoint("dagger", "sts_agent.runtime.controller", "data/datasets/dagger"),
     "prompt_evolution": LearningEntrypoint("prompt_evolution", "sts_agent.learning.prompt_evolution", "prompts/characters"),

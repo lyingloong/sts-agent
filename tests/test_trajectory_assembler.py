@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sts_agent.recording.action_recorder import ActionRecorderEnricher, resolve_recorded_action
+from sts_agent.recording.trajectory_assembler import ActionRecorderEnricher, resolve_recorded_action
 from sts_agent.runtime.controller import normalize_state, route_policy_observation
 
 

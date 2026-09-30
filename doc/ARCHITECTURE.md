@@ -42,13 +42,7 @@ runtime view <- ui
 
 ## 配置模型
 
-`config/agent.json` 直接声明三个正交维度：
-
-- `framework.control_mode`：`manual`、`candidate_assist`、`autonomous`
-- `framework.policy_backend`：`none`、`local_qwen`、`remote_qwen`、`remote_teacher`、`mock`
-- `framework.learning_method`：`none`、`collect_human`、`teacher_sft`、`dagger`、`prompt_evolution`、`online_rl`
-
-`sts_agent.config` 严格校验字段与组合，并将其投影到 policy、teacher 和 learning 组件。新模式应扩展这三个维度及契约，不应复制 controller。
+`config/agent.json` 只选择一个 `active_mode` 并保存共享配置。具体模式参数放在 `config/modes/<mode>.json`；`sts_agent.core.modes` 将模式名映射到固定的控制、策略后端和学习组合，配置加载器再合成 controller 使用的运行时配置。这样新增或切换运行模式不会要求用户手动拼装三个可能互相矛盾的字段。
 
 ## 进程边界
 

@@ -1,27 +1,12 @@
 # Prompt 演化（随机首局、同种子复跑）
 
-该模式用于在一个固定的《杀戮尖塔 1》种子上迭代动作模型使用的角色 skill 或场景 skill。它不是 SFT、GRPO 或硬编码规则：Qwen 不参与此模式，DeepSeek 通过当前 `teacher` USTC API 以玩家身份负责实际动作，并以独立的 Prompt 演化器身份事后提出 skill 候选。每次只替换一个 skill，动作仍然经过 controller 的合法动作表和编译器。
+该模式用于在一个固定的《杀戮尖塔 1》种子上迭代动作模型使用的角色 skill 或场景 skill。它不是 SFT、GRPO 或硬编码规则：Qwen 不参与此模式，当前 `shared.teacher` 配置的 DeepSeek endpoint 以玩家身份负责实际动作，并以独立的 Prompt 演化器身份事后提出 skill 候选。每次只替换一个 skill，动作仍然经过 controller 的合法动作表和编译器。
 
 ## 开关
 
-在 `config/agent.json` 中直接设置 Prompt 演化的 framework，并启用对应配置：
+在 `config/agent.json` 中把 `active_mode` 改为 `prompt_evolution`。Prompt Evolution 参数在 `config/modes/prompt_evolution.json`；Teacher API 等共享设置在 `agent.json` 的 `shared.teacher`。
 
-```json
-{
-  "framework": {
-    "game": "sts1",
-    "control_mode": "autonomous",
-    "policy_backend": "remote_teacher",
-    "learning_method": "prompt_evolution"
-  },
-  "policy": {"enabled": false},
-  "teacher": {"enabled": true},
-  "posthoc_feedback": {"enabled": false},
-  "prompt_evolution": {"enabled": true}
-}
-```
-
-当前配置使用阿里云 DeepSeek；如需改服务，直接修改顶层 `teacher`。四个开关有意互斥：本模式不同时启动 Qwen、在线 RL 或终局归因。
+当前配置使用阿里云 DeepSeek；如需改服务，修改 `shared.teacher`。活动 profile 会自动选择教师后端并关闭 Qwen 与终局归因，避免手工开关冲突。
 
 教师请求支持配置化重试：网络断开、超时、429、503 等临时错误会按指数退避自动重试；认证或请求参数错误不会无意义地重复请求。达到 `teacher.max_retries` 后才回退为不可用并保留本局轨迹，不会使 controller 进程退出。相关参数见 [`config/README.md`](../config/README.md)。
 

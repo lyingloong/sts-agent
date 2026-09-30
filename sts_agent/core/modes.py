@@ -10,6 +10,23 @@ CONTROL_MODES = frozenset({"manual", "candidate_assist", "autonomous", "codex"})
 POLICY_BACKENDS = frozenset({"none", "local_qwen", "remote_qwen", "remote_teacher", "mock"})
 LEARNING_METHODS = frozenset({"none", "collect_human", "collect_codex", "teacher_sft", "dagger", "prompt_evolution", "online_rl"})
 
+# User-facing profiles collapse the three low-level framework dimensions into
+# one named choice. Keep the mapping here so an invalid combination cannot be
+# assembled accidentally by editing a JSON profile.
+MODE_FRAMEWORKS: dict[str, dict[str, str]] = {
+    "collect_human": {"game": "sts1", "control_mode": "manual", "policy_backend": "none", "learning_method": "collect_human"},
+    "collect_codex": {"game": "sts1", "control_mode": "codex", "policy_backend": "none", "learning_method": "collect_codex"},
+    "candidate_assist_local": {"game": "sts1", "control_mode": "candidate_assist", "policy_backend": "local_qwen", "learning_method": "none"},
+    "candidate_assist_remote": {"game": "sts1", "control_mode": "candidate_assist", "policy_backend": "remote_qwen", "learning_method": "none"},
+    "teacher_sft": {"game": "sts1", "control_mode": "autonomous", "policy_backend": "remote_teacher", "learning_method": "teacher_sft"},
+    "dagger_local": {"game": "sts1", "control_mode": "candidate_assist", "policy_backend": "local_qwen", "learning_method": "dagger"},
+    "dagger_remote": {"game": "sts1", "control_mode": "candidate_assist", "policy_backend": "remote_qwen", "learning_method": "dagger"},
+    "prompt_evolution": {"game": "sts1", "control_mode": "autonomous", "policy_backend": "remote_teacher", "learning_method": "prompt_evolution"},
+    "local_inference": {"game": "sts1", "control_mode": "autonomous", "policy_backend": "local_qwen", "learning_method": "none"},
+    "remote_inference": {"game": "sts1", "control_mode": "autonomous", "policy_backend": "remote_qwen", "learning_method": "none"},
+    "online_rl": {"game": "sts1", "control_mode": "autonomous", "policy_backend": "remote_qwen", "learning_method": "online_rl"},
+}
+
 
 @dataclass(frozen=True, slots=True)
 class FrameworkMode:

@@ -11,7 +11,7 @@
 | 下载基座模型 | `python -m sts_agent.commands.download_model` | `sts-agent-download-model` |
 | 刷新静态知识 | `python -m sts_agent.commands.fetch_knowledge` | `sts-agent-fetch-knowledge` |
 | CommunicationMod 只读探针 | `python -m sts_agent.commands.communication_probe` | 无 |
-| ActionRecorder 人类轨迹接收与整理 | `python -m sts_agent.recording.action_recorder --config config/agent.json` | `sts-agent-record-human` |
+| CommunicationMod 状态/动作事务桥 | `python -m sts_agent.recording.communication_bridge --config config/agent.json` | `sts-agent-communication-bridge` |
 | 导出教师 SFT JSONL | `python -m sts_agent.learning.export_teacher_sft` | `sts-agent-export-sft` |
 | 构建迁移 bundle | `python -m sts_agent.learning.training_bundle` | `sts-agent-bundle` |
 | LoRA SFT | `python -m sts_agent.learning.sft` | `sts-agent-train-sft` |

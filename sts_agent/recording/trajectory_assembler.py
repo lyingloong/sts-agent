@@ -1,25 +1,19 @@
-"""Enrich ActionRecorder events with the exact StS agent state/action adapter.
+"""Internal trajectory writer used by the CommunicationMod state bridge.
 
-ActionRecorder owns durable, game-side raw capture. This module is an optional
-consumer: it turns raw decision pairs into the normalized observations and
-semantic actions used by live policy inference. ActionRecorder supplies complete
-campfire smithing and shop purge decisions, including their original room state
-and chosen card. No reconstruction from UI clicks is needed. This consumer can
-listen to TCP or rebuild trajectories later from local JSONL files.
+CommunicationMod supplies authoritative states and ActionRecorder sends
+transaction markers. The bridge translates a matched transaction into the
+small internal ``action_observed``/``step_resolved`` pair consumed here. This
+module is intentionally not a standalone receiver or offline converter.
 """
 
 from __future__ import annotations
 
-import argparse
 import copy
 import json
-import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, TextIO
+from typing import Any, TextIO
 
-from sts_agent.config import ConfigError, load_agent_config
-from sts_agent.paths import PROJECT_ROOT
 from sts_agent.runtime.controller import (
     ACTION_HISTORY_STORAGE_LIMIT,
     accepted_action_history_item,
@@ -31,9 +25,6 @@ from sts_agent.runtime.controller import (
     semantic_actions,
     shop_visit_key,
 )
-
-
-DEFAULT_CONFIG = PROJECT_ROOT / "config" / "agent.json"
 
 
 def _message(state: Any, available: Any = None) -> dict[str, Any]:
@@ -272,7 +263,7 @@ class ActionRecorderEnricher:
         step_id = str(event.get("step_id") or "")
         context.pending[step_id] = {
             "schema_version": "0.4",
-            "source": "human_action_recorder",
+            "source": "communicationmod_action_recorder_bridge",
             "run_id": context.run_id,
             "run_config": copy.deepcopy(context.metadata),
             "step_id": step_id,
@@ -289,6 +280,8 @@ class ActionRecorderEnricher:
             "command": action.get("command"),
             "pre_message": message,
             "recorded_at_ms": event.get("timestamp_ms"),
+            "state_match": copy.deepcopy(event.get("state_match"))
+            if isinstance(event.get("state_match"), dict) else None,
         }
 
     def _finish_step(self, context: RunContext, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -315,6 +308,10 @@ class ActionRecorderEnricher:
                 "resolved_at_ms": event.get("timestamp_ms"),
             }
         )
+        if isinstance(record.get("state_match"), dict):
+            record["state_match"] = dict(record["state_match"])
+            record["state_match"]["after_state_seq"] = event.get("after_state_seq")
+            record["state_match"]["resolution"] = event.get("resolution")
 
         if post_message["in_game"] and isinstance(record.get("post_state"), dict):
             history_pending = {
@@ -351,66 +348,3 @@ class ActionRecorderEnricher:
             return
         context.output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
         context.output.flush()
-
-
-def iter_jsonl(paths: Iterable[Path]) -> Iterable[dict[str, Any]]:
-    for path in paths:
-        with path.open("r", encoding="utf-8-sig") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
-                if isinstance(value, dict):
-                    yield value
-
-
-def serve(host: str, port: int, enricher: ActionRecorderEnricher) -> None:
-    with socket.create_server((host, port)) as server:
-        print(f"ActionRecorder trajectory receiver listening on {host}:{port}", flush=True)
-        while True:
-            connection, address = server.accept()
-            print(f"ActionRecorder connected: {address[0]}:{address[1]}", flush=True)
-            with connection, connection.makefile("r", encoding="utf-8", newline="\n") as stream:
-                for line in stream:
-                    if not line.strip():
-                        continue
-                    value = json.loads(line)
-                    if isinstance(value, dict):
-                        enricher.consume(value)
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Record human play with sts-agent observations/actions")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--input", type=Path, action="append", help="convert ActionRecorder JSONL instead of listening")
-    args = parser.parse_args()
-    try:
-        config = load_agent_config(config_file=args.config)
-    except ConfigError as exc:
-        parser.error(str(exc))
-    recording = config["recording"]
-    if not args.input and config["framework"]["learning_method"] != "collect_human":
-        parser.error(
-            "listening mode requires framework.learning_method=collect_human in the selected agent config"
-        )
-    output_dir = PROJECT_ROOT / str(recording["output_dir"])
-    enricher = ActionRecorderEnricher(output_dir)
-    try:
-        if args.input:
-            for event in iter_jsonl(args.input):
-                enricher.consume(event)
-        else:
-            listen = recording["listen"]
-            serve(str(listen["host"]), int(listen["port"]), enricher)
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        enricher.close()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

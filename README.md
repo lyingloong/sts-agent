@@ -44,36 +44,34 @@ maxInitializationTimeout=300
 .\.venv\Scripts\python.exe -m sts_agent.ui.terminal
 ```
 
-controller 必须由 CommunicationMod 启动，一次只接受一个终端类客户端。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。具体模式由 [config/agent.json](config/agent.json) 的 `framework` 决定，修改配置后重启游戏/controller 和 UI。
+controller 必须由 CommunicationMod 启动，一次只接受一个终端类客户端。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。运行模式由 [config/agent.json](config/agent.json) 的 `active_mode` 决定，模式专属参数位于 `config/modes/`；修改配置后重启游戏/controller 和 UI。
 
 ### Codex 自动游玩采集
 
-设置 `framework` 为 `codex / none / collect_codex` 后，启动游戏使 CommunicationMod 拉起 controller，再在 Codex 会话中启用 `sts-agent-codex-mcp`。Codex 通过 MCP 获取当前模型可见 observation 和合法动作，并以动作 ID 提交选择；轨迹写入 `data/trajectories/codex/`，与人类数据分开。配置 MCP 的客户端步骤和逐步游玩规程见 [A0 战士 Codex 游玩说明](doc/CODEX_PLAY_A0_IRONCLAD.md)。
+将 `config/agent.json` 的 `active_mode` 设为 `collect_codex`，启动游戏使 CommunicationMod 拉起 controller，再在 Codex 会话中启用 `sts-agent-codex-mcp`。Codex 通过 MCP 获取当前模型可见 observation 和合法动作，并以动作 ID 提交选择；轨迹写入 `data/trajectories/codex/`，与人类数据分开。配置 MCP 的客户端步骤和逐步游玩规程见 [A0 战士 Codex 游玩说明](doc/CODEX_PLAY_A0_IRONCLAD.md)。
 
 controller 会在向 MCP 提供决策状态前完成已有的环境自动动作。自动动作保留在轨迹和 `recent_actions` 中，但不会作为待选动作交给 Codex；Codex 不应重复执行它们。
 
 ### 人类游玩采集
 
-人类直接在游戏界面操作时，将 `config/agent.json` 的 framework 设置为：
+人类直接在游戏界面操作、并采集轨迹时，将 `config/agent.json` 中的活动模式设为：
 
 ```json
-{
-"framework": {
-  "game": "sts1",
-  "control_mode": "manual",
-  "policy_backend": "none",
-  "learning_method": "collect_human"
-}
-}
+"active_mode": "collect_human"
 ```
 
-此模式不启动上面的 CommunicationMod controller。启动统一配置驱动的 ActionRecorder 轨迹接收端：
+此模式使用 CommunicationMod 启动状态桥；不要再分别启动一个只收 ActionRecorder
+事件的进程。将 CommunicationMod 的 `command` 改为：
 
 ```powershell
-.\.venv\Scripts\python.exe -m sts_agent.recording.action_recorder --config config/agent.json
+.\.venv\Scripts\pythonw.exe -m sts_agent.recording.communication_bridge --config config/agent.json
 ```
 
-然后通过 ModTheSpire 同时启用 ActionRecorder 和 CommunicationMod。CommunicationMod 只作为游戏进程内的状态提供者，其 `runAtGameStart` 应设为 `false`。ActionRecorder 的 TCP 地址由 [config/agent.json](config/agent.json) 的 `recording.listen` 配置。
+并设置 `runAtGameStart=true`。同时启用 ActionRecorder 和 CommunicationMod。
+CommunicationMod 的稳定状态通过 stdin 进入 bridge，ActionRecorder 只通过
+`recording.listen` 配置的 TCP 端口发送动作事务标记。bridge 会在动作前缓存中
+匹配唯一状态，动作被接受后等待下一个稳定状态；无法确认的动作会标成
+`ambiguous/unmatched`，不会静默生成训练样本。
 
 完整轨迹写入 `data/trajectories/human/`。每步包含：
 
@@ -84,16 +82,14 @@ controller 会在向 MCP 提供决策状态前完成已有的环境自动动作�
 - `raw_action`：ActionRecorder 捕获的原始游戏内动作；
 - `post_state`：动作后稳定状态。
 
-ActionRecorder 事件格式 0.2 直接输出“锻造指定卡牌”和“删除指定卡牌”的完整语义决策，携带进入流程前的状态；接收端直接匹配动作 ID。中间的 `decision_started/detail/cancelled` 属于 Mod 的辅助记录，不生成训练样本，也不参与重建动作。旧版细粒度日志应单独迁移，不会在这里自动拼接。
+ActionRecorder 事件格式 0.4 使用 `action_begin`/`action_accepted`/`action_rejected`
+事务。Java Mod 不把自己的缓存状态当作权威 observation；完整状态只来自
+CommunicationMod bridge。旧的不完整轨迹不进入当前采集链路。
 
 只有 `usable_for_sft=true` 的步骤才同时具备有效状态和可验证的合法动作标签，应进入后续 SFT 数据集。若未同时启用 CommunicationMod，接收器会在终端明确告警并将对应步骤标记为不可训练，而不是静默生成空状态样本。
 
-TCP 断开不影响 ActionRecorder 的本地原始文件。之后可以离线补做同样的转换：
-
-```powershell
-.\.venv\Scripts\python.exe -m sts_agent.recording.action_recorder `
-  --input "D:\Steam\steamapps\common\SlayTheSpire\data\actionrecorder\run-....jsonl"
-```
+TCP 断开不影响 ActionRecorder 的本地原始文件；bridge 恢复后会继续为新的事务
+生成轨迹。已有不完整旧日志不自动迁移，避免把错误的动作前状态带入训练集。
 
 ## 数据与训练
 

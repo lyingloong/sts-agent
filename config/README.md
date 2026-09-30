@@ -1,171 +1,53 @@
 # 运行配置
 
-所有 JSON 文件使用严格 schema：未知字段会直接报错，避免拼写错误静默改变实验。JSON 不支持注释，本文件是每个字段的说明与运行边界。
+## 切换运行模式
+
+日常只改 [`agent.json`](agent.json) 里的 `active_mode`，不要分别拼装控制方式、模型后端和学习方法：
+
+```json
+"active_mode": "collect_human"
+```
+
+模式专属参数放在 `config/modes/<模式名>.json`。当前支持：
+
+| `active_mode` | 用途 | 配置文件 |
+| --- | --- | --- |
+| `collect_human` | 人类在游戏内游玩并采集轨迹；当前默认 | [collect_human.json](modes/collect_human.json) |
+| `candidate_assist_local` | 本机 Qwen 给出候选，由玩家选择或修正 | [candidate_assist_local.json](modes/candidate_assist_local.json) |
+| `candidate_assist_remote` | 远端 Qwen 候选辅助 | [candidate_assist_remote.json](modes/candidate_assist_remote.json) |
+| `teacher_sft` | 远端教师自动游玩并生成 SFT 数据 | [teacher_sft.json](modes/teacher_sft.json) |
+| `dagger_local` / `dagger_remote` | Qwen 候选 + 人类纠正，采集 DAgger 数据 | [dagger_local.json](modes/dagger_local.json) / [dagger_remote.json](modes/dagger_remote.json) |
+| `prompt_evolution` | 教师提出 skill 候选，人工审核迭代 | [prompt_evolution.json](modes/prompt_evolution.json) |
+| `local_inference` / `remote_inference` | 本机 / 远端 Qwen 自动推理 | [local_inference.json](modes/local_inference.json) / [remote_inference.json](modes/remote_inference.json) |
+| `online_rl` | 远端 Qwen rollout 与在线参数更新 | [online_rl.json](modes/online_rl.json) |
+| `collect_codex` | Codex MCP 操作游戏并单独保存轨迹 | [collect_codex.json](modes/collect_codex.json) |
+
+所有组合由 `sts_agent.core.modes` 固定映射并验证，避免出现“人工控制 + 模型后端”这类意外组合。切换后要重启游戏/controller 和 Overlay。启动前可检查活动模式：
+
+```powershell
+python -c "from sts_agent.config import load_agent_config; c=load_agent_config(); print(c['framework'])"
+```
 
 ## 配置归属
 
-配置加载器以 `sts_agent.config` 的默认值为基线，对 `config/agent.json` 做严格合并。仓库只维护这一份运行配置；游戏接入、控制方式、策略后端和学习方法都在同一个文件中明确声明。
+- `agent.json`：活动模式选择，以及所有模式共享的 controller 地址、录制接收地址、模型/API 连接信息和 Overlay 布局。Qwen 的 `policy.model.initial_adapter` 只维护一次；Teacher API key 只写在被 Git 忽略的 key 文件中。
+- `modes/*.json`：所选模式需要额外修改的参数。没有覆盖的字段使用 `sts_agent.config` 中经过校验的默认值。
+- `online_rl.json`：仅训练机上的在线 RL 实验参数，被 Git 忽略；结构见 [`online_rl.example.json`](online_rl.example.json) 和 [远端在线 RL 文档](../doc/REMOTE_ONLINE_RL.md)。
 
-例如：
+模式加载后，内部仍生成统一的运行配置供 controller、Overlay、MCP 和训练组件使用；该运行时配置不需要手动编辑。JSON 有严格字段校验，未知字段会在启动时明确报错。
 
-```powershell
-python -m sts_agent.runtime.controller
-python -m sts_agent.ui.overlay
-```
+## 人类轨迹采集
 
-直接修改 `framework` 和对应的详细配置即可切换运行方式：
+使用 `active_mode: "collect_human"`。CommunicationMod 启动 `sts_agent.recording.communication_bridge`：它从 CommunicationMod stdin 接收稳定状态，并在 `recording.listen.host` / `recording.listen.port`（默认 `127.0.0.1:8766`）接收 ActionRecorder 的动作事务标记。整理后的轨迹写入 `recording.output_dir`，默认 `data/trajectories/human/`。此模式不启动策略模型或教师模型。
 
-```json
-"framework": {
-  "game": "sts1",
-  "control_mode": "autonomous",
-  "policy_backend": "remote_teacher",
-  "learning_method": "prompt_evolution"
-}
-```
+## Codex MCP 采集
 
-修改后必须重启 controller；Overlay 也应重启以读取同一份配置。完整组合见 [运行模式与学习方法](../doc/MODES.md)。
+选择 `active_mode: "collect_codex"`。模式参数位于对应 profile 中；A0 Ironclad 是当前唯一支持的配置。客户端注册和游玩规程见 [Codex 游玩说明](../doc/CODEX_PLAY_A0_IRONCLAD.md)。
 
-`recording` 是 `agent.json` 中的统一配置段，供 ActionRecorder 人类游玩采集接收端使用。`recording.listen.host` / `recording.listen.port` 必须和 ActionRecorder 的 TCP 地址一致（默认 `127.0.0.1:8766`），`recording.output_dir` 指定整理后的完整 sts-agent 轨迹目录。采集模式通过 `framework.learning_method=collect_human` 选择，不启动策略模型或教师模型。
+## 教师与 Prompt Evolution
 
-Codex 自动游玩选择 `framework.control_mode=codex`、`framework.policy_backend=none`、`framework.learning_method=collect_codex`。该模式使用现有 controller 的状态和动作编译链路，由本地 MCP 服务将结构化 observation 与合法动作交给 Codex；本机策略和远程教师都保持关闭。角色、进阶、种子、输出目录、动作上限和等待超时由 `codex` 配置段管理。A0 Ironclad 是当前唯一支持的配置。
+`teacher` 的 API、重试、thinking/streaming、token 上限等提供方设置是共享项。Prompt Evolution 的 skill 长度、轨迹输入上限、改写次数等放在 `modes/prompt_evolution.json`。实体经验开关也属于该模式 profile；静态知识数据由 `data/knowledge/` 管理。
 
-`policy.model.base`、`policy.model.initial_adapter` 和 `policy.model.initial_policy_version` 在所选模式配置中只设置一次。本机推理、远端固定推理、远端在线 RL 不会再从多个配置段重复读取同一 adapter。
+## 在线 RL
 
-远端被忽略的 `online_rl.json` 只描述一次在线训练如何执行，不能包含 `model`、`initial_adapter` 或 `initial_policy_version`。controller 通过 SSH 启动 worker 时显式传入这三个值，因此远端文件不能覆盖本机选择的初始策略。
-
-如果需要换一套初始权重，请同时修改 `initial_adapter` 和 `initial_policy_version`，并为该实验使用新的 `online_rl.output_root`。已有 `output_root/state.json` 会优先恢复其记录的当前版本，修改初始 adapter 不会替换已开始实验的策略。
-
-## `agent.json`
-
-| 字段 | 含义 | 适用范围 |
-| --- | --- | --- |
-| `schema_version` | 当前配置格式，固定为 `1`。 | 全部 |
-| `server.host` / `server.port` | CommunicationMod controller 的本机监听地址与端口。 | 全部 |
-| `recording.listen.host` / `recording.listen.port` | ActionRecorder TCP 接收端地址和端口。 | `collect_human` |
-| `recording.output_dir` | 整理后的 sts-agent 人类轨迹输出目录。 | `collect_human` |
-| `codex.actor_id` | Codex 轨迹的 actor 标签，写入每局 `run_config`。 | `codex` |
-| `codex.character` / `codex.ascension` | Codex 采集角色和进阶，目前固定为 `IRONCLAD` / `0`。 | `codex` |
-| `codex.seed` | 固定字母数字种子；空字符串表示每次随机种子。 | `codex` |
-| `codex.output_dir` | Codex 轨迹和 run-events 的独立输出目录。 | `codex` |
-| `codex.max_actions_per_run` | 一个 Codex 会话可提交的动作上限，防止卡死时无限循环。 | `codex` |
-| `codex.transition_timeout_seconds` | 等待游戏状态推进的最长时间。 | `codex` |
-| `policy.enabled` | 是否启动 Qwen 策略。教师采集时必须为 `false`。 | 全部 |
-| `policy.runtime` | `local` 本机推理；`remote_inference` 远端只推理；`remote_online_rl` 远端采样并更新。 | 全部 |
-| `policy.model.base` | Qwen 基座的本机路径、远端绝对路径或 Hugging Face ID；路径必须对当前 runtime 实际可见。 | 全部 |
-| `policy.model.initial_adapter` | 唯一的初始 LoRA adapter。可为空以运行未微调的固定推理；真实在线 RL 必须是完整 adapter 目录。 | 全部，在线 RL 必填 |
-| `policy.model.initial_policy_version` | 新建在线 RL `output_root` 的初始版本标签，例如 `sft-v1`。 | 在线 RL |
-| `policy.model.hub_endpoint` | 下载基座模型时使用的 Hugging Face 端点；游戏运行不会联网下载。 | `local`、`remote_inference` |
-| `policy.request.top_k` | Overlay 显示的候选数；在线 RL 同时限制展示的策略候选数。 | 全部 |
-| `policy.request.response_timeout_seconds` | 每个动作请求最多等待秒数。 | 全部 |
-| `policy.request.startup_timeout_seconds` | controller 预热本机/远端 worker 的最多等待秒数。 | 全部 |
-| `policy.request.screens` | 请求策略的场景，`["ALL"]` 或 `["COMBAT"]`。 | 全部 |
-| `policy.local.python` | `local` 模式启动 policy server 的解释器；`auto` 优先项目 `.venv`。 | `local` |
-| `policy.remote.ssh_host` | Windows SSH config 中的主机别名。 | 两个远端模式 |
-| `policy.remote.project_root` | 远端仓库绝对路径。 | 两个远端模式 |
-| `policy.remote.python` | 远端项目内 Python 命令。 | 两个远端模式 |
-| `policy.remote.online_rl_config` | 相对远端项目根目录的、被忽略的在线 RL 运行配置。 | `remote_online_rl` |
-| `policy.remote.connect_timeout_seconds` | 建立 SSH 连接的最多等待秒数。 | 两个远端模式 |
-| `policy.remote.update_timeout_seconds` | 终局上传与第 K 局参数更新的最多等待秒数。 | `remote_online_rl` |
-| `policy.remote.inference_gpu.device` | 远端固定推理卡，物理序号或 `"auto"`。 | `remote_inference` |
-| `policy.remote.inference_gpu.minimum_free_memory_mib` | `device: "auto"` 时所需的最低可用显存。 | `remote_inference` |
-| `policy.development.mock` | 不加载真实模型，仅测试 controller/JSONL 协议。不能用于训练结果。 | 开发测试 |
-| `policy.development.debug` | 将完整异常写到 controller/worker 的 stderr。 | 排错 |
-| `policy.confidence_auto.enabled` | 固定推理时满足阈值则自动执行首选；在线 RL 忽略此项并始终采样。 | `local`、`remote_inference` |
-| `policy.confidence_auto.min_probability` | 自动执行所需的首选动作归一化概率。 | `local`、`remote_inference` |
-
-### 教师与归因
-
-`teacher` 用于远程教师 SFT 采集和 Prompt 演化中的实际决策/策略分析，`posthoc_feedback` 用于在线 RL 终局归因。后者可由人类反思定向，也可由教师自动复盘；这些功能都使用 OpenAI 兼容 API。
-
-| 字段 | 含义 |
-| --- | --- |
-| `<group>.enabled` | 是否启用该功能；`teacher` 与 `policy` 不能同时启用，`posthoc_feedback` 仅允许在线 RL，`knowledge_experience` 需要启用 `teacher`。 |
-| `posthoc_feedback.mode` | `human`（默认，终局显示正/负人工反思框）或 `auto`（不请求人工输入，教师根据终局与完整动作账本自行做双向归因）。自动模式只适合探索，建议定期审计归因 artifact。 |
-| `<group>.base_url` / `<group>.model` | API 根地址与模型 ID。 |
-| `<group>.api_key_file` | 相对项目根目录的密钥文件，必须被 Git 忽略。 |
-| `<group>.timeout_seconds` / `max_retries` | 单次 API 请求超时和失败后的最多重试次数；网络错误、超时、429 和 5xx 会重试，认证/参数类 4xx 立即失败。 |
-| `<group>.retry_backoff_seconds` / `retry_max_backoff_seconds` | 重试前的指数退避起始秒数和上限；默认第 1 次重试等待 5 秒，之后按 5、10、20... 秒增长。按 RPM=20 的远程服务限制设置。设为 `0` 可关闭等待但仍保留重试。 |
-| `<group>.temperature` / `max_tokens` / `max_completion_tokens` | 教师/归因模型温度、最终回复上限，以及思考模式下“思考+最终回复”的总输出上限。启用思考时优先使用后者。 |
-| `teacher.max_input_chars` / `teacher.screens` | 教师单步上下文的最大字符数，以及请求教师的场景。 |
-| `teacher.thinking` / `json_mode` / `streaming` | 是否请求思考、结构化 JSON 和流式展示。`reasoning_effort` 可设为 `low`/`medium`/`high`/`max`；`stream_update_interval_seconds` 控制流式面板刷新频率。 |
-| `posthoc_feedback.max_input_chars` | 单局归因上下文最大字符数；动态状态和全动作列表会优先保留。 |
-| `posthoc_feedback.max_reflection_chars` | 玩家正/负反思文本的最大字符数。 |
-| `posthoc_feedback.max_candidates_per_direction` | 教师每个方向可提出的候选步骤数。 |
-| `posthoc_feedback.max_applied_per_direction` | 本地校验后每个方向实际送入更新的最多步骤数。 |
-| `posthoc_feedback.min_confidence` | 接受教师归因步骤的最低置信度。 |
-
-### 实体经验知识库
-
-`knowledge_experience` 复用 `teacher` 的 API 配置，不是独立的游戏模式。教师在任意游戏决策中，若当前公开实体确实缺少依据，可以暂时返回知识请求；Overlay/终端收集人类回答后，DeepSeek 输出最多三条经验的完整替换列表，最后由人类审核。若审核拒绝，上一版候选和拒绝理由会交回 DeepSeek 重写并再次审核，直到接受或放弃；只有接受后才原子写入 `data/knowledge/sts1_*.json`，并立即回到同一状态重新请求动作。字段如下：
-
-| 字段 | 含义 |
-| --- | --- |
-| `knowledge_experience.enabled` | 开启教师动作流程中的带外知识请求与审核写库能力；关闭时教师只能返回动作。 |
-| `knowledge_experience.request_style` | `encouraged`（默认）：只要当前公开实体有不明白之处，就鼓励优先澄清而非猜测；`normal`：同样允许提问，但措辞更克制，优先使用已有状态与静态资料。 |
-| `max_entries_per_entity` | 每个实体经验上限，当前限制为 3。 |
-| `max_question_chars` / `max_answer_chars` | 单次模型问题与人类回答的最大字符数。 |
-
-除游戏中的教师问答流程外，也可以在 Overlay 动作面板点击 `知识库`，逐个浏览所有静态实体并手动维护最多三条 `experience`。保存会直接更新对应的 `data/knowledge/sts1_*.json`，不创建额外经验补充文件。
-
-### Prompt 演化
-
-`prompt_evolution` 是固定角色、进阶和游戏种子的人工审核式策略迭代模式。它与 `policy`、`posthoc_feedback` 互斥，使用同一份 `teacher` USTC API：教师只提出一个场景或角色 skill 的小型替换，候选先经过一次“验证前审核”，人工批准后才在同一种子上重跑，验证结果再经过第二次人工审核。首次 incumbent 可以使用随机种子，观察到游戏返回的真实种子后才建立候选复跑锚点。只有接受验证结果才会写入当前角色目录下 Git 跟踪的 `prompts/characters/<角色>/versions/pNNNN.json` 并更新 manifest；候选、轨迹、拒绝理由和 session 状态写入被忽略的 `data/prompt_evolution/`。
-
-| 字段 | 含义 |
-| --- | --- |
-| `prompt_evolution.enabled` | 启用固定种子 prompt 演化；需 `teacher.enabled=true`、`policy.enabled=false`、`posthoc_feedback.enabled=false`。 |
-| `policy_dir` | 角色 Prompt 库的项目相对目录；运行时使用其下的 `<角色>/manifest.json` 和 `versions/`。 |
-| `output_dir` | 候选、重跑轨迹和审核状态的本地实验目录。 |
-| `max_skill_chars` | 单个场景补充策略的最大字符数；防止候选变成长篇新 prompt。 |
-| `max_analysis_input_chars` / `max_analysis_tokens` | 发送给 USTC 演化教师的单个 Act 压缩动作账本字符上限和输出 token 上限；默认分别为 `900000` 和 `8192`。完整运行按 Act 分段逐次审核；自动推进、地图图结构、Boss 详细招式表、静态物品描述和未变化的卡组/遗物/药水不会重复发送。输入上限使用字符计数，避免把字符和模型 token 混淆；若仍超限，Prompt Evolution 面板会显示告警并弹窗。 |
-| `max_revisions_per_cycle` | 同一候选被拒绝后最多自动重写次数。 |
-| `auto_continue` | 接受验证结果后是否自动生成下一候选；即使开启，也会先停在下一次“验证前审核”，不会跳过人工批准。关闭则接受后暂停。 |
-
-### Overlay
-
-`overlay.always_on_top` 控制窗口置顶；`frameless` 控制是否移除系统标题栏。`status`、`control`、`online_rl` 的 `geometry` 使用 `宽x高+X+Y`，`opacity` 是 `0.2` 到 `1.0` 的透明度；`status.divider_columns` 是状态窗口分隔线宽度。
-
-## `online_rl.json`
-
-此文件仅存于训练机并被 Git 忽略。可以从 `online_rl.example.json` 复制。所有字段都在以下范围内：
-
-| 字段 | 含义 |
-| --- | --- |
-| `schema_version` | 当前在线 RL 配置格式，固定为 `1`。 |
-| `output_root` | 本次实验的远端输出根目录，保存 group、版本 adapter 与 `state.json`。每个独立实验必须不同。 |
-| `group_size` | 同一冻结策略的完整 rollout 数，当前推荐 `4`。 |
-| `seed` | worker 自身的随机采样种子，不是游戏显示 seed。 |
-| `sampling.temperature` | 动作 logprob 除以前的采样温度；更高更多样，更新时使用相同值重算 ratio。 |
-| `reward.version` | 记录用的奖励定义版本。 |
-| `reward.weights.victory` / `heart` / `act` / `floor` / `hp_fraction` | 终局奖励权重，分别对应胜利、心脏、层数、楼层和 HP 比例。 |
-| `gpu.device` | 更新 worker 使用的远端物理 GPU 序号，或 `"auto"`。 |
-| `gpu.minimum_free_memory_mib` | `auto` 选择 GPU 时所需最低可用显存。 |
-| `attribution.enabled` | 是否只更新人类反思教师选中的步骤；必须和本机 `posthoc_feedback.enabled` 同时开关。 |
-| `attribution.max_abs_advantage` | 归因更新中优势值的绝对值裁剪上限。 |
-| `attribution.min_tied_advantage` | 组内终局奖励完全相同时，归因动作使用的最小优势绝对值；只对已归因动作生效，避免把整局动作一并强化。 |
-| `update.max_length` | 更新时每个动作 observation 的最大 token 长度。 |
-| `update.learning_rate` | LoRA 更新学习率。 |
-| `update.clip_range` | PPO ratio 裁剪范围。 |
-| `update.update_epochs` | 每个 K 条完整轨迹上的优化轮数。 |
-| `update.max_grad_norm` | 梯度范数裁剪上限。 |
-| `update.reinforce_ce_weight` | 归因 `reinforce` 动作的局部交叉熵纠错系数；`0` 可关闭该附加项。 |
-| `update.weaken_unlikelihood_weight` | 归因 `weaken` 动作的 unlikelihood 纠错系数；只有存在其他合法动作时生效，`0` 可关闭。 |
-| `update.load_in_4bit` | 以 4-bit 量化加载基座以降低显存。 |
-| `update.gradient_checkpointing` | 用重算激活降低反向传播显存。 |
-| `update.empty_cache_between_steps` | 变长动作更新间归还空闲 CUDA 缓存，降低碎片化。 |
-
-远端同步迁移见 [远程推理与在线 RL](../doc/REMOTE_ONLINE_RL.md)。
-
-## Framework 运行维度
-
-`framework` 是配置源字段：
-
-| 字段 | 含义 |
-| --- | --- |
-| `framework.game` | 当前固定为 `sts1`，选择游戏适配器。 |
-| `framework.control_mode` | `manual`、`candidate_assist`、`autonomous` 或 `codex`，决定最终由谁确认动作。 |
-| `framework.policy_backend` | `none`、`local_qwen`、`remote_qwen`、`remote_teacher` 或 `mock`。 |
-| `framework.learning_method` | `none`、`collect_human`、`collect_codex`、`teacher_sft`、`dagger`、`prompt_evolution` 或 `online_rl`。`collect_human` 要求 `manual + none`；`collect_codex` 要求 `codex + none`。 |
-
-加载器会依据 `framework` 自动设置运行组件的启用状态和 policy runtime；详细参数仍分别放在 `policy`、`teacher`、`posthoc_feedback` 和 `prompt_evolution` 配置段中。
+选择 `active_mode: "online_rl"`，并确认共享项中的 `policy.model.initial_adapter` 指向可用的初始 adapter。人类/自动事后归因参数在该模式 profile 中；远端 worker 的 group size、奖励和更新超参数写入训练机的 `config/online_rl.json`。每个新实验使用独立 `output_root`；已有实验会从自己的 `state.json` 恢复当前策略。
