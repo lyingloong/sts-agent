@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -166,12 +167,24 @@ def render_chat_prefix(tokenizer: Any, user_prompt: str) -> str:
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def encode_sample(tokenizer: Any, sample: dict[str, Any], max_length: int) -> tuple[dict[str, list[int]] | None, str]:
+def encode_sample(
+    tokenizer: Any,
+    sample: dict[str, Any],
+    max_length: int,
+    prompt_template: str = "canonical",
+) -> tuple[dict[str, list[int]] | None, str]:
     """Encode one response-only Causal LM sample or return an explicit drop reason."""
 
     observation, legal_actions, target_alias, identity = validate_sample(sample)
     routed = route_trace_observation(observation)
-    user_prompt = policy_server.build_scoring_prompt(routed, legal_actions)
+    user_prompt = policy_server.build_scoring_prompt(routed, legal_actions, prompt_template)
+    variants = sample.get("prompt_variants")
+    if isinstance(variants, dict) and isinstance(variants.get(prompt_template), str):
+        if variants[prompt_template] != user_prompt:
+            raise ValueError(f"prompt variant differs from live renderer; rebuild the dataset: {identity}")
+        user_prompt = variants[prompt_template]
+    if prompt_template == "canonical" and sample.get("prompt") is not None and sample["prompt"] != user_prompt:
+        raise ValueError(f"prompt differs from exported preview; rebuild the dataset: {identity}")
     prefix = render_chat_prefix(tokenizer, user_prompt)
     prefix_ids = tokenizer(prefix, add_special_tokens=False)["input_ids"]
     target_ids = tokenizer(target_alias + "\n", add_special_tokens=False)["input_ids"]
@@ -191,33 +204,71 @@ def encode_sample(tokenizer: Any, sample: dict[str, Any], max_length: int) -> tu
     }, "kept"
 
 
+def _seed_group(sample: dict[str, Any]) -> str:
+    config = sample.get("run_config")
+    config = config if isinstance(config, dict) else {}
+    seed = next((config.get(key) for key in ("display_seed", "seed_display")
+                 if config.get(key) not in (None, "")), None)
+    if seed is None and config.get("internal_seed") not in (None, ""):
+        seed = communication_controller.display_seed_from_internal(config["internal_seed"])
+    if seed is None:
+        seed = next((config.get(key) for key in ("seed", "game_seed")
+                     if config.get(key) not in (None, "")), None)
+    if seed is None or str(seed).strip().casefold() in {"random", "unknown", "none", "-"}:
+        return "run:" + str(sample.get("run_id") or sample.get("sample_id") or "unknown")
+    # ActionRecorder's legacy run metadata may contain the signed internal
+    # Java long rather than the player's base-35 display seed. Canonicalize
+    # those values so alternate encodings of one seed cannot cross the split.
+    seed_text = str(seed).strip()
+    if re.fullmatch(r"-?\d{15,}", seed_text):
+        decoded = communication_controller.display_seed_from_internal(seed_text)
+        if decoded is not None:
+            seed_text = decoded
+    seed_key = "".join(ch for ch in seed_text.upper() if ch.isalnum())
+    return f"seed:{seed_key}"
+
+
 def split_by_run(samples: list[dict[str, Any]], validation_runs: int, seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Split complete seed families, falling back to run IDs if seed is absent."""
     run_ids = sorted({str(sample.get("run_id") or "") for sample in samples if sample.get("run_id")})
     if not run_ids:
         raise ValueError("at least one complete run is required")
     if validation_runs == 0:
         return samples, [], []
-    if len(run_ids) < 2:
-        raise ValueError("at least two complete runs are required for a per-run train/validation split")
-    if not 1 <= validation_runs < len(run_ids):
-        raise ValueError(f"validation_runs must be from 1 to {len(run_ids) - 1}, got {validation_runs}")
-    shuffled = run_ids[:]
+    groups = {_seed_group(sample) for sample in samples}
+    if len(groups) < 2:
+        raise ValueError("at least two independent seed groups are required for validation")
+    if not 1 <= validation_runs < len(groups):
+        raise ValueError(f"validation seed groups must be from 1 to {len(groups) - 1}, got {validation_runs}")
+    shuffled = sorted(groups)
     random.Random(seed).shuffle(shuffled)
-    validation_ids = set(shuffled[:validation_runs])
-    train = [sample for sample in samples if str(sample.get("run_id")) not in validation_ids]
-    validation = [sample for sample in samples if str(sample.get("run_id")) in validation_ids]
-    return train, validation, sorted(validation_ids)
+    validation_groups = set(shuffled[:validation_runs])
+    train = [sample for sample in samples if _seed_group(sample) not in validation_groups]
+    validation = [sample for sample in samples if _seed_group(sample) in validation_groups]
+    validation_run_ids = sorted({str(sample.get("run_id")) for sample in validation})
+    return train, validation, validation_run_ids
 
 
 class EncodedDataset:
-    def __init__(self, items: list[dict[str, list[int]]]) -> None:
+    def __init__(self, items: list[list[dict[str, list[int]]]], sample_ids: list[str] | None = None) -> None:
         self.items = items
+        self.epoch = 0
+        self.offsets = [
+            int(hashlib.sha256(value.encode("utf-8")).hexdigest()[:8], 16) % max(1, len(variants))
+            for value, variants in zip(sample_ids or [str(i) for i in range(len(items))], items)
+        ]
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = max(0, int(epoch))
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, index: int) -> dict[str, list[int]]:
-        return self.items[index]
+        variants = self.items[index]
+        if len(variants) == 1:
+            return variants[0]
+        return variants[(self.epoch + self.offsets[index]) % len(variants)]
 
 
 @dataclass
@@ -243,17 +294,33 @@ class ResponseOnlyCollator:
         }
 
 
-def encode_split(tokenizer: Any, samples: list[dict[str, Any]], max_length: int) -> tuple[EncodedDataset, Counter[str]]:
-    encoded: list[dict[str, list[int]]] = []
+def encode_split(
+    tokenizer: Any,
+    samples: list[dict[str, Any]],
+    max_length: int,
+    prompt_templates: tuple[str, ...] = ("canonical",),
+) -> tuple[EncodedDataset, Counter[str]]:
+    encoded: list[list[dict[str, list[int]]]] = []
+    encoded_ids: list[str] = []
     stats: Counter[str] = Counter()
     for sample in samples:
-        item, status = encode_sample(tokenizer, sample, max_length)
-        stats[status] += 1
-        if item is not None:
-            encoded.append(item)
+        choices: list[dict[str, list[int]]] = []
+        failed: list[str] = []
+        for template in prompt_templates:
+            item, status = encode_sample(tokenizer, sample, max_length, template)
+            if item is None:
+                failed.append(f"{template}:{status}")
+            else:
+                choices.append(item)
+        if failed:
+            stats["overlong_template_group"] += 1
+            continue
+        stats["kept"] += 1
+        encoded.append(choices)
+        encoded_ids.append(str(sample.get("sample_id") or sample.get("run_id") or len(encoded_ids)))
     if not encoded:
         raise ValueError("no samples remain after length filtering")
-    return EncodedDataset(encoded), stats
+    return EncodedDataset(encoded, encoded_ids), stats
 
 
 def serializable_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -307,10 +374,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-length", type=int, default=4096, help="drop samples above this full prompt length; never truncate them")
     parser.add_argument(
-        "--validation-runs",
+        "--prompt-templates",
+        default="canonical,state_first,decision_first",
+        help="comma-separated equivalent templates rotated per sample and epoch",
+    )
+    parser.add_argument(
+        "--validation-seed-groups", "--validation-runs",
+        dest="validation_runs",
         type=int,
         default=3,
-        help="number of whole runs held out for validation; set 0 to train on every run",
+        help="number of whole seed groups held out for validation; set 0 to train on every run",
     )
     parser.add_argument("--seed", type=int, default=20260826)
     parser.add_argument("--epochs", type=float, default=1.0)
@@ -410,6 +483,11 @@ def train(args: argparse.Namespace) -> int:
         expected = bundle_manifest.get("dataset", {}).get("samples")
         if isinstance(expected, int) and expected != len(samples):
             raise ValueError(f"dataset sample count mismatch: manifest={expected} actual={len(samples)}")
+    prompt_templates = tuple(item.strip() for item in args.prompt_templates.split(",") if item.strip())
+    if not prompt_templates or any(item not in policy_server.PROMPT_TEMPLATES for item in prompt_templates):
+        raise ValueError(f"prompt_templates must be selected from {policy_server.PROMPT_TEMPLATES}")
+    if len(set(prompt_templates)) != len(prompt_templates):
+        raise ValueError("prompt_templates must not contain duplicates")
     train_samples, eval_samples, validation_run_ids = split_by_run(samples, args.validation_runs, args.seed)
     if args.max_train_samples is not None:
         if args.max_train_samples < 1:
@@ -420,7 +498,7 @@ def train(args: argparse.Namespace) -> int:
     try:
         import torch
         from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments, set_seed
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainerCallback, TrainingArguments, set_seed
     except ImportError as exc:
         raise RuntimeError("install requirements/train.txt and a CUDA PyTorch build before training") from exc
     if not torch.cuda.is_available():
@@ -434,7 +512,9 @@ def train(args: argparse.Namespace) -> int:
     tokenizer.padding_side = "right"
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    train_dataset, train_encode_stats = encode_split(tokenizer, train_samples, args.max_length)
+    train_dataset, train_encode_stats = encode_split(
+        tokenizer, train_samples, args.max_length, prompt_templates=prompt_templates
+    )
     eval_dataset: EncodedDataset | None = None
     eval_encode_stats: Counter[str] = Counter()
     if eval_samples:
@@ -499,8 +579,12 @@ def train(args: argparse.Namespace) -> int:
         "initial_adapter": str(args.initial_adapter) if args.initial_adapter is not None else None,
         "arguments": serializable_args(args),
         "split": {
+            "unit": "character_ascension_seed_group",
             "train_runs": len({str(sample["run_id"]) for sample in train_samples}),
             "validation_runs": validation_run_ids,
+            "train_seed_groups": sorted({_seed_group(sample) for sample in train_samples}),
+            "validation_seed_groups": sorted({_seed_group(sample) for sample in eval_samples}),
+            "prompt_templates": list(prompt_templates),
             "raw_train_samples": len(train_samples),
             "raw_validation_samples": len(eval_samples),
             "encoded_train_samples": len(train_dataset),
@@ -511,12 +595,18 @@ def train(args: argparse.Namespace) -> int:
     }
     run_manifest_path.write_text(json.dumps(run_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    class _PromptTemplateEpochCallback(TrainerCallback):
+        def on_epoch_begin(self, args, state, control, **kwargs):
+            train_dataset.set_epoch(int(state.epoch or 0))
+            return control
+
     trainer = Trainer(
         model=model,
         args=training_arguments(TrainingArguments, args, bf16, has_evaluation=eval_dataset is not None),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=ResponseOnlyCollator(tokenizer.pad_token_id),
+        callbacks=[_PromptTemplateEpochCallback()],
     )
     train_result = trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
     metrics = dict(train_result.metrics)

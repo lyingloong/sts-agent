@@ -238,7 +238,7 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(detail["reward_type"], "GOLD")
         self.assertEqual(action["label"], "自动拾取金币 19")
 
-    def test_campfire_exposes_one_smith_action_per_card(self) -> None:
+    def test_explicit_macro_campfire_exposes_one_smith_action_per_card(self) -> None:
         message = {
             "in_game": True,
             "available_commands": ["choose"],
@@ -252,7 +252,7 @@ class ConfidenceAutoTests(unittest.TestCase):
                 ],
             },
         }
-        actions = controller.semantic_actions(message)
+        actions = controller.semantic_actions(message, fine_grained=False)
         self.assertEqual(
             [action["id"] for action in actions],
             ["CAMPFIRE:REST", "CAMPFIRE:SMITH:card=strike-1", "CAMPFIRE:SMITH:card=bash-1", "CAMPFIRE:RECALL"],
@@ -330,7 +330,7 @@ class ConfidenceAutoTests(unittest.TestCase):
                 "is_gone": False,
                 "intent": "ATTACK",
                 "move_base_damage": 6,
-                "move_adjusted_damage": 6,
+                "move_adjusted_damage": 9,
                 "move_hits": 2,
                 "powers": [],
             }
@@ -339,14 +339,13 @@ class ConfidenceAutoTests(unittest.TestCase):
         observation = controller.normalize_state(message)
         strike, defend = observation["combat"]["hand"]
         monster = observation["combat"]["monsters"][0]
-        # floor((6 + Strength 1) * 0.75), per hit; it is not multiplied by
-        # the card's or enemy's hit count here.
-        self.assertEqual(strike["final_single_hit_damage"], 5)
-        self.assertEqual(defend["final_block"], 5)  # floor((5 + 2) * .75)
-        self.assertEqual(monster["intent_final_damage"], 9)  # floor(6 * 1.5)
-        self.assertEqual(monster["intent_final_total_damage"], 18)
+        # Runtime cached values pass through without reapplying Powers.
+        self.assertEqual(strike["final_single_hit_damage"], 6)
+        self.assertEqual(defend["final_block"], 5)
+        self.assertEqual(monster["intent_damage"], 9)
+        self.assertEqual(monster["intent_total_damage"], 18)
 
-    def test_combat_observation_falls_back_to_base_intent_and_enemy_powers(self) -> None:
+    def test_missing_live_intent_damage_remains_unknown(self) -> None:
         message = combat_message()
         combat = message["game_state"]["combat_state"]
         combat["player"] = {"powers": []}
@@ -363,8 +362,8 @@ class ConfidenceAutoTests(unittest.TestCase):
         ]
         observation = controller.normalize_state(message)
         monster = observation["combat"]["monsters"][0]
-        self.assertEqual(monster["intent_final_damage"], 7)
-        self.assertEqual(monster["intent_final_total_damage"], 14)
+        self.assertIsNone(monster["intent_damage"])
+        self.assertIsNone(monster["intent_total_damage"])
 
     def test_dynamic_card_without_live_formula_does_not_claim_a_fixed_value(self) -> None:
         message = combat_message()
@@ -381,18 +380,18 @@ class ConfidenceAutoTests(unittest.TestCase):
         observation = controller.normalize_state(message)
         self.assertNotIn("final_single_hit_damage", observation["combat"]["hand"][0])
 
-    def test_heavy_blade_applies_strength_three_or_five_times(self) -> None:
+    def test_heavy_blade_uses_game_cached_damage_without_recalculation(self) -> None:
         message = combat_message()
         combat = message["game_state"]["combat_state"]
         combat["player"] = {"powers": [{"id": "Strength", "amount": 2}]}
         combat["hand"] = [
-            {"id": "HEAVY_BLADE", "type": "ATTACK", "upgrades": 0, "is_playable": True},
-            {"id": "HEAVY_BLADE", "type": "ATTACK", "upgrades": 1, "is_playable": True},
+            {"id": "HEAVY_BLADE", "type": "ATTACK", "damage": 20, "upgrades": 0, "is_playable": True},
+            {"id": "HEAVY_BLADE", "type": "ATTACK", "damage": 24, "upgrades": 1, "is_playable": True},
         ]
         observation = controller.normalize_state(message)
         base, upgraded = observation["combat"]["hand"]
-        self.assertEqual(base["final_single_hit_damage"], 20)  # 14 + 2 * 3
-        self.assertEqual(upgraded["final_single_hit_damage"], 24)  # 14 + 2 * 5
+        self.assertEqual(base["final_single_hit_damage"], 20)
+        self.assertEqual(upgraded["final_single_hit_damage"], 24)
 
     def test_environment_automation_leaves_relic_reward_for_policy(self) -> None:
         message = full_combat_reward_message()
@@ -581,32 +580,13 @@ class ConfidenceAutoTests(unittest.TestCase):
             {"action_kind": "play"},
         ]
         observation = controller.policy_observation(message, action_history=history)
-        self.assertEqual(observation["act_boss_profile"]["id"], "HEXAGHOST")
-        self.assertIn("strategy", observation["act_boss_profile"])
-        strategy = observation["act_boss_profile"]["strategy"]
-        self.assertIn("长线输出", strategy)
-        self.assertIn("尽快结束战斗", strategy)
-        self.assertGreater(len(strategy), 100)
-        self.assertNotIn("moves", observation["act_boss_profile"])
+        self.assertEqual(observation["act_boss"], "Hexaghost")
         strike = next(item for item in observation["deck"] if item["id"] == "Strike_R")
         self.assertEqual(strike["count"], 2)
         choker = next(item for item in observation["decision_constraints"] if item["kind"] == "CARD_PLAY_LIMIT")
         self.assertEqual(choker["plays_remaining_this_turn"], 4)
 
-    def test_combat_observation_adds_static_enemy_knowledge(self) -> None:
-        message = combat_message()
-        monster = message["game_state"]["combat_state"]["monsters"][0]
-        monster.update({"id": "JAWWORM", "name": "Jaw Worm", "current_hp": 41, "max_hp": 46})
-        observation = controller.policy_observation(message)
-        knowledge = observation["combat"]["monsters"][0]["knowledge"]
-        self.assertEqual(knowledge["id"], "JAWWORM")
-        self.assertEqual(knowledge["type"], "Normal")
-        self.assertEqual(knowledge["min_hp"], 40)
-        self.assertEqual(knowledge["max_hp_ascension"], 46)
-        self.assertTrue(any(move["id"] == "CHOMP" for move in knowledge["moves"]))
-        self.assertEqual(knowledge["source"], "static_knowledge")
-
-    def test_noncombat_observation_drops_enemy_knowledge(self) -> None:
+    def test_noncombat_observation_drops_stale_combat_state(self) -> None:
         message = combat_message()
         message["game_state"].update({"screen_type": "EVENT", "room_phase": "EVENT"})
         observation = controller.policy_observation(message)

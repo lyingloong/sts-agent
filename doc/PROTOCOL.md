@@ -3,7 +3,7 @@
 ## CommunicationMod 配置
 
 CommunicationMod 启动外部进程，进程 stdout 只能用于协议。controller 和人类
-采集 bridge 都在启动时发送 `ready`，随后接收 JSON 状态并输出协议命令；诊断
+采集 bridge 都在启动时发送 `ready`。controller随后输出动作命令，采集bridge则只监听状态；诊断
 写入 stderr 和项目日志。
 
 ```properties
@@ -11,18 +11,54 @@ command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runt
 runAtGameStart=true
 ```
 
-人类直接在游戏内采集时，将 `command` 改为：
+人类直接在游戏内采集时，统一controller入口会根据collect_human模式自动转入bridge；也可直接指定：
 
 ```properties
 command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.recording.communication_bridge --config D\:/Code/spire-mod/sts-agent/config/agent.json
 runAtGameStart=true
 ```
 
-此 bridge 被动发送 `WAIT`，CommunicationMod 的状态是唯一 observation 来源；
-ActionRecorder 通过 `recording.listen` 端口发送动作事务标记。当前采集链路只
+此 bridge 只发送一次 `ready` 握手，不提交游戏命令或轮询 `WAIT`；CommunicationMod 的状态是唯一 observation 来源；
+ActionRecorder 0.5 通过 `recording.listen` 端口发送完整状态及动作事务副本。
+`action_begin.before_state_id` 对应同一状态发布结果的 `recorder_state_id`；配对
+不依赖两通道接收时间。原始本地日志也保留完整状态，能独立审计。
+当前采集链路只
 允许这一套 bridge，旧的独立 TCP 接收器已移除。
 
 Windows 后台入口使用 `pythonw.exe`，避免启动时弹出控制台窗口；CommunicationMod 提供的 stdin/stdout/stderr 管道仍用于协议和诊断。手动在终端排错时使用 `python.exe`。
+
+### 人类采集格式
+
+`human-*.jsonl` 为每局独立文件，保留 `observation_before/after`、原始
+`raw_message_before/after`、`available_actions`、`raw_action`，以及下游派生的
+`pre_state/post_state/policy_observation/legal_actions/action`。配对结果为
+`state_match.match_status=exact_state_id`，可训练性由 `usable_for_sft` 独立判断。
+营火锻造/商店删牌不折叠为房间级动作；不以agent策略过滤人类重复进入或取消选择。
+训练筛选另行处理：需要确认的选牌尝试暂存在内存，返回/取消时将该尝试和返回动作
+标为 `usable_for_sft=false`，保留真实history；重选并确认的步骤仍可训练。原始mod日志不筛选。
+动作后状态除ready外，还检查钥匙持有、药水/卡牌获得、删除/升级完成等可验证效果；
+快速下一步前效果未完成时，不标为稳定。
+文件也含 `type=run_finished/run_ended` 生命周期行，这些行不是动作样本。
+
+ActionRecorder 0.1.1为出牌/结束回合增加`action_execution_begin/result`和
+`action_effects_settled`，以同一事务ID保留提交与执行两个时刻。`action_accepted`仅表示
+已提交到游戏队列；`execution_status=executed`才证明实际执行，skipped/cancelled保留审计
+但不作为成功动作训练。两条通道按明确状态ID配对，不按毫秒时间或状态差分倒推动作。
+
+原`observation_before/pre_state/action`仍对应人类提交；执行前原始状态另存于
+`execution_observation_before/execution_raw_message_before`。单步SFT应使用
+`training_pre_state/training_policy_observation/training_legal_actions/training_action`，
+其`training_observation_source`为execution（排队动作）或submission（其他动作）。
+执行时按卡牌UUID重新映射位置与实际目标，只导出`usable_for_sft=true`；未取得正确
+执行前状态的排队动作不可训练。旧日志中的动画中战斗提交也标为不可训练，不能自动补造
+执行前观察。HAND_SELECT/GRID等真正的交互选择不因action_phase=EXECUTING_ACTIONS而排除。
+
+`stable_after_action`只接受源的可决策后状态或游戏明确的逻辑结算边界；下一次点击时
+仍在执行动画的观察只作为post审计，不标稳定。输出按提交顺序保存，即使后提交的队列项
+先收到取消结果，也不会颠倒动作/history。
+
+下文 `action-trace-*` 格式是controller控制模式，不是人类采集的原始格式。
+旧教师SFT导出器仍仅接受teacher_auto，人类数据不能直接用该命令导出。
 
 协议支持的关键命令包括 `START`、`PLAY`、`END`、`POTION`、`CHOOSE`、`PROCEED`、`RETURN` 和 `STATE`。详细定义以 [CommunicationMod README](https://github.com/ForgottenArbiter/CommunicationMod) 为准。
 
@@ -85,14 +121,12 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 规范化状态中的两个重要字段：
 
 - `map.nodes`：当前 Act 已公开的完整地图节点及其 `x/y/symbol/children/parents` 关系；`map.current_node` 和 `map.next_nodes` 仍保留作快捷字段。
-- `combat.monsters[*].intent_damage`、`intent_hits`：从 CommunicationMod 的当前意图字段映射而来，用于表达敌人当前显示的攻击伤害和段数。`intent_final_damage` 是控制器按当前玩家 Vulnerable/Intangible 计算出的预计每段来袭伤害，`intent_final_total_damage` 是乘以 `intent_hits` 后的本次意图总伤害；未知或非攻击意图不会生成计算字段。
-- `act_boss` / `act_boss_profile`：当前 Act 地图公开的首领名称，以及从版本化怪物知识库提取的中文 Boss 前规划画像（`strategy`）；详细招式表不再注入全局动作上下文，Boss 战斗中的当前意图仍以 CommunicationMod 的实时字段为准。
+- `combat.monsters[*].intent_damage`、`intent_hits`：映射游戏当前显示的敌人意图伤害和段数；不再从基础招式值或离线表重算。若当前游戏未提供准确数值，规范化状态保留 `null`。当伤害可用时附带 `intent_total_damage`，按当前单段值和段数相乘，不重复应用玩家易伤等效果。
+- `act_boss`：当前地图公开的本幕首领名称。不会再注入 Boss 静态攻略画像。
 - `keys`：三色心脏钥匙状态，结构为 `ruby`（红）、`emerald`（绿）、`sapphire`（蓝）。当前标准 CommunicationMod 本身不序列化这些标志；启用带状态增强补丁的 ActionRecorder 后，TCP 状态和本地轨迹会同时提供该字段。字段缺失时表示未知，不应当作全部未持有。
-- `combat.monsters[*].knowledge`：仅在战斗观察中为已识别敌人补充版本化静态参考，包括类型、生命区间和可能招式。它不是当前意图预测；当前 HP、格挡、Powers 和意图字段始终以 CommunicationMod 实时状态为准，符文圆顶仍会隐藏实时意图。
 - `decision_constraints`：当前遗物带来的长期规则，例如苏祖禁止获得药水、灵体外质禁止获得金币、添水的本回合出牌余量，以及营火/宝箱限制。能由状态确定为无效的药水或金币奖励会直接从 `legal_actions` 移除；其余限制仅作为显式上下文保留。持有符文圆顶时，敌人当前意图字段也会从模型观察和终端视图隐藏。
-- `combat.player.powers`、`combat.monsters[*].powers`：保留 CommunicationMod 当前的 `id/name/amount/type`，并补充静态 `description`。description 优先来自 `sts1_powers.json`；缺失时才查询 `sts1_card_powers.json`，不使用关键词库。
-- `combat.hand[*]`：使用扁平卡牌 schema：`id/name/type/cost/description/upgrades/is_playable`。运行时非空字段优先；静态知识只补缺失字段，不再输出嵌套 `effect`。战斗中额外提供 `final_single_hit_damage`（经过当前玩家 Strength/Weak 的攻击牌单段出伤）和 `final_block`（经过当前玩家 Dexterity/Frail 的本次获得格挡）。这些字段不乘多段次数，也不扣目标格挡；没有可解析基础数值时不会生成。若未来 CommunicationMod 提供明确的 `final_*`/`*_after_modifiers` 值，控制器优先采用该实时值。
-- 静态实体可选增加 `experience`（最多三条中文经验），随实体直接注入，不做跨实体检索。教师动作响应可返回带外 `knowledge_request`；controller 只接受当前公开实体，收集人类回答、调用 DeepSeek 整理完整替换列表并经人类审核后写库。该请求不产生游戏动作，审核通过后在同一状态重新请求教师。
+- `combat.player.powers`、`combat.monsters[*].powers`：保留游戏当前提供的 `id/name/amount/type`，并在运行时描述可取得时附带 `description`。
+- 卡牌、药水、遗物及 Power 的说明由 ActionRecorder 在游戏线程读取当前游戏对象；动态卡牌变量使用游戏当前数值展开，无法展开的变量会列入 `unresolved_description_variables`。信息源标为 `game_runtime`，没有值时保留 `null`。战斗手牌的 `final_single_hit_damage` 和 `final_block` 使用游戏缓存的实时牌面值，控制器不再重复叠加 Power；多段牌的单段值不等于总伤害。
 - `recent_actions`：模型观察和轨迹状态中保留当前局最近 6 个已被 CommunicationMod 确认且状态稳定的动作，包含执行前后界面、动作类型、规范 `action_id` 和简短语义。协议错误或尚未确认的动作不会进入历史；新局从空历史开始。
 - `screen_type=GRID`：若当前是事件/营火等触发的选牌界面，`screen_state.selection_mode` 和 `selection_instruction` 会明确表示 `PURGE`（移除）、`TRANSFORM`（变化）或 `UPGRADE`（升级）等目的。`for_purge` 等原始布尔字段仍保留作兼容。
 - `screen_type=TRANSITION`：CommunicationMod 返回地图界面但 `room_phase` 仍不是 `COMPLETE` 时的保护态。该状态不包含可训练的地图选择动作，只允许等待刷新或返回当前房间。
@@ -105,7 +139,7 @@ Candidate Assist 由 controller 在 CommunicationMod 启动握手前预热独立
 
 设置 `policy.confidence_auto.enabled=true` 后，controller 不再请求生成式 top-k 排序，而请求 policy server 为每个当前合法别名计算精确续写 `A<n>\\n` 的条件 `logprob`。controller 仅在这一个合法集合内 softmax，完整 `action_scores` 按规范 action ID 写入 trace；`confidence` 保存首选/次选概率、margin、entropy、`min_probability` 和路由结果。默认 `min_probability=0.85`；首选满足 `p1 >= min_probability` 即执行 `source=model_auto`。margin 与 entropy 用于校准记录，不作为第二道门槛。评分缺项、格式异常、超时或上一动作返回协议错误时，自动执行被禁用并回退人工，不能绕过 controller 的合法动作表。
 
-当前已增加本地静态知识库 fallback：卡牌统一为 `id/name/type/cost/description/upgrades/is_playable`，药水统一为 `id/name/description/target/can_use`，遗物统一为 `id/name/description`，并只在 `counter >= 0` 时附加遗物计数。运行时非空字段覆盖静态值；静态知识只用于补全缺失字段，不再进入嵌套 `effect`。商店商品保留额外的 `price`。对事件选项与普通奖励，controller 只补全 CommunicationMod 已附带具体物品 `id/name` 的实体；裸 `reward_type` 不会泄漏尚未公开的随机奖励。战斗卡牌奖励被跳过后，controller 以 `(Act, Floor)` 记录到 `run_memory.declined_card_rewards` 并从父 `COMBAT_REWARD` 动作表移除同一张卡牌奖励入口，防止协议导航造成重开同一奖励的循环。静态知识库由 `sts_agent.commands.fetch_knowledge` 从 [spire-archive StS1 数据](https://github.com/nkhoit/spire-archive)生成，`data/knowledge/` 是受 Git 跟踪的版本化快照；上游来源、文件清单和本项目的显式文本修复均记录在该目录的 `manifest.json` 与 `README.md`。刷新快照后必须审查 Git diff，运行时 CommunicationMod 字段始终优先。
+卡牌、药水、遗物和 Power 的模型输入只取当前游戏状态提供的字段，不再加载本地实体快照或使用静态 fallback。缺失信息保持未知，不根据名称补造效果。商店商品保留额外的 `price`。事件选项与奖励只使用 CommunicationMod 已经公开的实体 ID/名称；裸 `reward_type` 不会泄漏尚未公开的随机奖励。战斗卡牌奖励被跳过后，controller 以 `(Act, Floor)` 记录到 `run_memory.declined_card_rewards` 并从父 `COMBAT_REWARD` 动作表移除同一入口，防止导航造成重开循环。
 
 ## 数据使用规则
 

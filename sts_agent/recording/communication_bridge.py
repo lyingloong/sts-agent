@@ -1,9 +1,10 @@
 """CommunicationMod state bridge for transaction-safe ActionRecorder traces.
 
 CommunicationMod owns the authoritative, stable game-state stream.  The Java
-ActionRecorder only sends semantic ``action_begin``/``action_accepted`` markers
-over its side TCP channel.  This module joins the two streams using an
-immutable state sequence and a precondition check.  It deliberately refuses to
+ActionRecorder sends semantic ``action_begin``/``action_accepted`` markers and
+the same published states over its side TCP channel. This module deduplicates
+the two state streams and joins actions using explicit state IDs and context
+checks. It deliberately refuses to
 guess when the streams cannot be matched uniquely.
 
 The process is suitable for CommunicationMod's ``command=`` setting::
@@ -34,7 +35,7 @@ from typing import Any, TextIO
 from sts_agent.config import ConfigError, load_agent_config
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.recording.trajectory_assembler import ActionRecorderEnricher
-from sts_agent.runtime.controller import game_state, semantic_actions
+from sts_agent.runtime.controller import game_state
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "agent.json"
@@ -56,13 +57,19 @@ def _state_message(message: dict[str, Any]) -> dict[str, Any]:
         return {"in_game": False, "ready_for_command": False, "game_state": {}}
     state = message.get("game_state")
     if not isinstance(state, dict):
-        # A few older CommunicationMod builds sent the state object directly.
-        state = message
+        state = message if "screen_type" in message else {}
+    state = copy.deepcopy(state)
+    state.pop("seed", None)
+    if state.get("screen_type") != "MAP":
+        state["map"] = None
     return {
         "in_game": bool(message.get("in_game", bool(state))),
         "ready_for_command": bool(message.get("ready_for_command", True)),
         "available_commands": list(message.get("available_commands") or []),
-        "game_state": copy.deepcopy(state),
+        "game_state": state,
+        "recorder_state_id": message.get("recorder_state_id"),
+        "recorder_state_seq": message.get("recorder_state_seq"),
+        "recorder_session": message.get("recorder_session"),
     }
 
 
@@ -75,6 +82,58 @@ def _available(message: dict[str, Any]) -> dict[str, Any]:
         "commands": list(message.get("available_commands") or []),
         "choices": copy.deepcopy(choices),
     }
+
+
+def _effect_complete(action: dict[str, Any], before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Conservative checks for effects that can lag a UI transition."""
+    kind = action.get("kind")
+    if kind == "end_turn" and before.get("combat_state"):
+        if after.get("screen_type") == "GAME_OVER" or after.get("room_phase") != "COMBAT":
+            return True
+        return ((after.get("combat_state") or {}).get("turn", -1)
+                > (before.get("combat_state") or {}).get("turn", -1))
+    key = {"reward_sapphire_key_claimed": "sapphire", "reward_emerald_key_claimed": "emerald",
+           "reward_ruby_key_claimed": "ruby"}.get(kind)
+    if kind == "campfire_action" and action.get("option") == "RECALL":
+        key = "ruby"
+    if key:
+        return (after.get("keys") or {}).get(key) is True
+    if kind == "play_card" and action.get("card_uuid"):
+        if after.get("screen_type") not in {"NONE", "HAND_SELECT", "GRID", "CARD_REWARD"}:
+            return True
+        hand = (after.get("combat_state") or {}).get("hand", [])
+        return not any(card.get("uuid") == action["card_uuid"] for card in hand)
+    if kind == "reward_potion_claimed" and action.get("potion_id"):
+        count = lambda state: sum(item.get("id") == action["potion_id"] for item in state.get("potions", []))
+        return count(after) > count(before)
+    if kind in {"potion_use_requested", "potion_discarded"}:
+        slot = action.get("slot")
+        old_slots, new_slots = before.get("potions") or [], after.get("potions") or []
+        if isinstance(slot, int) and 0 <= slot < len(old_slots) and slot < len(new_slots):
+            return old_slots[slot].get("id") != new_slots[slot].get("id")
+        return False
+    if kind == "card_reward_selected" and action.get("card_uuid"):
+        return any(card.get("uuid") == action["card_uuid"] for card in after.get("deck", []))
+    if kind == "card_selection_confirmed":
+        screen = before.get("screen_state") or {}
+        card = screen.get("confirmation_card") or {}
+        identifier = card.get("uuid")
+        if identifier and screen.get("for_purge"):
+            return not any(item.get("uuid") == identifier for item in after.get("deck", []))
+        if identifier and screen.get("for_upgrade"):
+            old = next((item for item in before.get("deck", []) if item.get("uuid") == identifier), None)
+            new = next((item for item in after.get("deck", []) if item.get("uuid") == identifier), None)
+            return bool(old and new and new.get("upgrades", 0) > old.get("upgrades", 0))
+    return True
+
+
+def _decision_ready(message: dict[str, Any]) -> bool:
+    state = game_state(message)
+    if state.get("screen_type") == "GAME_OVER":
+        return True
+    if state.get("screen_type") == "NONE" and state.get("action_phase") == "EXECUTING_ACTIONS":
+        return False
+    return bool(message.get("ready_for_command"))
 
 
 @dataclass(frozen=True)
@@ -96,6 +155,10 @@ class PendingTransaction:
     before_status: str = "unmatched"
     accepted: dict[str, Any] | None = None
     rejected: dict[str, Any] | None = None
+    execution_begin: dict[str, Any] | None = None
+    execution_before: StateSnapshot | None = None
+    execution_result: dict[str, Any] | None = None
+    settled: dict[str, Any] | None = None
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
 
 
@@ -107,14 +170,15 @@ class CommunicationBridgeRecorder:
         output_dir: Path,
         *,
         max_states: int = 256,
-        match_window_ms: int = 750,
     ) -> None:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_states = max(32, int(max_states))
-        self.match_window_ms = max(50, int(match_window_ms))
         self.states: deque[StateSnapshot] = deque(maxlen=self.max_states)
         self.transactions: dict[str, PendingTransaction] = {}
+        self.accepted_order: deque[str] = deque()
+        self.completed: dict[str, tuple[PendingTransaction, StateSnapshot | None, str]] = {}
+        self.closed_ids: deque[str] = deque(maxlen=4096)
         self.runs: set[str] = set()
         self.event_log: TextIO | None = None
         self.enricher = ActionRecorderEnricher(output_dir)
@@ -132,7 +196,8 @@ class CommunicationBridgeRecorder:
         with self._lock:
             for transaction in list(self.transactions.values()):
                 if transaction.accepted is not None:
-                    self._finalize(transaction, None, "bridge_closed")
+                    after = self._latest_after(transaction)
+                    self._finalize(transaction, after, "latest_observation" if after else "bridge_closed")
             self.transactions.clear()
             self.enricher.close()
             if self.event_log is not None:
@@ -146,15 +211,23 @@ class CommunicationBridgeRecorder:
         self.event_log.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.event_log.flush()
 
-    def ingest_state(self, raw: dict[str, Any]) -> StateSnapshot:
+    def ingest_state(self, raw: dict[str, Any]) -> StateSnapshot | None:
         with self._lock:
+            if raw.get("error") is not None:
+                self._log({"type": "protocol_error", "error": raw["error"]})
+                return None
             message = _state_message(raw)
+            state_id = message.get("recorder_state_id")
+            for existing in self.states:
+                if state_id and existing.message.get("recorder_state_id") == state_id:
+                    return existing
             self.state_seq += 1
             snapshot = StateSnapshot(
                 seq=self.state_seq,
                 received_at_ms=int(time.time() * 1000),
                 message=message,
-                state_hash=_json_hash(message),
+                state_hash=_json_hash({key: value for key, value in message.items()
+                                       if not key.startswith("recorder_")}),
                 screen_type=_screen(message),
             )
             self.states.append(snapshot)
@@ -174,13 +247,20 @@ class CommunicationBridgeRecorder:
         with self._lock:
             self.marker_count += 1
             event_type = str(raw.get("type") or "")
+            if event_type == "state_published":
+                if isinstance(raw.get("message"), dict):
+                    self.ingest_state(raw["message"])
+                return
+            if event_type == "run_finished":
+                self.enricher.consume(raw)
+                self._log({"type": "run_finished_marker", "run_id": raw.get("run_id"), "reason": raw.get("reason")})
+                return
             if event_type == "hello":
                 self._log({"type": "marker_hello", "recorder_session": raw.get("recorder_session")})
                 return
             if event_type in {"action_observed", "step_resolved", "room_changed", "combat_turn_changed", "raw_input"}:
-                # The Java Mod keeps these schema-0.3 events for local/offline
-                # compatibility. They contain a potentially stale in-process
-                # state and must never compete with the transaction protocol.
+                # Legacy snapshots and auxiliary events must never compete
+                # with the explicit state-ID transaction protocol.
                 return
             if event_type == "run_started":
                 run_id = str(raw.get("run_id") or "")
@@ -191,7 +271,9 @@ class CommunicationBridgeRecorder:
                 return
             if event_type == "run_ended":
                 for transaction in list(self.transactions.values()):
-                    self._finalize(transaction, None, "run_ended_unmatched")
+                    if transaction.begin.get("run_id") == raw.get("run_id"):
+                        after = self._latest_after(transaction)
+                        self._finalize(transaction, after, "latest_observation" if after else "run_ended_unmatched")
                 self.enricher.consume(raw)
                 self._log({"type": "run_ended_marker", "run_id": raw.get("run_id")})
                 return
@@ -205,23 +287,20 @@ class CommunicationBridgeRecorder:
                 # state cache one chance to resolve it before opening the next
                 # decision; if it still cannot be matched it is finalized as
                 # unmatched rather than being silently attached to this one.
+                next_before = next((item for item in self.states
+                                    if item.message.get("recorder_state_id") == raw.get("before_state_id")
+                                    and raw.get("before_state_id")), None)
                 for previous in list(self.transactions.values()):
                     if previous.accepted is None:
                         continue
-                    if previous.before is None:
-                        self._finalize(previous, None, "unmatched_next_decision")
+                    if previous.accepted.get("execution_tracking"):
+                        continue  # A click boundary is not a queued execution boundary.
+                    if previous.before is None or next_before is None:
                         continue
-                    after_candidates = [
-                        item for item in self.states
-                        if item.seq > previous.before.seq
-                        and item.state_hash != previous.before.state_hash
-                        and item.received_at_ms >= int(previous.accepted.get("timestamp_ms") or 0)
-                    ]
-                    self._finalize(
-                        previous,
-                        after_candidates[0] if after_candidates else None,
-                        "next_decision",
-                    )
+                    if (next_before.message.get("recorder_session") == previous.before.message.get("recorder_session")
+                            and (next_before.message.get("recorder_state_seq") or 0)
+                            > (previous.before.message.get("recorder_state_seq") or 0)):
+                        self._finalize(previous, next_before, "next_decision")
                 transaction = PendingTransaction(
                     transaction_id=transaction_id,
                     begin=copy.deepcopy(raw),
@@ -240,17 +319,30 @@ class CommunicationBridgeRecorder:
                 return
             transaction = self.transactions.get(transaction_id)
             if transaction is None:
+                if event_type in {"action_execution_begin", "action_execution_result", "action_effects_settled"} and transaction_id in self.closed_ids:
+                    return  # Ready state can arrive before the optional settled marker.
                 self._log({"type": "marker_rejected", "reason": "unknown_transaction", "marker": raw})
                 return
             if event_type == "action_accepted":
+                if transaction.accepted is not None:
+                    return
                 transaction.accepted = copy.deepcopy(raw)
+                self.accepted_order.append(transaction_id)
                 action = raw.get("action") if isinstance(raw.get("action"), dict) else raw.get("chosen_action")
                 # The begin marker intentionally contains only the game
                 # context. Resolve the exact action at acceptance time, when
                 # the semantic action ID and target fields are available.
-                if transaction.before_status != "exact_legal_action" and isinstance(action, dict):
+                if isinstance(action, dict):
                     transaction.begin["action"] = copy.deepcopy(action)
                     transaction.before, transaction.before_status = self._find_before(transaction)
+                self._settle_transaction_if_possible(transaction)
+            elif event_type in {"action_execution_begin", "action_execution_result", "action_effects_settled"}:
+                if event_type == "action_execution_begin":
+                    transaction.execution_begin = copy.deepcopy(raw)
+                elif event_type == "action_execution_result":
+                    transaction.execution_result = copy.deepcopy(raw)
+                else:
+                    transaction.settled = copy.deepcopy(raw)
                 self._settle_transaction_if_possible(transaction)
             elif event_type == "action_rejected":
                 transaction.rejected = copy.deepcopy(raw)
@@ -262,83 +354,26 @@ class CommunicationBridgeRecorder:
                 })
 
     def _find_before(self, transaction: PendingTransaction) -> tuple[StateSnapshot | None, str]:
-        candidates = list(self.states)
-        if not candidates:
-            return None, "unmatched_no_state"
+        # IDs are assigned in Java on the actual publication boundary. Either
+        # channel can arrive first; receipt time is never a causal identifier.
+        state_id = transaction.begin.get("before_state_id")
+        if not state_id:
+            return None, "unmatched_missing_state_id"
+        candidate = next((item for item in self.states
+                          if item.message.get("recorder_state_id") == state_id), None)
+        if candidate is None:
+            return None, "unmatched_state_id"
+        state = game_state(candidate.message)
+        context = transaction.begin.get("context") or {}
+        for key in ("act", "floor"):
+            if context.get(key) is not None and context.get(key) != state.get(key):
+                return None, "unmatched_context"
         expected = transaction.expected_screen
-        marker_timestamp = transaction.begin.get("timestamp_ms")
-        begin_ms = int(marker_timestamp) if isinstance(marker_timestamp, (int, float)) else transaction.begin_received_at_ms
-        # Only states received no later than the Java marker are eligible. We
-        # intentionally do not use a future state as a fallback: dropping a
-        # step is safer than assigning a post-transition screen as its before
-        # observation. ``match_window_ms`` is retained for compatibility with
-        # existing command lines but never relaxes this ordering guarantee.
-        expected_is_generic = expected in {"", "NONE", "NULL"}
-        temporal = [
-            item for item in candidates
-            if item.received_at_ms <= begin_ms
-            and (expected_is_generic or item.screen_type == expected)
-        ]
-        if not temporal:
-            return None, "unmatched_no_prior_state"
-        if not temporal:
+        if expected not in {"", "NULL"} and expected not in {
+            candidate.screen_type, str(state.get("screen_name") or "").upper(),
+        }:
             return None, "unmatched_screen"
-        temporal.sort(key=lambda item: item.seq)
-        candidate = temporal[-1]
-        action = transaction.begin.get("action")
-        if isinstance(action, dict) and self._action_legal(candidate.message, action):
-            return candidate, "exact_legal_action"
-        if expected and candidate.screen_type == expected:
-            return candidate, "screen_context_only"
-        return None, "unmatched_precondition"
-
-    @staticmethod
-    def _action_legal(message: dict[str, Any], action: dict[str, Any]) -> bool:
-        action_id = str(action.get("id") or "")
-        if not action_id:
-            return False
-        try:
-            actions = semantic_actions(message)
-        except Exception:
-            actions = []
-        if any(str(item.get("id") or "") == action_id for item in actions):
-            return True
-        state = game_state(message)
-        screen = str(state.get("screen_type") or "").upper()
-        room_type = str(state.get("room_type") or "").upper()
-        if action_id.startswith("MAP:") and screen == "MAP":
-            try:
-                parts = dict(part.split("=", 1) for part in action_id.split(":")[1:] if "=" in part)
-                x, y = int(parts["x"]), int(parts["y"])
-            except (KeyError, TypeError, ValueError):
-                return False
-            screen_state = state.get("screen_state")
-            next_nodes = screen_state.get("next_nodes") if isinstance(screen_state, dict) else None
-            if isinstance(next_nodes, list):
-                return any(
-                    isinstance(node, dict) and node.get("x") == x and node.get("y") == y
-                    for node in next_nodes
-                )
-            return False
-        if action_id == "OPEN:SHOP" and screen in {"SHOP_ROOM", "ROOM_EVENT"}:
-            return True
-        if action_id.startswith("SHOP:") and screen in {"SHOP_SCREEN", "GRID", "SHOP_ROOM"}:
-            return True
-        if action_id.startswith("SELECT_CARDS:") and screen in {"GRID", "HAND_SELECT"}:
-            return True
-        if action_id.startswith("CAMPFIRE:") and room_type in {"REST", "REST_ROOM", "CAMPFIRE"}:
-            return True
-        if action_id.startswith("REWARD:") and screen in {"COMBAT_REWARD", "CARD_REWARD", "BOSS_REWARD"}:
-            return True
-        if action_id.startswith("BOSS_RELIC:") and screen == "BOSS_REWARD":
-            return True
-        if action_id.startswith("POTION_") and str(state.get("room_phase") or "").upper() == "COMBAT":
-            return True
-        if action_id in {"END_TURN"} and str(state.get("room_phase") or "").upper() == "COMBAT":
-            return True
-        if action_id.startswith("OPEN:CHEST") and room_type in {"TREASURE", "TREASURE_ROOM"}:
-            return True
-        return False
+        return candidate, "exact_state_id"
 
     def _settle_transactions(self, newest: StateSnapshot) -> None:
         for transaction in list(self.transactions.values()):
@@ -361,19 +396,64 @@ class CommunicationBridgeRecorder:
             # transaction pending until another marker, run end, or bridge
             # shutdown gives it a definitive unmatched outcome.
             return
-        if transaction.before_status != "exact_legal_action":
+        if transaction.before_status != "exact_state_id":
             self._finalize(transaction, None, transaction.before_status)
             return
-        after_candidates = [
-            item for item in self.states
-            if item.seq > transaction.before.seq and item.state_hash != transaction.before.state_hash
-            and item.received_at_ms >= int(transaction.accepted.get("timestamp_ms") or 0)
-        ]
+        if transaction.accepted.get("execution_tracking"):
+            marker = transaction.execution_begin or {}
+            if transaction.execution_before is None:
+                candidate = self._referenced_state(marker.get("execution_before_state_id"))
+                if (candidate is not None
+                        and candidate.message.get("recorder_session") == transaction.before.message.get("recorder_session")
+                        and (candidate.message.get("recorder_state_seq") or 0)
+                        > (transaction.before.message.get("recorder_state_seq") or 0)
+                        and all(game_state(candidate.message).get(key) == value
+                                for key, value in (marker.get("context") or {}).items()
+                                if key in {"act", "floor"})):
+                    transaction.execution_before = candidate
+            result = transaction.execution_result or {}
+            if result.get("status") in {"skipped", "cancelled"}:
+                self._finalize(transaction, None, "execution_not_performed")
+                return
+            if result.get("status") != "executed" or transaction.execution_before is None:
+                return
+            after = self._referenced_state((transaction.settled or {}).get("after_state_id"))
+            if after is not None and (transaction.settled or {}).get("logical_boundary") is True:
+                if (after.message.get("recorder_session") == transaction.execution_before.message.get("recorder_session")
+                        and (after.message.get("recorder_state_seq") or 0)
+                        > (transaction.execution_before.message.get("recorder_state_seq") or 0)):
+                    self._finalize(transaction, after, "execution_settled")
+                    return
+        after_candidates = self._after_candidates(transaction)
         if not after_candidates:
-            # The next accepted action will trigger a final attempt. Do not
-            # invent a duplicated after-state while the game is animating.
+            # No completed effect yet. A removed reward row alone is not proof
+            # that the key/potion/card has already reached the player.
             return
         self._finalize(transaction, after_candidates[0], "stable_state")
+
+    def _referenced_state(self, state_id: Any) -> StateSnapshot | None:
+        if not state_id:
+            return None
+        return next((item for item in self.states if item.message.get("recorder_state_id") == state_id), None)
+
+    def _after_candidates(self, transaction: PendingTransaction) -> list[StateSnapshot]:
+        if transaction.before is None or transaction.accepted is None:
+            return []
+        action = transaction.accepted.get("action") or {}
+        before = transaction.execution_before or transaction.before
+        return sorted([
+            item for item in self.states
+            if item.message.get("recorder_session") == before.message.get("recorder_session")
+            and (item.message.get("recorder_state_seq") or 0) > (before.message.get("recorder_state_seq") or 0)
+            and item.state_hash != before.state_hash
+            and item.message.get("in_game")
+            and _decision_ready(item.message)
+            and _effect_complete(action, game_state(before.message), game_state(item.message))
+        ], key=lambda item: item.message.get("recorder_state_seq") or 0)
+
+    def _latest_after(self, transaction: PendingTransaction) -> StateSnapshot | None:
+        candidates = self._after_candidates(transaction)
+        return candidates[-1] if candidates else None
 
     def _finalize(
         self,
@@ -382,6 +462,14 @@ class CommunicationBridgeRecorder:
         resolution: str,
     ) -> None:
         self.transactions.pop(transaction.transaction_id, None)
+        self.closed_ids.append(transaction.transaction_id)
+        self.completed[transaction.transaction_id] = (transaction, after, resolution)
+        while self.accepted_order and self.accepted_order[0] in self.completed:
+            self._emit_transaction(*self.completed.pop(self.accepted_order.popleft()))
+
+    def _emit_transaction(
+        self, transaction: PendingTransaction, after: StateSnapshot | None, resolution: str,
+    ) -> None:
         accepted = transaction.accepted
         if accepted is None:
             return
@@ -396,6 +484,8 @@ class CommunicationBridgeRecorder:
                 "match_status": transaction.before_status,
                 "resolution": resolution,
             })
+            print(f"warning: ActionRecorder transaction {transaction.transaction_id} has no matched pre-state: "
+                  f"{transaction.before_status}; inspect the local journal", file=sys.stderr, flush=True)
             return
         if run_id not in self.runs:
             metadata = {
@@ -418,11 +508,23 @@ class CommunicationBridgeRecorder:
             "timestamp_ms": accepted.get("timestamp_ms"),
             "observation_before": observation_before,
             "available_actions": available_before,
+            "raw_message": transaction.before.message,
             "action": action,
             "chosen_action": action,
+            "execution_tracking": bool(accepted.get("execution_tracking")),
+            "execution_status": (transaction.execution_result or {}).get("status", "unknown"),
+            "execution_raw_message": transaction.execution_before.message if transaction.execution_before else None,
+            "execution_action": (transaction.execution_begin or {}).get("action"),
+            "execution_state_match": {
+                "match_status": "exact_state_id",
+                "before_state_id": transaction.execution_before.message.get("recorder_state_id"),
+                "before_state_seq": transaction.execution_before.message.get("recorder_state_seq"),
+                "logical_boundary": (transaction.execution_begin or {}).get("logical_boundary") is True,
+            } if transaction.execution_before else None,
             "state_match": {
                 "match_status": transaction.before_status,
                 "before_state_seq": transaction.before.seq,
+                "before_state_id": transaction.before.message.get("recorder_state_id"),
                 "before_state_hash": transaction.before.state_hash,
                 "bridge_session": self.session_id,
             },
@@ -433,8 +535,13 @@ class CommunicationBridgeRecorder:
             "step_id": transaction.transaction_id,
             "timestamp_ms": int(time.time() * 1000),
             "observation_after": observation_after,
+            "raw_message": after.message if after else None,
             "after_state_seq": after.seq if after is not None else None,
             "resolution": resolution,
+            "effect_complete": bool(after and (resolution == "execution_settled"
+                                                 or _effect_complete(action, observation_before, observation_after))),
+            "decision_ready_after": bool(after and (_decision_ready(after.message)
+                                                       or resolution == "execution_settled")),
         })
         self._log({
             "type": "transaction_finalized",
@@ -456,11 +563,15 @@ class MarkerServer(threading.Thread):
         self.marker_queue = marker_queue
         self.stop_event = threading.Event()
         self.server: socket.socket | None = None
+        self.connection: socket.socket | None = None
+        self.ready_event = threading.Event()
+        self.startup_error: str | None = None
 
     def run(self) -> None:
         try:
             self.server = socket.create_server((self.host, self.port), backlog=4)
             self.server.settimeout(0.5)
+            self.ready_event.set()
             print(f"ActionRecorder marker bridge listening on {self.host}:{self.port}", file=sys.stderr, flush=True)
             while not self.stop_event.is_set():
                 try:
@@ -471,18 +582,28 @@ class MarkerServer(threading.Thread):
                     break
                 print(f"ActionRecorder marker connected: {address[0]}:{address[1]}", file=sys.stderr, flush=True)
                 with connection:
-                    connection.settimeout(1.0)
+                    self.connection = connection
+                    # A buffered text reader becomes unusable after a socket
+                    # timeout. Human thinking time must not kill this server.
+                    connection.settimeout(None)
                     with connection.makefile("r", encoding="utf-8", newline="\n") as stream:
-                        for line in stream:
-                            if self.stop_event.is_set():
-                                break
-                            if line.strip():
-                                try:
-                                    value = json.loads(line)
-                                except json.JSONDecodeError:
-                                    continue
-                                if isinstance(value, dict):
-                                    self.marker_queue.put(value)
+                        try:
+                            for line in stream:
+                                if self.stop_event.is_set():
+                                    break
+                                if line.strip():
+                                    try:
+                                        value = json.loads(line)
+                                    except json.JSONDecodeError:
+                                        continue
+                                    if isinstance(value, dict):
+                                        self.marker_queue.put(value)
+                        except (OSError, UnicodeError) as exc:
+                            print(f"ActionRecorder marker disconnected: {exc}", file=sys.stderr, flush=True)
+                    self.connection = None
+        except OSError as exc:
+            self.startup_error = str(exc)
+            self.ready_event.set()
         finally:
             if self.server is not None:
                 try:
@@ -492,6 +613,11 @@ class MarkerServer(threading.Thread):
 
     def close(self) -> None:
         self.stop_event.set()
+        if self.connection is not None:
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         if self.server is not None:
             try:
                 self.server.close()
@@ -515,7 +641,6 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=None, help="override ActionRecorder marker port")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--max-states", type=int, default=256)
-    parser.add_argument("--match-window-ms", type=int, default=750)
     args = parser.parse_args()
     try:
         config = load_agent_config(config_file=args.config)
@@ -525,17 +650,30 @@ def main() -> int:
     recording = config["recording"]
     listen = recording["listen"]
     host = str(args.host or listen["host"])
-    port = int(args.port or listen["port"])
+    port = int(args.port if args.port is not None else listen["port"])
     output_dir = args.output_dir or (PROJECT_ROOT / str(recording["output_dir"]))
     recorder = CommunicationBridgeRecorder(
         output_dir,
         max_states=args.max_states,
-        match_window_ms=args.match_window_ms,
     )
     marker_queue: queue.Queue[dict[str, Any]] = queue.Queue()
     marker_server = MarkerServer(host, port, marker_queue)
     recorder.start()
     marker_server.start()
+    if not marker_server.ready_event.wait(timeout=5) or marker_server.startup_error:
+        print(f"cannot start ActionRecorder listener: {marker_server.startup_error or 'startup timeout'}",
+              file=sys.stderr, flush=True)
+        marker_server.close()
+        recorder.close()
+        return 2
+    def consume_markers() -> None:
+        while not marker_server.stop_event.is_set():
+            try:
+                recorder.ingest_marker(marker_queue.get(timeout=0.2))
+            except queue.Empty:
+                continue
+    marker_worker = threading.Thread(target=consume_markers, name="recorder-transactions", daemon=True)
+    marker_worker.start()
     # Required CommunicationMod handshake. Nothing else may be printed to
     # stdout except protocol commands.
     print("ready", flush=True)
@@ -547,20 +685,21 @@ def main() -> int:
             try:
                 message = json.loads(raw)
             except json.JSONDecodeError:
-                print("WAIT", flush=True)
+                print("invalid CommunicationMod JSON; ignoring", file=sys.stderr, flush=True)
                 continue
             if not isinstance(message, dict):
                 continue
-            drain_markers(marker_queue, recorder)
             recorder.ingest_state(message)
-            drain_markers(marker_queue, recorder)
-            if message.get("ready_for_command"):
-                # Recording is passive; human input happens in the game UI.
-                print("WAIT", flush=True)
+            # Purely passive: do not reply with commands. WAIT requires a
+            # frame argument and creates a polling loop even when valid.
+            # States arrive on source notifications and action boundaries.
     except KeyboardInterrupt:
         return 0
     finally:
         marker_server.close()
+        marker_server.join(timeout=2)
+        marker_worker.join(timeout=2)
+        drain_markers(marker_queue, recorder)
         recorder.close()
     return 0
 

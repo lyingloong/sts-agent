@@ -7,7 +7,7 @@
 ```text
 CommunicationMod
   -> runtime.controller
-  -> game.adapter / game.sts1 knowledge
+  -> game adapter / StS1 runtime state projection
   -> core observation + legal actions
   -> policy backend or human UI
   -> validated action compiler
@@ -22,7 +22,7 @@ CommunicationMod
 | --- | --- | --- |
 | `core` | 数据契约、策略接口、framework 组合校验 | 游戏解析、模型加载、UI |
 | `runtime` | CommunicationMod 协议、运行协调、轨迹生命周期 | 模型训练实现 |
-| `game` | 游戏适配器、StS1 状态与知识补全 | API 调用、窗口 |
+| `game` | 游戏适配器、StS1 状态与运行时字段规范化 | API 调用、窗口、静态实体知识库 |
 | `policy` | Qwen 推理、教师 API、策略 Prompt | 游戏命令执行 |
 | `learning` | 数据导出、SFT、Prompt/RL 更新 | CommunicationMod 原始协议 |
 | `ui` | 展示 controller view、收集人工选择和审核 | 游戏规则与训练更新 |

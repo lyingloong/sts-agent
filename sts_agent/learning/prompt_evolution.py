@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sts_agent.learning.posthoc_feedback import POSTHOC_STATIC_FIELDS, _posthoc_state_snapshot, compact_text, terminal_summary
+from sts_agent.learning.posthoc_feedback import POSTHOC_NON_DECISION_FIELDS, _posthoc_state_snapshot, compact_text, terminal_summary
 from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError
 from sts_agent.policy.teacher_prompts import PLAYER_PROMPT_VERSION as BASE_PROMPT_VERSION
 from sts_agent.policy.teacher_prompts import CHARACTER_KEYS, SCENARIO_PROMPTS, build_system_prompt, character_key, character_prompt, scenario_key
@@ -169,16 +169,16 @@ def _evidence_steps(run: dict[str, Any], step_ids: Any) -> list[dict[str, Any]]:
 
 
 def _public_action(value: Any) -> dict[str, Any]:
-    """Keep action mechanics useful for analysis without static KB prose."""
+    """Keep scalar action mechanics and runtime descriptions for analysis."""
 
     if not isinstance(value, dict):
         return {}
     result = {}
     # Semantic actions are deliberately scalar records. Retain every scalar
     # parameter (including future action fields) while excluding any nested
-    # payload that could reintroduce static item knowledge.
+    # payload that could reintroduce retired local entity fields.
     for key, item in value.items():
-        if key in POSTHOC_STATIC_FIELDS:
+        if key in POSTHOC_NON_DECISION_FIELDS:
             continue
         if isinstance(item, (str, int, float, bool)) or item is None:
             result[key] = compact_text(item, 320) if isinstance(item, str) else item
@@ -565,9 +565,6 @@ class PromptEvolutionManager:
     def system_prompt(
         self,
         observation: dict[str, Any],
-        *,
-        allow_knowledge_request: bool = False,
-        knowledge_request_style: str = "encouraged",
     ) -> tuple[str, str]:
         """Compose the player prompt from the active role and scene skills."""
 
@@ -577,8 +574,6 @@ class PromptEvolutionManager:
                     observation,
                     character=self.character,
                     persona="player",
-                    allow_knowledge_request=allow_knowledge_request,
-                    knowledge_request_style=knowledge_request_style,
                 ),
                 BASE_PROMPT_VERSION,
             )
@@ -590,8 +585,6 @@ class PromptEvolutionManager:
                 persona="player",
                 role_skill=role_skill,
                 scene_skill=scene_skills.get(scenario_key(observation), ""),
-                allow_knowledge_request=allow_knowledge_request,
-                knowledge_request_style=knowledge_request_style,
             ),
             f"{PROMPT_VERSION}:{self.current_policy_id}",
         )

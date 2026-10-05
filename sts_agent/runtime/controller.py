@@ -27,11 +27,6 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from sts_agent.config import ConfigError, load_agent_config
-from sts_agent.game.sts1.card_knowledge import card_effect
-from sts_agent.game.sts1.item_knowledge import normalize_item_key, potion_effect, relic_effect
-from sts_agent.game.sts1.monster_knowledge import boss_profile, monster_profile
-from sts_agent.game.sts1.experience import ExperienceError, append_audit, entity_profile, entity_reference_key, find_entity, get_experience, normalize_entity_key, public_entity, replace_experience, visible_entity_references
-from sts_agent.game.sts1.experience_curator import curate_experience
 from sts_agent.learning.posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
@@ -41,10 +36,8 @@ from sts_agent.learning.posthoc_feedback import (
     terminal_summary as posthoc_terminal_summary,
     write_artifact as write_posthoc_artifact,
 )
-from sts_agent.game.sts1.power_knowledge import power_description, power_experience
 from sts_agent.learning.prompt_evolution import PromptEvolutionError, PromptEvolutionManager
 from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError
-from sts_agent.policy.teacher_prompts import PLAYER_PROMPT_VERSION, build_system_prompt
 from sts_agent.paths import PROJECT_ROOT
 
 
@@ -260,9 +253,9 @@ def normalize_keys(state: dict[str, Any]) -> dict[str, bool] | None:
     if result:
         return result
     if isinstance(raw, list):
-        normalized = {normalize_item_key(item) for item in raw}
+        normalized = {_status_key(item) for item in raw}
         result = {
-            canonical: any(normalize_item_key(alias) in normalized for alias in aliases)
+            canonical: any(_status_key(alias) in normalized for alias in aliases)
             for canonical, aliases in KEY_FIELD_ALIASES.items()
         }
         return result
@@ -445,25 +438,47 @@ CARD_MODEL_FIELDS = (
     "name",
     "type",
     "cost",
+    "cost_for_turn",
     "upgrades",
     "is_playable",
     "description",
-    "experience",
+    "raw_description",
+    "description_source",
+    "description_complete",
+    "unresolved_description_variables",
+    "target",
+    "damage",
+    "base_damage",
+    "block",
+    "base_block",
+    "magic_number",
+    "hit_count",
+    "multi_damage",
+    "rarity",
+    "color",
+    "exhaust",
+    "ethereal",
+    "innate",
+    "retain",
+    "self_retain",
+    "purge_on_use",
 )
 POTION_MODEL_FIELDS = (
     "id",
     "name",
     "description",
+    "raw_description",
+    "description_source",
+    "tooltips",
     "target",
     "can_use",
-    "experience",
 )
-RELIC_MODEL_FIELDS = ("id", "name", "description", "counter", "experience")
+RELIC_MODEL_FIELDS = ("id", "name", "description", "raw_description", "description_source", "counter")
 _MISSING = object()
 
 
 def _numeric_value(value: Any) -> float | int | None:
-    """Parse a protocol or knowledge value that represents one number."""
+    """Parse a protocol value that represents one number."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -515,185 +530,29 @@ def _power_amount(powers: Any, aliases: tuple[str, ...]) -> int:
     return total
 
 
-def _combat_modifiers(powers: Any) -> dict[str, int]:
-    return {
-        "strength": _power_amount(powers, ("STRENGTH", "力量")),
-        "weak": _power_amount(powers, ("WEAK", "WEAKENED", "虚弱")),
-        "dexterity": _power_amount(powers, ("DEXTERITY", "敏捷")),
-        "frail": _power_amount(powers, ("FRAIL", "脆弱")),
-        "vulnerable": _power_amount(powers, ("VULNERABLE", "易伤")),
-        "intangible": _power_amount(powers, ("INTANGIBLE", "无实体")),
-    }
-
-
-def _card_base_value(
-    card: dict[str, Any],
-    effect: dict[str, Any] | None,
-    field: str,
-) -> float | int | None:
-    """Read a card's unmodified value, applying its static upgrade delta."""
-    # A future CommunicationMod can expose a direct base_* field. Prefer it
-    # over the generic field, which may be a UI-derived value in some builds.
-    value = _numeric_value(card.get(f"base_{field}"))
-    if value is None:
-        value = _numeric_value(card.get(field))
-    if value is None and effect is not None:
-        value = _numeric_value(effect.get(f"base_{field}"))
-    if value is None:
-        return None
-    upgraded = _integer_value(card.get("upgrades")) or 0
-    if upgraded > 0 and effect is not None:
-        delta = _numeric_value(effect.get(f"upgrade_{field}"))
-        if delta is not None:
-            value += delta * upgraded
-    return value
-
-
-def _direct_final_value(card: dict[str, Any], field: str) -> float | int | None:
-    """Accept explicit final values from newer protocol versions if present."""
-    for key in (
-        f"final_{field}",
-        f"final_{field}_value",
-        f"{field}_after_modifiers",
-        f"adjusted_{field}",
-        f"calculated_{field}",
-    ):
-        value = _numeric_value(card.get(key))
-        if value is not None:
-            return value
-    return None
-
-
-# These cards use a value that depends on combat history or another live
-# quantity not represented by the current helper signature. Do not emit a
-# misleading ``final_*`` value for them; their full description remains in the
-# observation until a dedicated state calculation is added.
-_DYNAMIC_DAMAGE_CARDS = frozenset(
-    {
-        "BARRAGE",
-        "BLIZZARD",
-        "BODYSLAM",
-        "BOWLINGBASH",
-        "BRILLIANCE",
-        "CORPSEEXPLOSION",
-        "FIENDFIRE",
-        "FINISHER",
-        "FLECHETTES",
-        "MINDBLAST",
-        "PERFECTEDSTRIKE",
-        "RAMPAGE",
-        "SEARINGBLOW",
-        "SKEWER",
-        "THUNDERSTRIKE",
-        "WHIRLWIND",
-    }
-)
-_DYNAMIC_BLOCK_CARDS = frozenset(
-    {
-        "REINFORCEDBODY",
-        "SECONDWIND",
-        "SPIRITSHIELD",
-        "STACK",
-    }
-)
-
-
 def _calculated_card_values(
     card: dict[str, Any],
     *,
     player_powers: Any = None,
 ) -> dict[str, int]:
-    """Return per-hit damage and block after visible player modifiers."""
-    effect = card_effect(card)
-    card_type = _status_key(card.get("type") or (effect or {}).get("type"))
-    # Card IDs in the protocol may be snake_case while the compact exception
-    # tables use the game's concatenated IDs (for example HEAVY_BLADE).
-    card_key = _status_key(card.get("id") or (effect or {}).get("id")).replace("_", "")
-    modifiers = _combat_modifiers(player_powers)
+    """Use the live hand preview as-is; cached values already include Powers."""
     result: dict[str, int] = {}
-
-    direct_damage = _direct_final_value(card, "damage")
-    base_damage = direct_damage if direct_damage is not None else _card_base_value(card, effect, "damage")
-    if (
-        base_damage is not None
-        and (direct_damage is not None or card_key not in _DYNAMIC_DAMAGE_CARDS)
-        and (
-            "ATTACK" in card_type
-            or "攻击" in card_type
-            or effect is not None and _numeric_value((effect or {}).get("base_damage")) is not None
-        )
-    ):
-        strength_multiplier = 1
-        if direct_damage is None and card_key == "HEAVYBLADE":
-            # Heavy Blade's static magic_number is the number of times
-            # Strength applies to this card (3, upgraded to 5), not ordinary
-            # card damage. The calculation is still per hit.
-            strength_multiplier = _integer_value(
-                _card_base_value(card, effect, "magic_number")
-            ) or 1
-        damage = (
-            base_damage
-            if direct_damage is not None
-            else base_damage + modifiers["strength"] * strength_multiplier
-        )
-        if direct_damage is None and modifiers["weak"] > 0:
-            damage = math.floor(damage * 0.75)
-        result["final_single_hit_damage"] = max(0, math.floor(damage))
-
-    direct_block = _direct_final_value(card, "block")
-    base_block = direct_block if direct_block is not None else _card_base_value(card, effect, "block")
-    if base_block is not None and (direct_block is not None or card_key not in _DYNAMIC_BLOCK_CARDS):
-        block = base_block if direct_block is not None else base_block + modifiers["dexterity"]
-        if direct_block is None and modifiers["frail"] > 0:
-            block = math.floor(block * 0.75)
-        result["final_block"] = max(0, math.floor(block))
+    card_type = _status_key(card.get("type"))
+    if "ATTACK" in card_type or "攻击" in card_type:
+        damage = _integer_value(card.get("final_single_hit_damage"))
+        if damage is None:
+            damage = _integer_value(card.get("damage"))
+        if damage is not None:
+            result["final_single_hit_damage"] = damage
+    block = _integer_value(card.get("final_block"))
+    if block is None:
+        block = _integer_value(card.get("block"))
+    if block is not None:
+        result["final_block"] = block
     return result
 
 
-def _calculated_intent_values(monster: dict[str, Any], player_powers: Any) -> dict[str, int]:
-    """Calculate expected incoming damage for the current enemy intent.
-
-    ``move_adjusted_damage`` is already the game's per-hit value when the
-    protocol provides it. If it is unavailable, fall back to the base move
-    value and the enemy's visible Strength/Weak. Player Vulnerable and
-    Intangible are applied because the model needs the damage it will receive,
-    not merely the enemy's raw move number.
-    """
-    intent_key = _status_key(monster.get("intent"))
-    if intent_key and not any(token in intent_key for token in ("ATTACK", "DAMAGE", "攻击")):
-        return {}
-    adjusted = _integer_value(monster.get("move_adjusted_damage"))
-    base = _integer_value(monster.get("move_base_damage"))
-    if adjusted is not None and adjusted < 0:
-        adjusted = None
-    if base is not None and base < 0:
-        base = None
-    if adjusted is None and base is None:
-        return {}
-
-    if adjusted is not None:
-        per_hit = adjusted
-    else:
-        enemy_modifiers = _combat_modifiers(monster.get("powers"))
-        per_hit = base + enemy_modifiers["strength"]
-        if enemy_modifiers["weak"] > 0:
-            per_hit = math.floor(per_hit * 0.75)
-
-    player_modifiers = _combat_modifiers(player_powers)
-    if player_modifiers["intangible"] > 0:
-        per_hit = 1
-    elif player_modifiers["vulnerable"] > 0:
-        per_hit = math.floor(per_hit * 1.5)
-    per_hit = max(0, math.floor(per_hit))
-    hits = _integer_value(monster.get("move_hits")) or 1
-    hits = max(1, hits)
-    return {
-        "intent_final_damage": per_hit,
-        "intent_final_total_damage": per_hit * hits,
-    }
-
-
-# These are the relics whose static knowledge says that picking them up opens
+# These relics can cause follow-up selection screens after pickup.
 # a player-directed card selection. Effects such as Pandora's Box, War Paint,
 # and Whetstone are deliberately absent because their card changes are random
 # or automatic rather than a decision screen.
@@ -761,19 +620,17 @@ def public_value(source: dict[str, Any], field: str, aliases: tuple[str, ...] = 
 
 def merge_public_fields(
     runtime: dict[str, Any],
-    static: dict[str, Any] | None,
     fields: tuple[str, ...],
     runtime_aliases: dict[str, tuple[str, ...]] | None = None,
-    static_aliases: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
-    """Build one flat model schema, with live game values taking precedence."""
+    """Project only fields present in the current game observation."""
     result: dict[str, Any] = {}
     for field in fields:
         value = public_value(runtime, field, (runtime_aliases or {}).get(field, ()))
-        if value is _MISSING and static is not None:
-            value = public_value(static, field, (static_aliases or {}).get(field, ()))
         if value is not _MISSING:
             result[field] = value
+    if not result.get("description") and result.get("raw_description"):
+        result["description"] = result["raw_description"]
     return result
 
 
@@ -782,73 +639,51 @@ def visible_card(
     *,
     player_powers: Any = None,
 ) -> dict[str, Any]:
-    """Expose one canonical card schema and optional live combat calculations."""
-    result = merge_public_fields(
-        card,
-        card_effect(card),
-        CARD_MODEL_FIELDS,
-    )
-    # Calculated values are only meaningful in combat. Keeping them opt-in
-    # prevents shop/reward cards from being mistaken for live card previews.
+    """Expose game-reported card facts without a local entity database."""
+    result = merge_public_fields(card, CARD_MODEL_FIELDS)
+    for field in ("id", "name", "type", "cost", "upgrades", "is_playable", "description"):
+        result.setdefault(field, None)
     if player_powers is not None:
-        result.update(_calculated_card_values(card, player_powers=player_powers))
+        result.update(_calculated_card_values(card))
     return result
 
 
 def card_effect_summary(card: dict[str, Any], *, player_powers: Any = None) -> str:
-    """Render the structured card knowledge compactly for the human terminal."""
-    effect = visible_card(card, player_powers=player_powers)
+    """Render live card text and values compactly for the controller UI."""
+    values = visible_card(card, player_powers=player_powers)
     fields = []
-    for key, label in (
-        ("type", "type"),
-        ("rarity", "rarity"),
-        ("target", "target"),
-        ("color", "color"),
-    ):
-        if effect.get(key) is not None:
-            fields.append(f"{label}={effect[key]}")
-    for key, label in (
-        ("damage", "dmg"),
-        ("block", "block"),
-        ("magic_number", "magic"),
-        ("hit_count", "hits"),
-    ):
-        value = effect.get(key)
-        if value is None:
-            value = effect.get(f"base_{key}")
-        if value is not None:
-            fields.append(f"{label}={value}")
-    if effect.get("final_single_hit_damage") is not None:
-        fields.append(f"final_dmg/hit={effect['final_single_hit_damage']}")
-    if effect.get("final_block") is not None:
-        fields.append(f"final_block={effect['final_block']}")
-    for key in ("exhaust", "ethereal", "innate", "retain", "self_retain", "purge_on_use"):
-        if effect.get(key):
-            fields.append(key)
-    if effect.get("upgrades"):
-        fields.append(f"upgraded={effect['upgrades']}")
-    description = effect.get("description") or effect.get("raw_description")
-    text = " | " + " ".join(fields) if fields else ""
+    for key, label in (("type", "type"), ("target", "target"), ("cost", "cost"), ("cost_for_turn", "cost now")):
+        if values.get(key) is not None:
+            fields.append(f"{label}={values[key]}")
+    for key, label in (("damage", "dmg"), ("block", "block"), ("magic_number", "magic"), ("hit_count", "hits")):
+        if values.get(key) is not None:
+            fields.append(f"{label}={values[key]}")
+    description = values.get("description")
+    result = " | " + " ".join(fields) if fields else ""
     if description:
-        text += f" | {str(description).replace(chr(10), ' / ')}"
-    return text
+        result += f" | {str(description).replace(chr(10), ' / ')}"
+    return result
 
 
 def visible_potion(potion: dict[str, Any]) -> dict[str, Any]:
-    return merge_public_fields(potion, potion_effect(potion), POTION_MODEL_FIELDS)
+    result = merge_public_fields(potion, POTION_MODEL_FIELDS)
+    for field in ("id", "name", "description", "target", "can_use"):
+        result.setdefault(field, None)
+    return result
 
 
 def visible_relic(relic: dict[str, Any]) -> dict[str, Any]:
-    result = merge_public_fields(relic, relic_effect(relic), RELIC_MODEL_FIELDS)
-    # CommunicationMod uses -1 for relics without a meaningful counter.
+    result = merge_public_fields(relic, RELIC_MODEL_FIELDS)
+    for field in ("id", "name", "description"):
+        result.setdefault(field, None)
     if isinstance(result.get("counter"), (int, float)) and not isinstance(result["counter"], bool) and result["counter"] < 0:
         result.pop("counter")
     return result
 
 
 def relic_identity(relic: dict[str, Any]) -> str:
-    """Return one stable static-knowledge key for a public relic instance."""
-    return normalize_item_key(relic.get("id")) or normalize_item_key(relic.get("name"))
+    """Return a normalized identifier for a live relic instance."""
+    return _status_key(relic.get("id")) or _status_key(relic.get("name"))
 
 
 RELIC_DECISION_RULES = {
@@ -895,7 +730,7 @@ def active_relic_keys(state: dict[str, Any]) -> set[str]:
 
 
 def has_relic(state: dict[str, Any], relic_key: str) -> bool:
-    return normalize_item_key(relic_key) in active_relic_keys(state)
+    return _status_key(relic_key) in active_relic_keys(state)
 
 
 def card_plays_this_turn(action_history: list[dict[str, Any]] | None) -> int:
@@ -959,23 +794,20 @@ def newly_gained_relics(before: Any, after: Any) -> list[dict[str, Any]]:
     return result
 
 
-def powers_summary(powers: Any) -> list[dict[str, Any]]:
+def powers_summary(powers: Any) -> list[dict[str, Any]] | None:
     result: list[dict[str, Any]] = []
     if not isinstance(powers, list):
-        return result
+        return None
     for power in powers:
         if not isinstance(power, dict):
             continue
         item: dict[str, Any] = {}
-        for key in ("name", "id", "amount", "type"):
+        for key in (
+            "name", "id", "amount", "type", "description", "raw_description",
+            "description_source", "description_complete", "unresolved_description_variables",
+        ):
             if key in power:
                 item[key] = power[key]
-        description = power_description(power)
-        if description is not None:
-            item["description"] = description
-        experience = power_experience(power)
-        if experience:
-            item["experience"] = experience
         result.append(item)
     return result
 
@@ -1382,9 +1214,6 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
     keys = normalize_keys(state)
     if keys is not None:
         result["keys"] = keys
-    known_boss = boss_profile(state.get("act_boss"))
-    if known_boss is not None:
-        result["act_boss_profile"] = known_boss
 
     # The generated act map is public in the normal UI. Keep the full graph so
     # route decisions can use future branches, not only the next layer.
@@ -1446,6 +1275,23 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
     The function mutates and returns ``normalized`` for the same efficient
     ownership pattern used by ``policy_observation``.
     """
+    def remove_local_knowledge(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("knowledge", "experience", "act_boss_profile"):
+                value.pop(key, None)
+            if value.get("source") == "static_knowledge":
+                value.pop("source", None)
+            for child in value.values():
+                remove_local_knowledge(child)
+        elif isinstance(value, list):
+            for child in value:
+                remove_local_knowledge(child)
+
+    # Re-exported traces may predate runtime descriptions and contain cached
+    # local-database fields. Do not train on context that inference no longer
+    # receives.
+    remove_local_knowledge(normalized)
+
     # Full route information belongs only to the actual map selection screen.
     # A transient map overlay is normalized as TRANSITION and must not leak
     # route detail into event/reward/combat decisions.
@@ -1475,7 +1321,6 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
             "max_hp",
             "gold",
             "act_boss",
-            "act_boss_profile",
             "keys",
             "relics",
             "potions",
@@ -1488,17 +1333,23 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
 
 
 def deck_summary(deck: Any) -> list[dict[str, Any]]:
-    counts: Counter[tuple[str, int]] = Counter()
+    counts: Counter[str] = Counter()
+    entries: dict[str, dict[str, Any]] = {}
     if not isinstance(deck, list):
         return []
-    for card in deck:
-        if not isinstance(card, dict):
+    for raw in deck:
+        if not isinstance(raw, dict):
             continue
-        counts[(str(card.get("id", card.get("name", ""))), int(card.get("upgrades", 0) or 0))] += 1
-    return [
-        {"id": card_id, "upgrades": upgrades, "count": count}
-        for (card_id, upgrades), count in sorted(counts.items())
-    ]
+        card = visible_card(raw)
+        entry = {
+            key: card[key]
+            for key in ("id", "name", "type", "cost", "upgrades", "description")
+            if key in card
+        }
+        signature = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+        counts[signature] += 1
+        entries[signature] = entry
+    return [entries[key] | {"count": counts[key]} for key in sorted(entries)]
 
 
 def overlay_deck_summary(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1597,10 +1448,13 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
         cards = value.get("cards", [])
         result["cards"] = [visible_card(card) for card in cards if isinstance(card, dict)]
         if screen_type == "GRID":
+            selection_count = value.get("num_cards")
+            if not isinstance(selection_count, int) or selection_count < 1:
+                selection_count = 1
             mode_fields = (
-                ("for_purge", "PURGE", "选择 1 张牌移除"),
-                ("for_transform", "TRANSFORM", "选择 1 张牌进行变化"),
-                ("for_upgrade", "UPGRADE", "选择 1 张牌升级"),
+                ("for_purge", "PURGE", f"选择 {selection_count} 张牌移除"),
+                ("for_transform", "TRANSFORM", f"选择 {selection_count} 张牌进行变化"),
+                ("for_upgrade", "UPGRADE", f"选择 {selection_count} 张牌升级"),
             )
             for flag, mode, instruction in mode_fields:
                 if value.get(flag):
@@ -1611,20 +1465,23 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
                 if value.get("any_number"):
                     result["selection_mode"] = "SELECT"
                     result["selection_instruction"] = "选择符合当前界面要求的牌"
-        for key in ("selected_cards", "num_cards", "for_transform", "for_upgrade", "for_purge", "any_number", "confirm_up", "skip_available"):
+        for key in ("selected_cards", "num_cards", "for_transform", "for_upgrade", "for_purge", "any_number", "confirm_up", "confirm_screen_up", "selection_reason", "for_clarity", "skip_available"):
             if key in value:
                 if key == "selected_cards":
                     result[key] = [visible_card(card) for card in value[key] if isinstance(card, dict)]
                 else:
                     result[key] = value[key]
+        if value.get("selection_reason"):
+            result["selection_instruction"] = value["selection_reason"]
+        if isinstance(value.get("confirmation_card"), dict):
+            result["confirmation_card"] = visible_card(value["confirmation_card"])
+            if value["confirmation_card"].get("uuid") is not None:
+                result["confirmation_card"]["uuid"] = value["confirmation_card"]["uuid"]
     elif screen_type == "EVENT":
         result["event_id"] = value.get("event_id")
         result["event_name"] = value.get("event_name")
         result["body_text"] = value.get("body_text")
         result["options"] = [normalize_event_option(item) for item in value.get("options", [])]
-        event_profile = entity_profile("event", value.get("event_id") or value.get("event_name"))
-        if event_profile is not None:
-            result["knowledge"] = event_profile
     elif screen_type == "COMBAT_REWARD":
         result["rewards"] = [normalize_reward(item) for item in value.get("rewards", [])]
     elif screen_type == "REST":
@@ -1641,9 +1498,11 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
     elif screen_type == "HAND_SELECT":
         result["hand"] = [visible_card(item) for item in value.get("hand", []) if isinstance(item, dict)]
         result["selected"] = [visible_card(item) for item in value.get("selected", []) if isinstance(item, dict)]
-        for key in ("max_cards", "can_pick_zero"):
+        for key in ("max_cards", "can_pick_zero", "up_to", "any_number", "for_upgrade", "for_transform", "selection_reason"):
             if key in value:
                 result[key] = value[key]
+        if value.get("selection_reason"):
+            result["selection_instruction"] = value["selection_reason"]
     elif screen_type == "MAP":
         for key in ("current_node", "next_nodes", "boss_available", "first_node_chosen"):
             if key in value:
@@ -1659,9 +1518,11 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
 
 def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False) -> dict[str, Any]:
     player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
-    player_powers = player.get("powers") if isinstance(player.get("powers"), list) else []
+    player_powers = player.get("powers") if isinstance(player.get("powers"), list) else None
+    raw_monsters = combat.get("monsters")
+    monster_values = raw_monsters if isinstance(raw_monsters, list) else []
     monsters: list[dict[str, Any]] = []
-    for monster in combat.get("monsters", []):
+    for monster in monster_values:
         if not isinstance(monster, dict):
             continue
         item = {
@@ -1673,27 +1534,28 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
             "is_gone": monster.get("is_gone"),
             "powers": powers_summary(monster.get("powers")),
         }
-        known_monster = monster_profile(monster.get("id") or monster.get("name"))
-        if known_monster is not None:
-            item["knowledge"] = known_monster
         if not hide_enemy_intents:
+            per_hit = _integer_value(monster.get("move_adjusted_damage"))
+            if per_hit is not None and per_hit < 0:
+                per_hit = None
+            hits = _integer_value(monster.get("move_hits"))
             item.update(
                 {
                     "intent": monster.get("intent"),
-                    "intent_base_damage": monster.get("move_base_damage"),
-                    "intent_damage": monster.get("move_adjusted_damage"),
-                    "intent_hits": monster.get("move_hits"),
+                    "intent_base_damage": monster.get("move_base_damage") if _integer_value(monster.get("move_base_damage")) is not None and _integer_value(monster.get("move_base_damage")) >= 0 else None,
+                    "intent_damage": per_hit,
+                    "intent_hits": hits,
+                    "intent_total_damage": per_hit * max(1, hits or 1) if per_hit is not None else None,
                 }
             )
-            item.update(_calculated_intent_values(monster, player_powers))
         monsters.append(item)
     return {
         "turn": combat.get("turn"),
         "hand": [
-            visible_card(card, player_powers=player_powers)
+            visible_card(card, player_powers=player_powers if player_powers is not None else [])
             for card in combat.get("hand", [])
             if isinstance(card, dict)
-        ],
+        ] if isinstance(combat.get("hand"), list) else None,
         "player": {
             "current_hp": player.get("current_hp"),
             "max_hp": player.get("max_hp"),
@@ -1701,7 +1563,7 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
             "energy": player.get("energy"),
             "powers": powers_summary(player.get("powers")),
         },
-        "monsters": monsters,
+        "monsters": monsters if isinstance(raw_monsters, list) else None,
         "draw_count": len(combat.get("draw_pile", [])) if isinstance(combat.get("draw_pile"), list) else None,
         "discard_count": len(combat.get("discard_pile", [])) if isinstance(combat.get("discard_pile"), list) else None,
         "exhaust_count": len(combat.get("exhaust_pile", [])) if isinstance(combat.get("exhaust_pile"), list) else None,
@@ -1712,8 +1574,15 @@ def semantic_actions(
     message: dict[str, Any],
     visited_shop_rooms: set[tuple[int, int]] | None = None,
     declined_card_reward_keys: set[tuple[int, int]] | None = None,
+    *,
+    fine_grained: bool = True,
+    include_recorded_choices: bool = False,
 ) -> list[dict[str, Any]]:
-    """Build action candidates using stable semantic commands, not clicks."""
+    """Build fine-grained actions; raw recorded choices bypass policy masks only.
+
+    Macro expansion remains opt-in with fine_grained=False. Record restoration
+    uses include_recorded_choices=True so cancelled/deselected attempts survive.
+    """
     commands = command_set(message)
     state = game_state(message)
     result: list[dict[str, Any]] = []
@@ -1771,7 +1640,7 @@ def semantic_actions(
         return result
 
     choices = state.get("choice_list", [])
-    if is_map_room_transition(state):
+    if is_map_room_transition(state) and not include_recorded_choices:
         if "return" in commands:
             result.append({"id": "RETURN", "command": "RETURN", "kind": "return"})
         return result
@@ -1783,7 +1652,7 @@ def semantic_actions(
     # the controller after the first command and is deliberately ignored by
     # policy prompt builders.
     screen_type = str(state.get("screen_type") or "").upper()
-    if screen_type == "REST" and "choose" in commands and isinstance(choices, list):
+    if not fine_grained and screen_type == "REST" and "choose" in commands and isinstance(choices, list):
         for index, choice in enumerate(choices):
             normalized = "".join(str(choice).casefold().split())
             if normalized in {"rest", "休息"}:
@@ -1816,7 +1685,7 @@ def semantic_actions(
         if result:
             return result
 
-    if screen_type == "SHOP_SCREEN" and "choose" in commands:
+    if not fine_grained and screen_type == "SHOP_SCREEN" and "choose" in commands:
         screen_state = state.get("screen_state") if isinstance(state.get("screen_state"), dict) else {}
         structured = False
         mapped_indices: set[int] = set()
@@ -1885,11 +1754,15 @@ def semantic_actions(
     # emitted here because there is no combat target list on these screens.
     if not is_map_screen(state):
         result.extend(potion_actions(state, commands))
-    if "choose" in commands and isinstance(choices, list) and not shop_reentry_blocked(message, visited_shop_rooms):
+    if "choose" in commands and isinstance(choices, list) and (include_recorded_choices or not shop_reentry_blocked(message, visited_shop_rooms)):
         blocked_indices = blocked_potion_reward_indices(message) | blocked_gold_reward_indices(message) | blocked_card_reward_indices(
             message,
             declined_card_reward_keys,
         ) | selected_card_choice_indices(message)
+        if include_recorded_choices:
+            # Human recording mirrors CommunicationMod's raw choices. Do not
+            # mask inert rewards or hide deselection. Macro granularity is separate.
+            blocked_indices = set()
         for index, label in enumerate(choices):
             if index in blocked_indices:
                 continue
@@ -1970,7 +1843,7 @@ def potion_actions(
         if not isinstance(potion, dict) or is_slot(potion):
             continue
         name = potion.get("name", index)
-        potion_key = normalize_item_key(potion.get("id")) or normalize_item_key(potion.get("name"))
+        potion_key = _status_key(potion.get("id")) or _status_key(potion.get("name"))
         can_use = bool(potion.get("can_use", False)) and (
             in_combat or potion_key in NON_COMBAT_USABLE_POTIONS
         )
@@ -2526,18 +2399,18 @@ def format_view(
         for index, monster in enumerate(combat.get("monsters", [])):
             if not isinstance(monster, dict):
                 continue
-            calculated_intent = {} if hide_enemy_intents else _calculated_intent_values(monster, player.get("powers", []))
-            intent_damage = None if hide_enemy_intents else calculated_intent.get(
-                "intent_final_damage",
-                monster.get("move_adjusted_damage"),
-            )
+            intent_damage = None if hide_enemy_intents else monster.get("move_adjusted_damage")
             intent_hits = None if hide_enemy_intents else monster.get("move_hits")
             intent_detail = ""
             if intent_damage is not None and intent_damage != -1:
                 intent_detail = f" dmg={intent_damage}"
                 if intent_hits not in (None, 1):
                     intent_detail += f"x{intent_hits}"
-                total_damage = calculated_intent.get("intent_final_total_damage")
+                total_damage = (
+                    intent_damage * intent_hits
+                    if isinstance(intent_damage, (int, float)) and isinstance(intent_hits, int)
+                    else None
+                )
                 if total_damage is not None and intent_hits not in (None, 1):
                     intent_detail += f" total={total_damage}"
             intent = "HIDDEN" if hide_enemy_intents else monster.get("intent")
@@ -3520,174 +3393,10 @@ def request_prompt_evolution_review(
     }
 
 
-def request_knowledge_experience(
-    bridge: TerminalBridge,
-    teacher: "TeacherClient",
-    message: dict[str, Any],
-    request: dict[str, Any],
-    action_history: list[dict[str, Any]] | None,
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    """Run the human answer -> DeepSeek curation -> human approval workflow."""
-    knowledge_config = config.get("knowledge_experience", {})
-    max_entries = int(knowledge_config.get("max_entries_per_entity", 3))
-    max_question_chars = int(knowledge_config.get("max_question_chars", 2000))
-    max_answer_chars = int(knowledge_config.get("max_answer_chars", 6000))
-    entity_type = str(request.get("entity_type") or "").strip().casefold()
-    entity_id = str(request.get("entity_id") or "").strip()
-    question = str(request.get("question") or "").strip()[:max_question_chars]
-    # Only entities already visible to this decision may trigger a write. This
-    # prevents a model from probing or modifying an arbitrary hidden snapshot.
-    visible_observation = policy_observation(message, action_history=action_history)
-    allowed = visible_entity_references(visible_observation)
-    requested_kind = entity_type
-    requested_key = entity_reference_key(entity_id)
-    if not any(
-        item["entity_type"] == requested_kind and entity_reference_key(item["entity_id"]) == requested_key
-        for item in allowed
-    ):
-        allowlist = ", ".join(f"{item['entity_type']}/{item['entity_id']}" for item in allowed) or "（空）"
-        return {"status": "error", "error": f"知识请求实体不在当前公开实体列表中：{entity_type}/{entity_id}；允许：{allowlist}"}
-    entity = find_entity(entity_type, entity_id)
-    if entity is None:
-        return {"status": "error", "error": f"知识库中找不到实体：{entity_type}/{entity_id}"}
-    existing = get_experience(entity)
-    try:
-        bridge.send(
-            {
-                "type": "knowledge_experience_request",
-                "entity_type": entity_type,
-                "entity_id": entity.get("id") or entity_id,
-                "entity": public_entity(entity),
-                "existing_experience": existing,
-                "question": question,
-                "state": visible_observation,
-            }
-        )
-    except OSError:
-        return {"status": "skipped", "error": "knowledge UI unavailable"}
-    response = bridge.receive()
-    if not isinstance(response, dict) or response.get("type") != "knowledge_experience_answer":
-        return {"status": "skipped", "error": "invalid knowledge answer"}
-    if response.get("skip") is True:
-        return {"status": "skipped", "error": "human skipped"}
-    human_answer = str(response.get("answer") or "").strip()[:max_answer_chars]
-    if not human_answer:
-        return {"status": "skipped", "error": "empty human answer"}
-
-    revision = 1
-    previous_proposal: list[str] | None = None
-    reviewer_feedback: str | None = None
-    while True:
-        def send_update(update: dict[str, Any]) -> None:
-            try:
-                bridge.send(
-                    {
-                        "type": "knowledge_experience_update",
-                        "entity_type": entity_type,
-                        "entity_id": entity.get("id") or entity_id,
-                        "model_id": teacher.model,
-                        "status": "curating" if revision == 1 else "revising",
-                        "revision": revision,
-                        "teacher": update,
-                    }
-                )
-            except OSError:
-                pass
-
-        try:
-            proposal = curate_experience(
-                teacher.remote,
-                entity_type,
-                entity,
-                question,
-                human_answer,
-                max_entries=max_entries,
-                context=visible_observation,
-                previous_proposal=previous_proposal,
-                reviewer_feedback=reviewer_feedback,
-                revision=revision,
-                on_update=send_update,
-            )
-        except (ExperienceError, TeacherError) as exc:
-            try:
-                bridge.send({"type": "knowledge_experience_update", "status": "error", "error": str(exc), "revision": revision})
-            except OSError:
-                pass
-            return {"status": "error", "error": str(exc)}
-        proposed = proposal["experience"]
-        try:
-            bridge.send(
-                {
-                    "type": "knowledge_experience_review_request",
-                    "entity_type": entity_type,
-                    "entity_id": entity.get("id") or entity_id,
-                    "entity": public_entity(entity),
-                    "question": question,
-                    "human_answer": human_answer,
-                    "previous_experience": existing,
-                    "proposed_experience": proposed,
-                    "previous_proposal": previous_proposal,
-                    "reviewer_feedback": reviewer_feedback,
-                    "revision": revision,
-                    "teacher": proposal.get("teacher", {}),
-                }
-            )
-        except OSError:
-            return {"status": "skipped", "error": "knowledge review UI unavailable"}
-        review = bridge.receive()
-        if not isinstance(review, dict) or review.get("type") != "knowledge_experience_review":
-            return {"status": "skipped", "error": "invalid knowledge review"}
-        verdict = str(review.get("verdict") or "abandon").casefold()
-        if verdict in {"accept", "accepted"}:
-            break
-        if verdict == "reject":
-            previous_proposal = proposed
-            reviewer_feedback = str(review.get("reason") or "").strip() or "用户拒绝上一版候选；请重新审查并改写。"
-            revision += 1
-            continue
-        return {"status": "skipped", "error": str(review.get("reason") or "human abandoned knowledge review")}
-    try:
-        saved = replace_experience(entity_type, entity.get("id") or entity_id, proposed, max_entries=max_entries)
-        append_audit(
-            {
-                "entity_type": entity_type,
-                "entity_id": entity.get("id") or entity_id,
-                "question": question,
-                "human_answer": human_answer,
-                "previous_experience": existing,
-                "accepted_experience": saved,
-                "revision": revision,
-                "teacher": proposal.get("teacher", {}),
-            }
-        )
-    except (ExperienceError, OSError) as exc:
-        return {"status": "error", "error": str(exc)}
-    try:
-        bridge.send(
-            {
-                "type": "knowledge_experience_update",
-                "entity_type": entity_type,
-                "entity_id": entity.get("id") or entity_id,
-                "model_id": teacher.model,
-                "status": "accepted",
-                "experience": saved,
-            }
-        )
-    except OSError:
-        pass
-    return {"status": "accepted", "experience": saved}
 
 
 class TeacherClient:
-    """Remote DeepSeek decision client with optional in-game knowledge assistance.
-
-    The teacher receives short aliases for the controller-provided action set.
-    It cannot send a CommunicationMod command or bypass the local action
-    compiler. A failure produces a human fallback for that one decision. When
-    enabled, a knowledge request is a temporary pause in this same decision
-    flow; it never becomes a separate game mode.
-    """
+    """Remote decision helper constrained to controller-provided actions."""
 
     def __init__(
         self,
@@ -3698,10 +3407,6 @@ class TeacherClient:
         teacher_config = config["teacher"]
         self.remote = RemoteTeacherClient(project_root, teacher_config)
         self.prompt_evolution = prompt_evolution
-        self.knowledge_enabled = bool(config.get("knowledge_experience", {}).get("enabled"))
-        self.knowledge_request_style = str(config.get("knowledge_experience", {}).get("request_style", "encouraged"))
-        self.remote.allow_knowledge_request = self.knowledge_enabled
-        self.remote.knowledge_request_style = self.knowledge_request_style
         self.enabled = self.remote.enabled
         self.model = self.remote.model
         self.thinking = self.remote.thinking
@@ -3793,19 +3498,7 @@ class TeacherClient:
         system_prompt: str | None = None
         prompt_version: str | None = None
         if self.prompt_evolution is not None and self.prompt_evolution.enabled:
-            system_prompt, prompt_version = self.prompt_evolution.system_prompt(
-                observation,
-                allow_knowledge_request=self.knowledge_enabled,
-                knowledge_request_style=self.knowledge_request_style,
-            )
-        elif self.knowledge_enabled:
-            system_prompt = build_system_prompt(
-                observation,
-                persona="player",
-                allow_knowledge_request=True,
-                knowledge_request_style=self.knowledge_request_style,
-            )
-            prompt_version = PLAYER_PROMPT_VERSION
+            system_prompt, prompt_version = self.prompt_evolution.system_prompt(observation)
         try:
             selection = self.remote.select(
                 observation,
@@ -3819,38 +3512,8 @@ class TeacherClient:
             return self._fallback_decision("不可用", str(exc))
         alias = str(selection.get("action_id", ""))
         action = alias_to_action.get(alias)
-        knowledge_request = selection.get("knowledge_request")
-        if action is None and not isinstance(knowledge_request, dict):
-            return self._fallback_decision("动作无效", "教师未返回合法动作或有效知识请求")
         if action is None:
-            teacher_metadata = {
-                "provider": "openai_compatible",
-                "model_id": selection.get("model_id", self.model),
-                "prompt_version": selection.get("prompt_version"),
-                "thinking_enabled": bool(selection.get("thinking_enabled", self.thinking)),
-                "request_id": selection.get("request_id"),
-                "latency_ms": selection.get("latency_ms"),
-                "attempt": selection.get("attempt"),
-                "finish_reason": selection.get("finish_reason"),
-                "truncated": bool(selection.get("truncated")),
-                "output": selection.get("output", ""),
-                "thinking": selection.get("thinking", ""),
-                "usage": selection.get("usage"),
-            }
-            return {
-                "mode": self.mode,
-                "model_id": selection.get("model_id", self.model),
-                "candidate_source": "remote_teacher",
-                "model_action": None,
-                "model_candidates": [],
-                "knowledge_request": knowledge_request,
-                "teacher": teacher_metadata,
-                "assist_status": "需要知识澄清",
-                "assist_reason": "教师请求人类补充实体经验",
-                "executed_action": None,
-                "source": None,
-                "overridden": None,
-            }
+            return self._fallback_decision("动作无效", "教师未返回合法动作")
         teacher_metadata = {
             "provider": "openai_compatible",
             "model_id": selection.get("model_id", self.model),
@@ -3879,7 +3542,6 @@ class TeacherClient:
                 }
             ],
             "teacher": teacher_metadata,
-            "knowledge_request": knowledge_request,
             "executed_action": None,
             "source": None,
             "overridden": None,
@@ -4261,45 +3923,6 @@ def ask_action(
             actions,
             on_update=send_teacher_update,
         )
-        # Make a knowledge request visible before the controller blocks on
-        # the answer dialog.  The dedicated request packet follows below;
-        # this update keeps the action panel from looking frozen during the
-        # human-answer/teacher-curation round trip.
-        if isinstance(decision, dict) and isinstance(decision.get("knowledge_request"), dict):
-            send_teacher_update(decision, lightweight=False)
-        knowledge_results: list[dict[str, Any]] = []
-        for _ in range(3):
-            knowledge_request = decision.get("knowledge_request") if isinstance(decision, dict) else None
-            if not (
-                isinstance(knowledge_request, dict)
-                and config is not None
-                and bool(config.get("knowledge_experience", {}).get("enabled"))
-            ):
-                break
-            knowledge_result = request_knowledge_experience(
-                bridge,
-                teacher,
-                message,
-                knowledge_request,
-                action_history,
-                config,
-            )
-            knowledge_results.append(knowledge_result)
-            # A successful write changes the next prompt immediately. Ask the
-            # same teacher for an action again against the unchanged state.
-            if knowledge_result.get("status") != "accepted":
-                break
-            actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
-            decision = teacher.rank(
-                policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys),
-                actions,
-                on_update=send_teacher_update,
-            )
-        if knowledge_results and isinstance(decision, dict):
-            decision["knowledge_results"] = knowledge_results
-            last_knowledge = knowledge_results[-1]
-            if isinstance(last_knowledge, dict) and last_knowledge.get("status") != "accepted":
-                decision["knowledge_error"] = str(last_knowledge.get("error") or "知识请求未完成")
     elif policy is None:
         decision = None
     elif candidate_assist_allowed(message, policy.screens):
@@ -4445,6 +4068,12 @@ def main() -> int:
     except ConfigError as exc:
         print(f"invalid agent configuration: {exc}", file=sys.stderr, flush=True)
         return 2
+    if config["framework"]["learning_method"] == "collect_human":
+        # Keep CommunicationMod's command stable when switching modes. Human
+        # gameplay requires the passive state/action bridge, not TerminalBridge.
+        from sts_agent.recording.communication_bridge import main as recording_main
+
+        return recording_main()
     raw_dir = project_root / "data" / "raw" / "communication_controller"
     trace_dir = project_root / "data" / "trajectories"
     reflection_dir = project_root / "data" / "reflections"

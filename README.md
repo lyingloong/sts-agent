@@ -4,11 +4,13 @@
 
 ## 当前能力
 
+人类数据流程：先在 ActionRecorder 提取通用轨迹数据集，再用本仓库构建细粒度 SFT。
+完整命令、筛选职责和 prompt 预览说明见 [人类 SFT 数据集](doc/HUMAN_SFT_DATASET.md)。
+
 - 支持原版四角色、A0-A20、随机或指定种子，以及同一游戏进程连续运行多局。
-- 从 CommunicationMod 构建公开状态、合法动作、地图、战斗数值、牌组、历史动作和静态知识。
+- 从 CommunicationMod 构建公开状态、合法动作、地图、战斗数值、牌组和历史动作；卡牌、药水、遗物和 Power 的效果说明优先取 ActionRecorder 扩展后的游戏运行时对象，敌人状态/意图取当前游戏状态。
 - 支持人工控制、Candidate Assist、置信度自动执行、远程教师、Prompt Evolution、固定远端 Qwen 和在线 RL。
 - 每局独立保存轨迹；可导出教师 SFT 数据和带校验和的迁移 bundle。
-- 静态知识快照和人工审核的实体经验位于 `data/knowledge/`，并受 Git 跟踪。
 - 可接收独立 ActionRecorder Mod 的人类游戏动作，并用在线 agent 同一套适配器生成完整训练轨迹。
 - 可通过本地 MCP 将 Codex 接入 controller，以 A0 战士配置单独采集 AI 游玩轨迹。
 
@@ -61,30 +63,33 @@ controller 会在向 MCP 提供决策状态前完成已有的环境自动动作�
 ```
 
 此模式使用 CommunicationMod 启动状态桥；不要再分别启动一个只收 ActionRecorder
-事件的进程。将 CommunicationMod 的 `command` 改为：
+事件的进程。CommunicationMod 的 `command` 使用统一入口（模式切换无需改它）：
 
 ```powershell
-.\.venv\Scripts\pythonw.exe -m sts_agent.recording.communication_bridge --config config/agent.json
+.\.venv\Scripts\pythonw.exe -m sts_agent.runtime.controller --config config/agent.json
 ```
 
 并设置 `runAtGameStart=true`。同时启用 ActionRecorder 和 CommunicationMod。
-CommunicationMod 的稳定状态通过 stdin 进入 bridge，ActionRecorder 只通过
-`recording.listen` 配置的 TCP 端口发送动作事务标记。bridge 会在动作前缓存中
-匹配唯一状态，动作被接受后等待下一个稳定状态；无法确认的动作会标成
-`ambiguous/unmatched`，不会静默生成训练样本。
+CommunicationMod 的状态通过 stdin 进入 bridge；ActionRecorder 0.5 在实际发布处
+编号，同步把完整状态和动作事务保存到本地并通过 `recording.listen` 的 TCP 端口
+发送副本。bridge 按 `before_state_id` 精确匹配，动作接受后等待可决策状态或下一
+动作入口状态，不按时间戳猜测。人类采集保留细粒度入口/选牌/确认动作，未匹配
+或无法唯一映射的动作不会作为可用SFT样本。TCP闲置、重连和终局有独立处理。
 
 完整轨迹写入 `data/trajectories/human/`。每步包含：
 
-- `pre_state`：完整、规范化并注入知识和历史的审计状态；
+- `pre_state`：完整规范化状态与历史（实体效果只取当前游戏状态中的运行时字段）；
 - `policy_observation`：模型实际可见的状态，完整地图仅在地图界面保留；
-- `legal_actions`：与在线 agent 相同的目标展开语义动作列表；
+- `legal_actions`：使用在线 agent 的目标展开规则，但保留人类操作的细粒度锻造/删牌入口，不应用策略导航过滤；
 - `action` 和 `selected_action_id`：映射到上述动作空间的人类动作；
 - `raw_action`：ActionRecorder 捕获的原始游戏内动作；
 - `post_state`：动作后稳定状态。
 
-ActionRecorder 事件格式 0.4 使用 `action_begin`/`action_accepted`/`action_rejected`
-事务。Java Mod 不把自己的缓存状态当作权威 observation；完整状态只来自
-CommunicationMod bridge。旧的不完整轨迹不进入当前采集链路。
+ActionRecorder 事件格式 0.5 使用 `state_published` 与
+`action_begin`/`action_accepted`/`action_rejected` 事务。Java Mod 保存并引用
+CommunicationMod 实际发布的状态，不维护另一份转换器快照。轨迹还保留
+`observation_before/after`、`raw_message_before/after` 和原始 `available_actions`。
+旧的不完整轨迹不进入当前采集链路。
 
 只有 `usable_for_sft=true` 的步骤才同时具备有效状态和可验证的合法动作标签，应进入后续 SFT 数据集。若未同时启用 CommunicationMod，接收器会在终端明确告警并将对应步骤标记为不可训练，而不是静默生成空状态样本。
 
@@ -118,13 +123,12 @@ SFT：
 sts_agent/
   core/          公共 observation/action/policy 契约与模式校验
   runtime/       CommunicationMod controller 和运行协调
-  game/sts1/     StS1 适配器与静态知识补全
+  game/sts1/     StS1 状态与动作适配器
   policy/        本地 Qwen、远程教师和策略 Prompt
   learning/      SFT、Prompt Evolution、反馈归因和在线 RL
   ui/            Overlay 与文本客户端
-  commands/      模型下载、知识刷新和协议探针
+  commands/      模型下载和协议探针
 config/          唯一运行配置及远端 RL 示例
-data/knowledge/  版本化静态知识快照
 prompts/         角色与场景 skill
 requirements/    推理与训练依赖
 tests/           无需启动游戏的单元测试
@@ -142,7 +146,6 @@ doc/             架构、协议和实验说明
 - [策略 Prompt](doc/POLICY_PROMPT.md)
 - [教师 SFT 与 GRPO](doc/TEACHER_SFT_GRPO.md)
 - [Prompt Evolution](doc/PROMPT_EVOLUTION.md)
-- [实体经验知识库](doc/KNOWLEDGE_EXPERIENCE.md)
 
 ## 验证
 
@@ -155,4 +158,6 @@ doc/             架构、协议和实验说明
 
 ## 语义动作接口
 
-策略层使用按场景定义的语义动作，而不是直接学习 Communication Mod 的按钮和下标。例如营火会暴露 `CAMPFIRE:REST` 或 `CAMPFIRE:SMITH:card=<uuid>`，商店会暴露 `SHOP:BUY_CARD:<id>`、`SHOP:PURGE:card=<uuid>`。控制器负责把一个语义动作展开为选择、确认等底层协议步骤，并只将完整流程记为一个训练决策。详细约定见 [`doc/SEMANTIC_ACTIONS.md`](doc/SEMANTIC_ACTIONS.md)。
+策略层默认使用细粒度游戏动作。营火升级和商店删牌按入口、选牌、确认分别决策，
+与人类采集及 SFT 数据保持同一粒度；模型输出当前合法动作编号，由控制器映射为命令。
+历史宏动作代码只在显式请求粗粒度时使用。详细约定见 [`doc/SEMANTIC_ACTIONS.md`](doc/SEMANTIC_ACTIONS.md)。

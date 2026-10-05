@@ -71,7 +71,7 @@
 
 `posthoc-attribution-v3` 对每个 `online_policy_sample` 步骤发送所选 alias/动作标签、该步完整 alias 合法动作表，以及动态公开状态。战斗状态包括手牌的 `id/name/type/cost/upgrades/is_playable` 及控制器计算的 `final_single_hit_damage/final_block`、能量/格挡/Power、敌人血量/格挡/意图/Power 及 `intent_final_damage/intent_final_total_damage`、牌堆计数和最近动作；非战斗状态保留公开的选项、奖励、商店、事件历史和牌组信息。首领档案与遗物造成的决策约束也随动态状态发送；地图图结构每个 Act 只完整发送一次，后续地图步骤通过 `map_id` 引用并保留当前位置和可达节点。
 
-卡牌、药水、遗物和 Power 的 `description`、flavor/effect 等由本地静态知识库补全的字段不会发送。这避免跨步骤重复静态文本，同时不损失归因所需的实时数值与可选动作。默认 `max_input_chars=96000`；达到上限时仍可在本机配置中提高，配置校验允许至 `262144`。
+实体 `description` 只在游戏当前观察实际提供时随公开动态状态发送，不使用本地静态知识库补全；flavor 等非决策字段不发送。描述较长时可能增加教师输入，因此应结合完整轨迹长度检查默认 `max_input_chars=96000`；可在配置上调，校验上限为 `262144`。
 
 ## 数据产物
 

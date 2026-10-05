@@ -135,15 +135,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_revisions_per_cycle": 3,
         "auto_continue": True,
     },
-    "knowledge_experience": {
-        "enabled": False,
-        # Both styles allow an entity question whenever something is unclear;
-        # ``encouraged`` more actively prefers asking over guessing.
-        "request_style": "encouraged",
-        "max_entries_per_entity": 3,
-        "max_question_chars": 2000,
-        "max_answer_chars": 6000,
-    },
     "overlay": {
         "always_on_top": True,
         "frameless": False,
@@ -301,7 +292,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     teacher = config["teacher"]
     posthoc = config["posthoc_feedback"]
     evolution = config["prompt_evolution"]
-    knowledge = config["knowledge_experience"]
     model = policy["model"]
     request = policy["request"]
     local = policy["local"]
@@ -500,16 +490,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError("prompt_evolution.enabled requires policy.enabled=false")
         if posthoc["enabled"]:
             raise ConfigError("prompt_evolution.enabled requires posthoc_feedback.enabled=false")
-
-    _require_bool(knowledge["enabled"], "knowledge_experience.enabled")
-    if not isinstance(knowledge["request_style"], str) or knowledge["request_style"] not in {"encouraged", "normal"}:
-        raise ConfigError("knowledge_experience.request_style must be 'encouraged' or 'normal'")
-    for key, minimum, maximum in (("max_entries_per_entity", 1, 3), ("max_question_chars", 64, 12000), ("max_answer_chars", 128, 24000)):
-        value = knowledge[key]
-        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-            raise ConfigError(f"knowledge_experience.{key} must be an integer from {minimum} to {maximum}")
-    if knowledge["enabled"] and not teacher["enabled"]:
-        raise ConfigError("knowledge_experience.enabled requires teacher.enabled")
 
     _require_bool(overlay["always_on_top"], "overlay.always_on_top")
     _require_bool(overlay["frameless"], "overlay.frameless")

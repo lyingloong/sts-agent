@@ -51,7 +51,9 @@ class TeacherClientTests(unittest.TestCase):
     def test_player_persona_is_used_for_prompt_evolution_actions(self) -> None:
         teacher_prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP"})
         player_prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP"}, persona="player")
-        self.assertIn("远程教师", teacher_prompt)
+        self.assertIn("你正在游玩", teacher_prompt)
+        self.assertNotIn("远程教师", teacher_prompt)
+        self.assertNotIn("已审核的 skill", teacher_prompt)
         self.assertNotIn("远程教师", player_prompt)
         self.assertIn("正在亲自游玩", player_prompt)
         self.assertIn("已审核的 skill", player_prompt)
@@ -107,8 +109,7 @@ class TeacherClientTests(unittest.TestCase):
         self.assertIn("减少本回合及后续几回合可避免掉血", prompt)
         self.assertIn("不是机械地追求每回合零伤害", prompt)
         self.assertIn("把 `END_TURN` 当作最后备选", prompt)
-        self.assertIn("combat.monsters[*].knowledge", prompt)
-        self.assertIn("不代表本回合一定会使用", prompt)
+        self.assertIn("当前合法动作", prompt)
 
     def test_common_prompt_explains_default_turn_and_healing_rules(self) -> None:
         prompt = teacher_prompts.build_system_prompt({"screen_type": "MAP"}, persona="player")
@@ -184,27 +185,6 @@ class TeacherClientTests(unittest.TestCase):
         result = client.select({"screen_type": "MAP"}, [{"id": "A1", "label": "选择"}], temperature=0.0)
         self.assertEqual(result["action_id"], "A1")
         self.assertEqual(captured["temperature"], 0.0)
-
-    def test_disabled_knowledge_request_is_rejected(self) -> None:
-        client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)
-        client.enabled = True
-        client.model = "deepseek-v4-pro"
-        client.max_retries = 0
-        client.temperature = 0.0
-        client.max_tokens = 512
-        client.max_input_chars = 32000
-        client.thinking = False
-        client.json_mode = False
-        client.streaming = False
-        client.request_id = 0
-        client.last_error = None
-        client.allow_knowledge_request = False
-        client._request = lambda payload, callback=None: {
-            "model": "deepseek-v4-pro",
-            "choices": [{"message": {"content": '{"knowledge_request":{"entity_type":"card","entity_id":"X","question":"q"}}'}, "finish_reason": "stop"}],
-        }
-        with self.assertRaises(teacher_client.TeacherError):
-            client.select({"screen_type": "COMBAT"}, [{"id": "A1", "label": "选择"}])
 
     def test_select_extracts_reasoning_content_without_using_it_as_label(self) -> None:
         client = teacher_client.RemoteTeacherClient.__new__(teacher_client.RemoteTeacherClient)

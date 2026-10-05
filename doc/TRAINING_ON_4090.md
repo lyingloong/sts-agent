@@ -19,7 +19,7 @@ action-trace 采集                        数据校验、训练日志和 run ma
 
 | 类别 | 迁移方式 | 原因 |
 | --- | --- | --- |
-| 源码与 `data/knowledge/` | Git | 小、版本化、可审查。 |
+| 源码 | Git | 运行时代码与提示词配置。 |
 | `data/trajectories/` 与导出的 SFT | training bundle | 保留 dataset hash、来源 trace hash 和导出规则。 |
 | `data/raw/` | 默认不迁移 | 仅协议排错，不是训练输入。 |
 | Qwen 基础模型 | 在训练机重新下载 | 不复制 Hugging Face cache、`.venv` 或 `.uv-cache`。 |

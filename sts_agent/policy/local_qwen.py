@@ -54,14 +54,6 @@ def configure_inference_gpu(device: str | int, minimum_free_memory_mib: int) -> 
     return selected
 
 
-def compact_json(value: Any, limit: int = 7000) -> str:
-    """Serialize a value compactly for diagnostics and compatibility."""
-    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "...<truncated>"
-
-
 def action_id(action: dict[str, Any]) -> str:
     return str(action.get("id") or action.get("action_id") or "")
 
@@ -90,7 +82,6 @@ _FIELD_LABELS = {
     "max_hp": "最大生命",
     "gold": "金币",
     "act_boss": "本幕首领",
-    "act_boss_profile": "本幕首领应对原则",
     "relics": "遗物",
     "potions": "药水",
     "deck": "当前牌组",
@@ -124,8 +115,6 @@ _FIELD_LABELS = {
     "block": "格挡",
     "intent": "意图",
     "powers": "状态效果",
-    "knowledge": "知识提示",
-    "strategy": "应对原则",
     "nodes": "节点",
     "current_node": "当前位置",
     "next_nodes": "可到达节点",
@@ -166,7 +155,7 @@ _SCREEN_LABELS = {
 }
 
 _SCENE_GUIDANCE = {
-    "MAP": "这是地图界面。只有这里提供完整地图；比较可见路线、普通战斗/精英/营火/商店/事件的组合，并结合本幕首领和当前牌组选择下一节点。",
+    "MAP": "这是战斗界面。先看我方生命、能量、手牌和敌人意图，优先计算本回合能造成的伤害和格挡；有可用能量和有效动作时不要无故结束回合，必要时合理使用药水，目标是减少掉血而不是机械保留资源。",
     "COMBAT": "这是战斗界面。先看我方生命、能量、手牌和敌人意图，优先计算本回合能造成的伤害和格挡；有可用能量和有效动作时不要无故结束回合，必要时合理使用药水，目标是减少掉血而不是机械保留资源。",
     "CARD_REWARD": "这是卡牌奖励界面。先读取并比较全部可见卡牌，再决定获得或跳过；前期通常需要能解决当前战斗的过渡牌，不要因为稀有度或单张牌面看起来强就忽略牌组协同。",
     "COMBAT_REWARD": "这是战斗奖励界面。先确认可见金币、药水和遗物等奖励是否仍未领取，再处理卡牌奖励；没有明确理由不要跳过尚未领取的资源。",
@@ -178,6 +167,8 @@ _SCENE_GUIDANCE = {
     "HAND_SELECT": "这是从手牌选择的界面。先读清楚触发该选择的牌、遗物或事件及其要求，只选择能完成当前效果的牌，不要把它当作普通卡牌奖励。",
 }
 
+PROMPT_TEMPLATES = ("canonical", "state_first", "decision_first")
+
 
 def _label(key: Any) -> str:
     key_text = str(key)
@@ -186,7 +177,7 @@ def _label(key: Any) -> str:
 
 def _scalar_text(value: Any) -> str:
     if value is None:
-        return "无"
+        return "未知"
     if isinstance(value, bool):
         return "是" if value else "否"
     if isinstance(value, (int, float)):
@@ -195,7 +186,7 @@ def _scalar_text(value: Any) -> str:
 
 
 def _is_empty(value: Any) -> bool:
-    return value is None or value == "" or value == [] or value == {}
+    return value == "" or value == [] or value == {}
 
 
 def _entity_line(value: dict[str, Any], indent: str) -> list[str]:
@@ -205,7 +196,7 @@ def _entity_line(value: dict[str, Any], indent: str) -> list[str]:
     preferred = (
         "name", "id", "type", "color", "rarity", "cost", "upgrades", "count", "price",
         "target", "playable", "is_playable", "can_use", "description", "damage", "block",
-        "final_single_hit_damage", "final_damage", "final_block", "intent", "knowledge",
+        "final_single_hit_damage", "final_damage", "final_block", "intent",
     )
     keys = list(dict.fromkeys([key for key in preferred if key in value] + list(value)))
     for key in keys:
@@ -262,14 +253,21 @@ def _natural_lines(value: Any, indent: str = "", title: str | None = None) -> li
     return lines
 
 
-def render_observation(observation: dict[str, Any], limit: int = 7000) -> str:
+def _prompt_screen(observation: dict[str, Any]) -> str:
+    screen = str(observation.get("screen_type") or "NONE").upper()
+    if screen == "NONE" and observation.get("room_phase") == "COMBAT":
+        return "COMBAT"
+    return screen
+
+
+def render_observation(observation: dict[str, Any]) -> str:
     """Render routed state as concise Chinese prose instead of minified JSON.
 
     ``route_policy_observation`` is the security boundary for map visibility;
     this renderer also skips ``map`` on non-MAP states so callers cannot
     accidentally reintroduce the full route graph into recurring decisions.
     """
-    screen_type = str(observation.get("screen_type") or "NONE").upper()
+    screen_type = _prompt_screen(observation)
     lines: list[str] = [f"【当前场景】{_SCREEN_LABELS.get(screen_type, screen_type)}"]
     global_keys = (
         "room_phase", "action_phase", "room_type", "floor", "act", "class",
@@ -291,14 +289,11 @@ def render_observation(observation: dict[str, Any], limit: int = 7000) -> str:
         labels = {"ruby": "红宝石钥匙", "emerald": "翡翠钥匙", "sapphire": "蓝宝石钥匙"}
         lines.append(
             "【钥匙】" + "；".join(
-                f"{labels[key]}={'已持有' if bool(keys.get(key)) else '未持有'}"
+                f"{labels[key]}={('已持有' if keys.get(key) is True else '未持有' if keys.get(key) is False else '未知')}"
                 for key in key_labels
             )
         )
     consumed.add("keys")
-    if observation.get("act_boss_profile"):
-        lines.extend(_natural_lines(observation["act_boss_profile"], "", "【本幕首领应对原则】"))
-        consumed.add("act_boss_profile")
     for key, title in (("deck", "【当前牌组】"), ("relics", "【遗物】"), ("potions", "【药水】")):
         if observation.get(key):
             lines.extend(_natural_lines(observation[key], "", title))
@@ -321,17 +316,12 @@ def render_observation(observation: dict[str, Any], limit: int = 7000) -> str:
         if key not in consumed and not _is_empty(value):
             lines.extend(_natural_lines(value, "", f"【{_label(key)}】"))
 
-    text = "\n".join(lines)
-    if limit > 0 and len(text) > limit:
-        text = text[:limit] + "\n……（状态较长，后续低优先级字段已省略）"
-    return text
+    return "\n".join(lines)
 
 
 def action_prompt_lines(observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> list[str]:
-    # Route selection needs the full visible graph. Other screens use the
-    # smaller recurring-turn budget.
-    observation_limit = 12000 if str(observation.get("screen_type") or "").upper() == "MAP" else 7000
-    lines = ["【可见游戏状态】", render_observation(observation, limit=observation_limit),
+    # Never slice characters: token budgets must reject/report a full sample.
+    lines = ["【可见游戏状态】", render_observation(observation),
              "【合法动作】"]
     for action in legal_actions:
         lines.append(f"- {action_id(action)}：{action_label(action)}")
@@ -348,7 +338,7 @@ def _policy_prompt_prefix() -> list[str]:
 
 
 def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]], top_k: int) -> str:
-    screen_type = str(observation.get("screen_type") or "NONE").upper()
+    screen_type = _prompt_screen(observation)
     lines = _policy_prompt_prefix() + [
         "只能从合法动作中选择一个。下面的 ID 是程序令牌，必须原样输出。不要输出 JSON、解释、Markdown、命令或其他文字。",
         f"请按优先级返回最多 {top_k} 个动作 ID，第一项是首选。只能输出一个 JSON 对象：{{\"ranked_action_ids\":[\"A1\",\"A2\"]}}。不要输出解释、Markdown 或列表外的 ID。",
@@ -360,18 +350,31 @@ def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]
     return "\n".join(lines)
 
 
-def build_scoring_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]]) -> str:
-    """Build a prompt whose next completion is exactly one action alias."""
-    screen_type = str(observation.get("screen_type") or "NONE").upper()
-    lines = _policy_prompt_prefix() + [
+def build_scoring_prompt(
+    observation: dict[str, Any],
+    legal_actions: list[dict[str, Any]],
+    template: str = "canonical",
+) -> str:
+    """Build one single-action prompt from equivalent deterministic layouts."""
+    screen_type = _prompt_screen(observation)
+    instructions = _policy_prompt_prefix() + [
         "只能从合法动作中选择一个。下面的 ID 是程序令牌，必须原样输出。不要输出 JSON、解释、Markdown、命令或其他文字。",
     ]
+    scene = []
     if screen_type in _SCENE_GUIDANCE:
-        lines.append(f"当前场景提示：{_SCENE_GUIDANCE[screen_type]}")
-    lines.extend(action_prompt_lines(observation, legal_actions))
+        scene.append(f"当前场景提示：{_SCENE_GUIDANCE[screen_type]}")
+    state = action_prompt_lines(observation, legal_actions)
     # Keep the continuation on the next line so aliases such as A1 and A10
     # are scored with an explicit newline boundary rather than prefix matching.
-    lines.append("请输出唯一的动作 ID：")
+    suffix = ["请输出唯一的动作 ID："]
+    layouts = {
+        "canonical": [*instructions, *scene, *state, *suffix],
+        "state_first": [*state, *scene, *instructions, *suffix],
+        "decision_first": [*instructions, *state, *scene, *suffix],
+    }
+    if template not in layouts:
+        raise ValueError(f"unknown prompt template: {template}")
+    lines = layouts[template]
     return "\n".join(lines) + "\n"
 
 

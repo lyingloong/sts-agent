@@ -9,12 +9,12 @@
 | 文本客户端 | `python -m sts_agent.ui.terminal` | `sts-agent-terminal` |
 | 本地 Qwen JSONL 服务 | `python -m sts_agent.policy.local_qwen` | `sts-agent-policy` |
 | 下载基座模型 | `python -m sts_agent.commands.download_model` | `sts-agent-download-model` |
-| 刷新静态知识 | `python -m sts_agent.commands.fetch_knowledge` | `sts-agent-fetch-knowledge` |
 | CommunicationMod 只读探针 | `python -m sts_agent.commands.communication_probe` | 无 |
 | CommunicationMod 状态/动作事务桥 | `python -m sts_agent.recording.communication_bridge --config config/agent.json` | `sts-agent-communication-bridge` |
 | 导出教师 SFT JSONL | `python -m sts_agent.learning.export_teacher_sft` | `sts-agent-export-sft` |
+| 导出 ActionRecorder 人类 SFT | `python -m sts_agent.learning.export_human_sft` | `sts-agent-export-human-sft` |
 | 构建迁移 bundle | `python -m sts_agent.learning.training_bundle` | `sts-agent-bundle` |
 | LoRA SFT | `python -m sts_agent.learning.sft` | `sts-agent-train-sft` |
 | 远端在线 RL worker | `python -m sts_agent.learning.online_rl.worker` | `sts-agent-online-rl` |
 
-`teacher.py`、`prompt_evolution.py`、`posthoc_feedback.py` 和知识模块是库组件，由 controller 或学习流程调用，不是独立命令。不要为调用内部函数重新增加根目录脚本。
+`teacher.py`、`prompt_evolution.py` 和 `posthoc_feedback.py` 是库组件，由 controller 或学习流程调用，不是独立命令。不要为调用内部函数重新增加根目录脚本。

@@ -38,7 +38,7 @@ python -c "from sts_agent.config import load_agent_config; c=load_agent_config()
 
 ## 人类轨迹采集
 
-使用 `active_mode: "collect_human"`。CommunicationMod 启动 `sts_agent.recording.communication_bridge`：它从 CommunicationMod stdin 接收稳定状态，并在 `recording.listen.host` / `recording.listen.port`（默认 `127.0.0.1:8766`）接收 ActionRecorder 的动作事务标记。整理后的轨迹写入 `recording.output_dir`，默认 `data/trajectories/human/`。此模式不启动策略模型或教师模型。
+使用 `active_mode: "collect_human"`。CommunicationMod 的统一入口 `sts_agent.runtime.controller` 会自动转入 `sts_agent.recording.communication_bridge`（也可直接启动后者）：它从 CommunicationMod stdin 和 ActionRecorder TCP 接收同一编号的状态，并在 `recording.listen.host` / `recording.listen.port`（默认 `127.0.0.1:8766`）接收动作事务标记。整理后的轨迹写入 `recording.output_dir`，默认 `data/trajectories/human/`。此模式不启动策略模型或教师模型，不需要打开终端/Overlay 下指令。
 
 ## Codex MCP 采集
 
@@ -46,7 +46,7 @@ python -c "from sts_agent.config import load_agent_config; c=load_agent_config()
 
 ## 教师与 Prompt Evolution
 
-`teacher` 的 API、重试、thinking/streaming、token 上限等提供方设置是共享项。Prompt Evolution 的 skill 长度、轨迹输入上限、改写次数等放在 `modes/prompt_evolution.json`。实体经验开关也属于该模式 profile；静态知识数据由 `data/knowledge/` 管理。
+`teacher` 的 API、重试、thinking/streaming、token 上限等提供方设置是共享项。Prompt Evolution 的 skill 长度、轨迹输入上限、改写次数等放在 `modes/prompt_evolution.json`。游戏实体说明从当前游戏状态读取，不需要知识库路径或经验开关。
 
 ## 在线 RL
 

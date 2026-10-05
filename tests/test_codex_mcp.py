@@ -18,6 +18,7 @@ class CodexMcpTests(unittest.TestCase):
     def test_first_start_creates_configured_output_directory(self) -> None:
         config = load_agent_config()
         config["framework"]["control_mode"] = "codex"
+        config["framework"]["learning_method"] = "collect_codex"
         config["codex"]["output_dir"] = "data/trajectories/new-codex-directory"
         menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False}
         bridge = Mock()

@@ -75,7 +75,7 @@ class PromptEvolutionTests(unittest.TestCase):
                         "floor": 2,
                         "current_hp": 45,
                         "max_hp": 80,
-                        "description": "static text should be removed",
+                        "description": "runtime effect description",
                     },
                     "decision": {"source": "teacher_auto", "model_action": "A2", "model_candidates": [{"rank": 1, "action_id": "A2", "probability": 0.8}]},
                     "terminal": False,
@@ -86,7 +86,7 @@ class PromptEvolutionTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_evolution_ledger_keeps_before_after_dynamics_without_static_prose(self) -> None:
+    def test_evolution_ledger_keeps_before_after_dynamics_and_runtime_descriptions(self) -> None:
         _manager, root = self.make_manager()
         trace = root / "trace.jsonl"
         self.trace(trace)
@@ -97,7 +97,11 @@ class PromptEvolutionTests(unittest.TestCase):
         self.assertEqual(item["command"], "END")
         self.assertEqual(item["state_after"]["current_hp"], 45)
         self.assertEqual(item["decision"]["model_candidates"][0]["probability"], 0.8)
-        self.assertNotIn("description", item["state_after"])
+        self.assertEqual(item["state_after"]["description"], "runtime effect description")
+
+    def test_public_action_retains_runtime_description_and_omits_flavor(self) -> None:
+        action = {"id": "A1", "description": "Deal 6 damage.", "flavor": "cosmetic", "flavor_text": "cosmetic"}
+        self.assertEqual(prompt_evolution._public_action(action), {"id": "A1", "description": "Deal 6 damage."})
 
     def test_evolution_ledger_deduplicates_adjacent_identical_states(self) -> None:
         manager, root = self.make_manager()

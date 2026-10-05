@@ -20,7 +20,7 @@ Prompt 演化运行时，每次实际动作请求的 system prompt 按以下顺�
 
 1. **玩家身份与通用决策规则**：声明模型正在亲自游玩，要求提高整局胜率、只使用公开信息、服从当前合法动作表和 `decision_constraints`，并以严格 JSON 返回一个 `action_id`。
 2. **角色专属基础 skill**：从 `prompts/characters/<角色>/base.md` 读取当前角色的力量/毒/充能球/姿态等构筑原则。角色库彼此隔离。
-3. **场景 skill**：根据 `screen_type`、`room_phase` 和 `selection_context` 选择一个场景块，例如 `MAP`、`COMBAT`、`CARD_REWARD`、`GRID_PURGE`、`SHOP_SCREEN` 或 `EVENT`。战斗块还说明实时敌人信息和静态 `combat.monsters[*].knowledge` 的区别。
+3. **场景 skill**：根据 `screen_type`、`room_phase` 和 `selection_context` 选择一个场景块，例如 `MAP`、`COMBAT`、`CARD_REWARD`、`GRID_PURGE`、`SHOP_SCREEN` 或 `EVENT`。敌人及其他实体描述只使用当前游戏状态中提供的运行时字段；缺失时保持未知，不从离线知识库补全。
 4. **版本化 skill**：从当前角色 `manifest.json` 指向的策略版本中读取 `role_skill` 和当前场景的 `scene_skills`。它们就是实际参与决策的角色/场景 skill，不再存在额外的“策略补充”层；它们不能覆盖合法动作表或虚构状态。当前版本标识为 `sts-prompt-evolution-v2`。
 
 system prompt 之后的 user prompt 另行包含压缩后的公开 observation 和本步完整合法动作别名表 `A1/A2/...`。动作模型只从该别名表中选择一个动作；动作结果不会把教师思考或候选生成器内容写入训练数据。

@@ -36,31 +36,8 @@ _COMMON_RULES = """目标是提高整局通关概率，而不是只追求当前�
 
 你可以进行内部推理，但最终只能返回一个 JSON 对象，格式严格为 {\"action_id\":\"A<n>\"}。其中 A<n> 必须来自当前合法动作列表；不要输出解释、Markdown、命令或其他动作 ID。"""
 
-KNOWLEDGE_REQUEST_RULES = {
-    "encouraged": """只要对当前公开实体的机制、交互、风险或策略含义有不明白、不确定之处，就可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"白名单中的稳定实体 ID\",\"question\":\"一个具体问题\"}}。这是被鼓励使用的工具：面对实体相关疑问时，优先提问而不是靠猜测继续；不需要先证明自己已经无法可靠决策。只能请求用户消息中“知识请求白名单”列出的当前公开实体，并原样使用其中的 entity_id；不要使用事件选项、选项标签或自由填写的名称作为 entity_id。问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
-    "normal": """如果对当前公开实体的机制、交互、风险或策略含义有不明白之处，可以暂不选择动作，改为返回一次知识请求：{\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"白名单中的稳定实体 ID\",\"question\":\"一个具体问题\"}}。优先使用当前状态、静态资料和已有 experience；仍有不明白之处时可以提问，不需要先证明自己已经无法可靠决策。只能请求用户消息中“知识请求白名单”列出的当前公开实体，并原样使用其中的 entity_id；不要使用事件选项、选项标签或自由填写的名称作为 entity_id。问题必须能由人类经验回答；不要把泛泛的整局策略当作实体问题，也不要在同一响应中同时返回 action_id 和 knowledge_request。""",
-}
-
-KNOWLEDGE_RESPONSE_CONTRACT = """【最终输出协议（优先级最高）】
-知识请求已启用。最终只能返回一个 JSON 对象，且只能二选一：
-1. 已能作出判断时，返回 {\"action_id\":\"A<n>\"}，其中 A<n> 必须来自当前合法动作列表；
-2. 对当前公开实体有值得澄清的机制、交互、风险或策略问题时，返回 {\"knowledge_request\":{\"entity_type\":\"card|relic|potion|monster|event|power\",\"entity_id\":\"白名单中的稳定实体 ID\",\"question\":\"一个具体问题\"}}，此时不要返回 action_id。entity_type 和 entity_id 必须来自用户消息中的知识请求白名单；不要使用事件选项、选项标签或自由填写的名称。
-
-不要输出解释、Markdown 或两个对象。上文任何“必须选择当前合法动作”或“只能返回 action_id”的要求，只适用于不发起知识请求时；当你选择提问时，本协议优先。"""
-
-
-def knowledge_request_rule(style: Any = "encouraged") -> str:
-    """Return the configured in-game entity-question policy.
-
-    Config validation accepts only the two documented styles. The fallback is
-    deliberately the default encouraged policy so direct utility callers do
-    not silently disable a configured knowledge capability.
-    """
-
-    return KNOWLEDGE_REQUEST_RULES.get(str(style or "").strip().casefold(), KNOWLEDGE_REQUEST_RULES["encouraged"])
-
 COMMON_PROMPT = (
-    "你是《杀戮尖塔 1》的远程教师，负责为模仿学习轨迹选择一个动作。\n"
+    "你正在游玩《杀戮尖塔 1》，根据当前公开状态和合法动作做出选择。\n"
     + _COMMON_RULES
 )
 PLAYER_COMMON_PROMPT = (
@@ -80,8 +57,7 @@ SCENARIO_PROMPTS: dict[str, str] = {
 只能从当前可达的合法节点中选择，不要把未展示的事件结果当作确定事实。""",
     "COMBAT": """【战斗决策】
 先根据控制器提供的最终伤害字段识别本回合最危险的敌方意图：比较每个敌人的单段/总伤害、攻击段数、格挡和状态，判断不处理时的总损失；优先避免死亡和不可接受的生命损失。若某个敌人被击杀后能立即消除主要威胁，击杀价值通常高于分散伤害。
-- `combat.monsters[*].knowledge` 是静态怪物参考，包含类型、生命区间和可能招式；它用于理解敌人的典型机制，不代表本回合一定会使用某个招式。当前实时 `intent`、`intent_damage`、`intent_hits`、HP、格挡和 Powers 以 observation 中的游戏状态为准；如果持有符文圆顶导致实时意图隐藏，不要用静态招式猜测当前意图。
-- 控制器已经根据当前力量/虚弱/敏捷/脆弱/无实体等公开 Power 计算数值：手牌中的 `final_single_hit_damage` 是攻击牌经过玩家力量与虚弱后的单段伤害，`final_block` 是经过敏捷与脆弱后的本次获得格挡；多段牌不要把单段字段误当成总伤害。敌人的 `intent_final_damage` 是预计每段对玩家造成的伤害，`intent_final_total_damage` 已乘以 `intent_hits`。优先使用这些字段，不要再次手算；目标的易伤、格挡等目标相关因素仍需结合敌人状态判断。
+- 手牌和敌人的意图数值若由游戏直接提供，应直接使用；不要对已经应用力量、虚弱、敏捷、脆弱等效果的运行时数值重复计算。多段牌需区分单段和总伤害；状态没有提供准确数值时，再结合描述与当前状态判断。
 - 比较所有出牌、用药水和结束回合动作，而不是只看单张牌的面板伤害。
 - 先处理会影响后续回合的易伤/虚弱/力量/格挡等效果，再决定攻击、格挡、抽牌、成长和出牌顺序；以当前 observation 的牌面描述为准。
 - 评估能量、当前手牌、敌人数量、目标选择和结束回合后的状态。把 `END_TURN` 当作最后备选：当前仍有能量且存在可支付、具有非负价值的出牌或用药水动作时，先逐一比较这些动作；不要因为推理简化、只关注单张牌或想保留能量而直接结束回合。只有已完成有意的回合规划、没有值得支付的动作，或结束回合有明确更高价值时，才结束回合。
@@ -233,8 +209,6 @@ def build_system_prompt(
     persona: str = "teacher",
     role_skill: str | None = None,
     scene_skill: str | None = None,
-    allow_knowledge_request: bool = False,
-    knowledge_request_style: str = "encouraged",
 ) -> str:
     """Return the Chinese action prompt, optionally using versioned skills.
 
@@ -253,10 +227,4 @@ def build_system_prompt(
     scenario_prompt = SCENARIO_PROMPTS[key] if scene_skill is None else str(scene_skill or "").strip()
     if scenario_prompt:
         parts.append(scenario_prompt)
-    if allow_knowledge_request:
-        # Keep the alternative response protocol after every scene skill. Some
-        # skills correctly insist on a legal action in the normal path; this
-        # final contract makes clear that a knowledge request is the exception.
-        parts.append(knowledge_request_rule(knowledge_request_style))
-        parts.append(KNOWLEDGE_RESPONSE_CONTRACT)
     return "\n\n".join(parts)

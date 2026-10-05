@@ -20,18 +20,12 @@ from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError, compact_
 PROMPT_VERSION = "posthoc-attribution-v3"
 SCHEMA_VERSION = "sts-posthoc-attribution-0.1"
 
-# Observations have already been normalized to public game data before this
-# module receives them. These fields are nevertheless derived from the local
-# static knowledge bases rather than from the changing run state, so they add
-# a large amount of repeated prompt text without helping post-hoc attribution.
-POSTHOC_STATIC_FIELDS = frozenset(
+# Descriptions now come from the live game objects and are useful when
+# reviewing an irreversible card/item choice. Only cosmetic flavor is omitted.
+POSTHOC_NON_DECISION_FIELDS = frozenset(
     {
-        "description",
-        "raw_description",
         "flavor",
         "flavor_text",
-        "effect",
-        "effects",
     }
 )
 POSTHOC_LIST_LIMITS = {
@@ -85,7 +79,7 @@ def _posthoc_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any
         return {
             item_key: _posthoc_value(item, key=item_key, depth=depth + 1)
             for item_key, item in value.items()
-            if item_key not in POSTHOC_STATIC_FIELDS and item not in (None, [], {})
+            if item_key not in POSTHOC_NON_DECISION_FIELDS and item not in (None, [], {})
         }
     return compact_text(value, 200)
 
@@ -251,7 +245,7 @@ def build_prompt(
         f"{direction_source}"
         "只定位日志中已经执行的模型动作，不要自行编造动作、奖励或隐藏状态。"
         "每个步骤都给出了所选动作、当时全部合法动作和该步动态公开状态；"
-        "state 中不包含静态知识库的卡牌、遗物、药水或能力描述。"
+        "状态中的实体描述来自游戏当前公开信息；只根据当时记录的状态和合法动作判断，不补充未显示的机制。"
         "请分别找出值得强化和应当弱化的关键动作；同一步不得同时出现在两类。"
         "将一次战斗、地图选择、商店/奖励、事件或不可逆选牌分别评估；"
         "对战斗动作优先核对当回合能量、敌方可见意图、血量/格挡、手牌与结束回合后的风险；"

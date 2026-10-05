@@ -26,13 +26,6 @@ except ImportError as exc:  # pragma: no cover - Windows Python includes Tk by d
     raise SystemExit(f"Tkinter is required for the overlay client: {exc}") from exc
 
 from sts_agent.config import ConfigError, load_agent_config
-from sts_agent.game.sts1.experience import (
-    ExperienceError,
-    list_all_entities,
-    normalize_entity_key,
-    public_entity,
-    replace_experience,
-)
 from sts_agent.learning.prompt_evolution import skill_text_segments
 from sts_agent.paths import PROJECT_ROOT
 
@@ -517,18 +510,6 @@ def teacher_panel_text(decision: dict[str, Any] | None) -> str:
         lines.extend(("", "警告：模型输出达到上限，思考或最终动作可能被截断。"))
     if decision.get("assist_reason") and not decision.get("model_candidates"):
         lines.extend(("", f"回退原因：{decision.get('assist_reason')}"))
-    if decision.get("knowledge_error"):
-        lines.extend(
-            (
-                "",
-                "知识请求未通过校验",
-                str(decision.get("knowledge_error")),
-                "已交回人工选择；模型只能请求当前公开实体列表中的稳定 ID。",
-            )
-        )
-    request = decision.get("knowledge_request") if isinstance(decision, dict) else None
-    if isinstance(request, dict):
-        lines.extend(("", "知识请求", f"{request.get('entity_type', '?')} / {request.get('entity_id', '?')}", str(request.get("question") or "")))
     return "\n".join(lines)
 
 
@@ -549,8 +530,6 @@ class OverlayTerminal:
         self.actions: queue.Queue[str] = queue.Queue()
         self.reflection_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self.prompt_evolution_responses: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.knowledge_answer_responses: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.knowledge_review_responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self._prompt_evolution_warning_signature: str | None = None
         self.network_thread: threading.Thread | None = None
         self.closing = False
@@ -559,22 +538,6 @@ class OverlayTerminal:
         self._topmost_after: str | None = None
         self.reflection_dialog: tk.Toplevel | None = None
         self.attribution_dialog: tk.Toplevel | None = None
-        self.knowledge_answer_dialog: tk.Toplevel | None = None
-        self.knowledge_review_dialog: tk.Toplevel | None = None
-        self.knowledge_editor: tk.Toplevel | None = None
-        self.knowledge_editor_all_entities: list[tuple[str, dict[str, Any]]] = []
-        self.knowledge_editor_entities: list[tuple[str, dict[str, Any]]] = []
-        self.knowledge_editor_index = 0
-        self.knowledge_editor_original: list[str] = []
-        self.knowledge_editor_fields: list[tk.Text] = []
-        self.knowledge_editor_status: tk.StringVar | None = None
-        self.knowledge_editor_kind: tk.StringVar | None = None
-        self.knowledge_editor_color: tk.StringVar | None = None
-        self.knowledge_editor_search: tk.Entry | None = None
-        self.knowledge_editor_jump: tk.Entry | None = None
-        self.knowledge_editor_color_menu: tk.OptionMenu | None = None
-        self.knowledge_editor_filter_state: tuple[str, str, str] = ("全部", "全部", "")
-        self.knowledge_editor_color_labels: dict[str, str] = {}
 
         self.root = tk.Tk()
         self.root.title("StS Agent - State")
@@ -1055,9 +1018,6 @@ class OverlayTerminal:
             button.grid(row=1, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
             self.quick_buttons.append(button)
         quick.grid_columnconfigure(3, weight=1)
-        self._button(quick, "知识库", self.open_knowledge_editor, compact=True).grid(
-            row=1, column=3, sticky="ew", padx=(5, 0)
-        )
         resize_bar = tk.Frame(outer, background=BACKGROUND, height=16)
         resize_bar.grid(row=5, column=0, sticky="nsew")
         resize_bar.grid_columnconfigure(0, weight=1)
@@ -1293,17 +1253,6 @@ class OverlayTerminal:
             self.teacher_text.insert("end", "\n\n警告：模型输出达到上限，思考或最终动作可能被截断。", "teacher_warning")
         if decision.get("assist_reason") and not decision.get("model_candidates"):
             self.teacher_text.insert("end", f"\n\n回退原因：{decision.get('assist_reason')}", "teacher_warning")
-        if decision.get("knowledge_error"):
-            self.teacher_text.insert("end", "\n\n知识请求未通过校验", "teacher_section")
-            self.teacher_text.insert(
-                "end",
-                f"\n{decision.get('knowledge_error')}\n已交回人工选择；模型只能请求当前公开实体列表中的稳定 ID。",
-                "teacher_warning",
-            )
-        request = decision.get("knowledge_request")
-        if isinstance(request, dict):
-            self.teacher_text.insert("end", "\n\n知识请求", "teacher_section")
-            self.teacher_text.insert("end", f"\n{request.get('entity_type', '?')} / {request.get('entity_id', '?')}\n{request.get('question', '')}", "teacher_body")
         # Streaming updates replace the whole read-only widget. Keep the
         # viewport on the newest reasoning instead of jumping back to line 1.
         self.teacher_text.see("end")
@@ -1877,546 +1826,6 @@ class OverlayTerminal:
         text.configure(yscrollcommand=scrollbar.set)
         dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_attribution_dialog(dialog))
 
-    def _show_knowledge_answer_dialog(self, packet: dict[str, Any]) -> None:
-        """Collect one human explanation for a public static entity."""
-        if self.closing:
-            self.knowledge_answer_responses.put({"type": "knowledge_experience_answer", "skip": True})
-            return
-        if self.knowledge_answer_dialog is not None and self.knowledge_answer_dialog.winfo_exists():
-            return
-        dialog = tk.Toplevel(self.root)
-        self.knowledge_answer_dialog = dialog
-        dialog.title("StS Agent - Knowledge Experience")
-        dialog.geometry("680x560+560+120")
-        dialog.minsize(520, 420)
-        dialog.configure(background=BACKGROUND)
-        dialog.attributes("-topmost", self.always_on_top)
-        dialog.grab_set()
-        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
-        outer.grid(sticky="nsew")
-        dialog.grid_rowconfigure(0, weight=1)
-        dialog.grid_columnconfigure(0, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(3, weight=1)
-        entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
-        title = f"KNOWLEDGE EXPERIENCE · {entity.get('name') or packet.get('entity_id', '?')}"
-        header = tk.Frame(outer, background=BACKGROUND)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        header.grid_columnconfigure(0, weight=1)
-        tk.Label(header, text=title, foreground=ACCENT, background=BACKGROUND, font=(self.ui_font, 11, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(outer, text=f"类型：{packet.get('entity_type', '?')}\n教师问题：{packet.get('question', '')}", foreground=MUTED, background=BACKGROUND, justify="left", anchor="w", font=(self.data_font, 9)).grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        existing = packet.get("existing_experience") if isinstance(packet.get("existing_experience"), list) else []
-        tk.Label(outer, text="已有经验：" + ("\n" + "\n".join(f"{i}. {v}" for i, v in enumerate(existing, 1)) if existing else "（空）"), foreground=TEXT, background=BACKGROUND, justify="left", anchor="w", font=(self.data_font, 9)).grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        answer = tk.Text(outer, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 10))
-        answer.grid(row=3, column=0, sticky="nsew")
-        tk.Label(outer, text="输入针对该实体和场景的具体经验；留空跳过。", foreground=MUTED, background=BACKGROUND, anchor="w", font=(self.data_font, 9)).grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        buttons = tk.Frame(outer, background=BACKGROUND)
-        buttons.grid(row=5, column=0, sticky="e", pady=(10, 0))
-
-        def finish(skip: bool) -> None:
-            if self.knowledge_answer_dialog is not dialog:
-                return
-            value = "" if skip else answer.get("1.0", "end-1c").strip()
-            response = {"type": "knowledge_experience_answer", "skip": skip or not value, "answer": value}
-            try:
-                dialog.grab_release()
-                dialog.destroy()
-            except tk.TclError:
-                pass
-            self.knowledge_answer_dialog = None
-            self.knowledge_answer_responses.put(response)
-
-        self._button(buttons, "跳过", lambda: finish(True), compact=True).grid(row=0, column=0, padx=(0, 8))
-        submit = self._button(buttons, "提交回答", lambda: finish(False), compact=True)
-        submit.configure(background=ACCENT, foreground="#10221f", activebackground="#61ddc2", activeforeground="#10221f", font=(self.ui_font, 9, "bold"))
-        submit.grid(row=0, column=1)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(True))
-        answer.focus_set()
-        dialog.lift()
-
-    def _show_knowledge_review_dialog(self, packet: dict[str, Any]) -> None:
-        """Show the complete replacement list before writing the JSON snapshot."""
-        if self.closing:
-            self.knowledge_review_responses.put({"type": "knowledge_experience_review", "verdict": "abandon"})
-            return
-        if self.knowledge_review_dialog is not None and self.knowledge_review_dialog.winfo_exists():
-            return
-        dialog = tk.Toplevel(self.root)
-        self.knowledge_review_dialog = dialog
-        dialog.title("StS Agent - Review Experience")
-        dialog.geometry("620x460+600+160")
-        dialog.minsize(480, 340)
-        dialog.configure(background=BACKGROUND)
-        dialog.attributes("-topmost", self.always_on_top)
-        dialog.grab_set()
-        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
-        outer.grid(sticky="nsew")
-        dialog.grid_rowconfigure(0, weight=1)
-        dialog.grid_columnconfigure(0, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=1)
-        entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
-        revision = max(1, int(packet.get("revision") or 1))
-        tk.Label(outer, text=f"REVIEW EXPERIENCE · {entity.get('name') or packet.get('entity_id', '?')} · 第 {revision} 版", foreground=ACCENT, background=BACKGROUND, font=(self.ui_font, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        body = tk.Text(outer, wrap="word", state="normal", background=FIELD, foreground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 10))
-        body.grid(row=1, column=0, sticky="nsew")
-        previous = packet.get("previous_experience") or []
-        proposed = packet.get("proposed_experience") or []
-        feedback = str(packet.get("reviewer_feedback") or "").strip()
-        body.insert("end", "原有列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(previous, 1)) or "  （空）"))
-        if feedback:
-            body.insert("end", "\n\n上一轮审核意见：\n  " + feedback)
-        body.insert("end", "\n\n教师整理后的完整列表：\n" + ("\n".join(f"  {i}. {v}" for i, v in enumerate(proposed, 1)) or "  （空）"))
-        body.configure(state="disabled")
-        reason = tk.Text(outer, height=3, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=9, pady=6, font=(self.data_font, 9))
-        reason.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        buttons = tk.Frame(outer, background=BACKGROUND)
-        buttons.grid(row=3, column=0, sticky="e", pady=(10, 0))
-
-        def finish(verdict: str) -> None:
-            if self.knowledge_review_dialog is not dialog:
-                return
-            response = {"type": "knowledge_experience_review", "verdict": verdict, "reason": reason.get("1.0", "end-1c").strip()}
-            if verdict == "reject" and not response["reason"]:
-                messagebox.showwarning("需要拒绝理由", "拒绝并重写时请说明需要修改的内容。", parent=dialog)
-                return
-            try:
-                dialog.grab_release()
-                dialog.destroy()
-            except tk.TclError:
-                pass
-            self.knowledge_review_dialog = None
-            self.knowledge_review_responses.put(response)
-
-        self._button(buttons, "放弃", lambda: finish("abandon"), compact=True).grid(row=0, column=0, padx=(0, 8))
-        reject = self._button(buttons, "拒绝并重写", lambda: finish("reject"), compact=True)
-        reject.configure(background="#6b4b2d", activebackground="#8a623c")
-        reject.grid(row=0, column=1, padx=(0, 8))
-        accept = self._button(buttons, "接受并写入", lambda: finish("accept"), compact=True)
-        accept.configure(background=ACCENT, foreground="#10221f", activebackground="#61ddc2", activeforeground="#10221f", font=(self.ui_font, 9, "bold"))
-        accept.grid(row=0, column=2)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: finish("abandon"))
-        dialog.lift()
-
-    def open_knowledge_editor(self) -> None:
-        """Open a local editor for experience fields in tracked knowledge JSON."""
-        if self.knowledge_editor is not None and self.knowledge_editor.winfo_exists():
-            self.knowledge_editor.deiconify()
-            self.knowledge_editor.lift()
-            return
-        try:
-            entities = list_all_entities()
-        except ExperienceError as exc:
-            messagebox.showerror("知识库读取失败", str(exc), parent=self.control)
-            return
-        if not entities:
-            messagebox.showinfo("知识库", "当前没有可编辑实体。", parent=self.control)
-            return
-        self.knowledge_editor_all_entities = entities
-        self.knowledge_editor_entities = list(entities)
-        self.knowledge_editor_index = 0
-        dialog = tk.Toplevel(self.root)
-        self.knowledge_editor = dialog
-        dialog.title("StS Agent - Knowledge Base Experience")
-        dialog.geometry("1120x700+380+80")
-        dialog.minsize(820, 520)
-        dialog.configure(background=BACKGROUND)
-        dialog.attributes("-topmost", self.always_on_top)
-        dialog.grid_rowconfigure(0, weight=1)
-        dialog.grid_columnconfigure(0, weight=1)
-        outer = tk.Frame(dialog, background=BACKGROUND, padx=14, pady=14)
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.grid_rowconfigure(3, weight=1)
-        outer.grid_columnconfigure(0, weight=1)
-
-        header = tk.Frame(outer, background=BACKGROUND)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        header.grid_columnconfigure(0, weight=1)
-        self.knowledge_editor_title = tk.Label(
-            header,
-            text="知识库经验编辑器",
-            foreground=ACCENT,
-            background=BACKGROUND,
-            font=(self.ui_font, 12, "bold"),
-            anchor="w",
-        )
-        self.knowledge_editor_title.grid(row=0, column=0, sticky="w")
-        self._minimize_button(header, dialog, background=BACKGROUND).grid(row=0, column=1, sticky="e")
-
-        self.knowledge_editor_meta = tk.Label(
-            outer,
-            text="",
-            foreground=MUTED,
-            background=BACKGROUND,
-            font=(self.data_font, 9),
-            anchor="w",
-            justify="left",
-        )
-        self.knowledge_editor_meta.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-
-        filters = tk.Frame(outer, background=BACKGROUND)
-        filters.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        filters.grid_columnconfigure(5, weight=1)
-        filters.grid_columnconfigure(9, weight=1)
-        tk.Label(filters, text="类型", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
-            row=0, column=0, sticky="w", padx=(0, 4)
-        )
-        self.knowledge_editor_kind = tk.StringVar(value="全部")
-        kind_menu = tk.OptionMenu(
-            filters,
-            self.knowledge_editor_kind,
-            "全部",
-            "卡牌",
-            "遗物",
-            "药水",
-            "怪物",
-            "事件",
-            "Power",
-            command=lambda _value: self._knowledge_editor_filters_changed(),
-        )
-        self._style_knowledge_editor_menu(kind_menu)
-        kind_menu.grid(row=0, column=1, sticky="ew", padx=(0, 10))
-
-        tk.Label(filters, text="卡牌颜色", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
-            row=0, column=2, sticky="w", padx=(0, 4)
-        )
-        self.knowledge_editor_color = tk.StringVar(value="全部")
-        color_options = self._knowledge_editor_color_options()
-        color_menu = tk.OptionMenu(
-            filters,
-            self.knowledge_editor_color,
-            *color_options,
-            command=lambda _value: self._knowledge_editor_filters_changed(),
-        )
-        self.knowledge_editor_color_menu = color_menu
-        self._style_knowledge_editor_menu(color_menu)
-        color_menu.grid(row=0, column=3, sticky="ew", padx=(0, 10))
-
-        tk.Label(filters, text="搜索", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
-            row=0, column=4, sticky="w", padx=(0, 4)
-        )
-        self.knowledge_editor_search = tk.Entry(
-            filters,
-            background=FIELD,
-            foreground=TEXT,
-            insertbackground=TEXT,
-            relief="flat",
-            font=(self.data_font, 9),
-        )
-        self.knowledge_editor_search.grid(row=0, column=5, sticky="ew", padx=(0, 6), ipady=4)
-        self.knowledge_editor_search.bind("<Return>", lambda _event: self._knowledge_editor_apply_filters())
-        self._button(filters, "筛选", self._knowledge_editor_apply_filters, compact=True).grid(row=0, column=6, padx=(0, 8))
-        self._button(filters, "重置", self._knowledge_editor_reset_filters, compact=True).grid(row=0, column=7, padx=(0, 12))
-
-        tk.Label(filters, text="跳转", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold")).grid(
-            row=0, column=8, sticky="e", padx=(0, 4)
-        )
-        self.knowledge_editor_jump = tk.Entry(
-            filters,
-            width=16,
-            background=FIELD,
-            foreground=TEXT,
-            insertbackground=TEXT,
-            relief="flat",
-            font=(self.data_font, 9),
-        )
-        self.knowledge_editor_jump.grid(row=0, column=9, sticky="ew", padx=(0, 6), ipady=4)
-        self.knowledge_editor_jump.bind("<Return>", lambda _event: self._knowledge_editor_jump_to())
-        self._button(filters, "跳转", self._knowledge_editor_jump_to, compact=True).grid(row=0, column=10)
-
-        content = tk.Frame(outer, background=BACKGROUND)
-        content.grid(row=3, column=0, sticky="nsew")
-        content.grid_rowconfigure(0, weight=1)
-        content.grid_columnconfigure(0, weight=1)
-        content.grid_columnconfigure(1, weight=1)
-
-        static_frame = tk.Frame(content, background=FIELD, highlightbackground="#4c5053", highlightthickness=1)
-        static_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        static_frame.grid_rowconfigure(1, weight=1)
-        static_frame.grid_columnconfigure(0, weight=1)
-        tk.Label(static_frame, text="静态资料（只读）", foreground=WARNING, background=FIELD, font=(self.ui_font, 10, "bold"), anchor="w", padx=9, pady=7).grid(row=0, column=0, sticky="ew")
-        self.knowledge_editor_static = tk.Text(static_frame, wrap="word", state="disabled", background=FIELD, foreground=TEXT, relief="flat", borderwidth=0, padx=9, pady=8, font=(self.data_font, 9))
-        self.knowledge_editor_static.grid(row=1, column=0, sticky="nsew")
-        static_scroll = tk.Scrollbar(static_frame, command=self.knowledge_editor_static.yview, relief="flat", borderwidth=0, background=BUTTON, troughcolor=FIELD)
-        static_scroll.grid(row=1, column=1, sticky="ns")
-        self.knowledge_editor_static.configure(yscrollcommand=static_scroll.set)
-
-        experience_frame = tk.Frame(content, background=BACKGROUND)
-        experience_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        experience_frame.grid_rowconfigure(1, weight=1)
-        experience_frame.grid_columnconfigure(0, weight=1)
-        tk.Label(experience_frame, text="经验（最多三条，直接写入原静态 JSON）", foreground=WARNING, background=BACKGROUND, font=(self.ui_font, 10, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 7))
-        fields_frame = tk.Frame(experience_frame, background=BACKGROUND)
-        fields_frame.grid(row=1, column=0, sticky="nsew")
-        fields_frame.grid_columnconfigure(0, weight=1)
-        for index in range(3):
-            fields_frame.grid_rowconfigure(index, weight=1)
-            field_box = tk.Frame(fields_frame, background=BACKGROUND)
-            field_box.grid(row=index, column=0, sticky="nsew", pady=(0 if index == 0 else 8, 0))
-            field_box.grid_rowconfigure(1, weight=1)
-            field_box.grid_columnconfigure(0, weight=1)
-            tk.Label(field_box, text=f"经验 {index + 1}", foreground=MUTED, background=BACKGROUND, font=(self.ui_font, 9, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
-            text = tk.Text(field_box, height=4, wrap="word", background=FIELD, foreground=TEXT, insertbackground=TEXT, relief="flat", borderwidth=0, padx=8, pady=7, font=(self.data_font, 9))
-            text.grid(row=1, column=0, sticky="nsew")
-            self.knowledge_editor_fields.append(text)
-
-        self.knowledge_editor_status = tk.StringVar(value="")
-        tk.Label(outer, textvariable=self.knowledge_editor_status, foreground=MUTED, background=BACKGROUND, font=(self.data_font, 9), anchor="w").grid(row=4, column=0, sticky="ew", pady=(9, 0))
-        buttons = tk.Frame(outer, background=BACKGROUND)
-        buttons.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        buttons.grid_columnconfigure(2, weight=1)
-        self.knowledge_editor_previous = self._button(buttons, "上一个", lambda: self._knowledge_editor_navigate(-1), compact=True)
-        self.knowledge_editor_previous.grid(row=0, column=0, padx=(0, 7))
-        self.knowledge_editor_next = self._button(buttons, "下一个", lambda: self._knowledge_editor_navigate(1), compact=True)
-        self.knowledge_editor_next.grid(row=0, column=1, padx=(0, 7))
-        self._button(buttons, "保存经验", self._save_knowledge_editor, compact=True).grid(row=0, column=3, padx=(7, 0))
-        self._button(buttons, "关闭", lambda: self._close_knowledge_editor(dialog), compact=True).grid(row=0, column=4, padx=(7, 0))
-        dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_knowledge_editor(dialog))
-        self._render_knowledge_editor()
-        dialog.lift()
-
-    def _style_knowledge_editor_menu(self, menu: tk.OptionMenu) -> None:
-        menu.configure(
-            background=BUTTON,
-            foreground=TEXT,
-            activebackground=BUTTON_ACTIVE,
-            activeforeground=TEXT,
-            highlightthickness=0,
-            relief="flat",
-            borderwidth=0,
-            font=(self.data_font, 9),
-        )
-        try:
-            menu["menu"].configure(
-                background=FIELD,
-                foreground=TEXT,
-                activebackground=BUTTON_ACTIVE,
-                activeforeground=TEXT,
-                font=(self.data_font, 9),
-            )
-        except tk.TclError:
-            pass
-
-    def _knowledge_editor_color_options(self) -> list[str]:
-        labels = {
-            "ironclad": "铁甲战士",
-            "silent": "静默猎手",
-            "defect": "故障机器人",
-            "watcher": "观者",
-            "colorless": "无色",
-            "curse": "诅咒",
-        }
-        values = {
-            str(entity.get("color")).strip().casefold()
-            for kind, entity in self.knowledge_editor_all_entities
-            if kind == "card" and entity.get("color")
-        }
-        self.knowledge_editor_color_labels = {"全部": ""}
-        options = ["全部"]
-        for value in sorted(values):
-            label = labels.get(value, value)
-            if label in self.knowledge_editor_color_labels:
-                label = value
-            self.knowledge_editor_color_labels[label] = value
-            options.append(label)
-        return options
-
-    @staticmethod
-    def _knowledge_editor_kind_value(label: str) -> str:
-        return {
-            "全部": "",
-            "卡牌": "card",
-            "遗物": "relic",
-            "药水": "potion",
-            "怪物": "monster",
-            "事件": "event",
-            "Power": "power",
-        }.get(label, "")
-
-    def _knowledge_editor_confirm_unsaved(self) -> bool:
-        if not self._knowledge_editor_is_dirty():
-            return True
-        choice = messagebox.askyesnocancel(
-            "未保存的经验",
-            "当前实体有未保存修改，是否先保存？",
-            parent=self.knowledge_editor,
-        )
-        if choice is None:
-            return False
-        return not choice or self._save_knowledge_editor()
-
-    def _knowledge_editor_apply_filters(self) -> None:
-        if not self.knowledge_editor_all_entities or not self._knowledge_editor_confirm_unsaved():
-            return
-        kind_label = self.knowledge_editor_kind.get() if self.knowledge_editor_kind is not None else "全部"
-        color_label = self.knowledge_editor_color.get() if self.knowledge_editor_color is not None else "全部"
-        kind = self._knowledge_editor_kind_value(kind_label)
-        color = self.knowledge_editor_color_labels.get(color_label, "")
-        query = self.knowledge_editor_search.get().strip().casefold() if self.knowledge_editor_search is not None else ""
-        filtered: list[tuple[str, dict[str, Any]]] = []
-        for entity_kind, entity in self.knowledge_editor_all_entities:
-            if kind and entity_kind != kind:
-                continue
-            if color and (entity_kind != "card" or str(entity.get("color") or "").casefold() != color):
-                continue
-            if query:
-                searchable = " ".join(
-                    str(entity.get(field) or "")
-                    for field in ("id", "name", "description")
-                ).casefold()
-                if query not in searchable:
-                    continue
-            filtered.append((entity_kind, entity))
-        self.knowledge_editor_entities = filtered
-        self.knowledge_editor_index = 0
-        self.knowledge_editor_filter_state = (kind_label, color_label, query)
-        self._render_knowledge_editor()
-
-    def _knowledge_editor_filters_changed(self) -> None:
-        kind_label = self.knowledge_editor_kind.get() if self.knowledge_editor_kind is not None else "全部"
-        if kind_label not in {"全部", "卡牌"} and self.knowledge_editor_color is not None:
-            self.knowledge_editor_color.set("全部")
-        self._knowledge_editor_apply_filters()
-
-    def _knowledge_editor_reset_filters(self) -> None:
-        if self.knowledge_editor_kind is not None:
-            self.knowledge_editor_kind.set("全部")
-        if self.knowledge_editor_color is not None:
-            self.knowledge_editor_color.set("全部")
-        if self.knowledge_editor_search is not None:
-            self.knowledge_editor_search.delete(0, "end")
-        self._knowledge_editor_apply_filters()
-
-    def _knowledge_editor_jump_to(self) -> None:
-        if not self.knowledge_editor_entities or not self._knowledge_editor_confirm_unsaved():
-            return
-        query = self.knowledge_editor_jump.get().strip() if self.knowledge_editor_jump is not None else ""
-        if not query:
-            if self.knowledge_editor_status is not None:
-                self.knowledge_editor_status.set("请输入筛选结果中的序号，或实体 ID/名称。")
-            return
-        target: int | None = None
-        if query.isdigit():
-            candidate = int(query) - 1
-            if 0 <= candidate < len(self.knowledge_editor_entities):
-                target = candidate
-        if target is None:
-            normalized_query = normalize_entity_key(query)
-            query_fold = query.casefold()
-            exact: list[int] = []
-            partial: list[int] = []
-            for index, (_kind, entity) in enumerate(self.knowledge_editor_entities):
-                values = [str(entity.get("id") or ""), str(entity.get("name") or "")]
-                normalized_values = [normalize_entity_key(value) for value in values]
-                folded_values = [value.casefold() for value in values]
-                if normalized_query and normalized_query in normalized_values or query_fold in folded_values:
-                    exact.append(index)
-                elif query_fold and any(query_fold in value for value in folded_values):
-                    partial.append(index)
-            matches = exact or partial
-            if matches:
-                target = matches[0]
-        if target is None:
-            if self.knowledge_editor_status is not None:
-                self.knowledge_editor_status.set(f"未找到“{query}”；当前筛选结果 {len(self.knowledge_editor_entities)} 个。")
-            return
-        self.knowledge_editor_index = target
-        self._render_knowledge_editor()
-
-    def _knowledge_editor_values(self) -> list[str]:
-        return [field.get("1.0", "end-1c").strip() for field in self.knowledge_editor_fields]
-
-    def _knowledge_editor_is_dirty(self) -> bool:
-        return self._knowledge_editor_values() != self.knowledge_editor_original
-
-    def _render_knowledge_editor(self) -> None:
-        if not self.knowledge_editor_fields:
-            return
-        if not self.knowledge_editor_entities:
-            self.knowledge_editor_title.configure(text="知识库经验编辑器 · 无匹配实体")
-            self.knowledge_editor_meta.configure(text="当前筛选没有结果，请调整类型、颜色或搜索条件。")
-            self.knowledge_editor_static.configure(state="normal")
-            self.knowledge_editor_static.delete("1.0", "end")
-            self.knowledge_editor_static.insert("1.0", "（无匹配实体）")
-            self.knowledge_editor_static.configure(state="disabled")
-            self.knowledge_editor_original = ["", "", ""]
-            for field in self.knowledge_editor_fields:
-                field.delete("1.0", "end")
-            self.knowledge_editor_previous.configure(state="disabled")
-            self.knowledge_editor_next.configure(state="disabled")
-            if self.knowledge_editor_status is not None:
-                self.knowledge_editor_status.set("筛选结果为 0 个实体。")
-            return
-        kind, entity = self.knowledge_editor_entities[self.knowledge_editor_index]
-        experience = entity.get("experience") if isinstance(entity.get("experience"), list) else []
-        self.knowledge_editor_original = [str(value) for value in experience[:3]] + [""] * (3 - len(experience[:3]))
-        self.knowledge_editor_title.configure(text=f"知识库经验编辑器 · {kind} / {entity.get('name') or entity.get('id') or '?'}")
-        self.knowledge_editor_meta.configure(text=f"实体 ID：{entity.get('id', '?')}    |    {self.knowledge_editor_index + 1} / {len(self.knowledge_editor_entities)}")
-        self.knowledge_editor_status.set("经验保存到 data/knowledge/sts1_*.json；当前实体未修改。")
-        self.knowledge_editor_static.configure(state="normal")
-        self.knowledge_editor_static.delete("1.0", "end")
-        self.knowledge_editor_static.insert("1.0", json.dumps(public_entity(entity), ensure_ascii=False, indent=2))
-        self.knowledge_editor_static.configure(state="disabled")
-        for field, value in zip(self.knowledge_editor_fields, self.knowledge_editor_original):
-            field.delete("1.0", "end")
-            field.insert("1.0", value)
-        self.knowledge_editor_previous.configure(state="normal" if self.knowledge_editor_index > 0 else "disabled")
-        self.knowledge_editor_next.configure(state="normal" if self.knowledge_editor_index + 1 < len(self.knowledge_editor_entities) else "disabled")
-
-    def _save_knowledge_editor(self) -> bool:
-        if not self.knowledge_editor_entities:
-            return False
-        kind, entity = self.knowledge_editor_entities[self.knowledge_editor_index]
-        values = [value for value in self._knowledge_editor_values() if value]
-        try:
-            saved = replace_experience(kind, str(entity.get("id") or ""), values, max_entries=3)
-        except (ExperienceError, OSError) as exc:
-            messagebox.showerror("经验保存失败", str(exc), parent=self.knowledge_editor)
-            return False
-        if saved:
-            entity["experience"] = saved
-        else:
-            entity.pop("experience", None)
-        self.knowledge_editor_original = saved + [""] * (3 - len(saved))
-        self.knowledge_editor_status.set(f"已保存 {kind} / {entity.get('id')} 的 {len(saved)} 条经验。")
-        return True
-
-    def _knowledge_editor_navigate(self, delta: int) -> None:
-        if not self.knowledge_editor_entities:
-            return
-        if self._knowledge_editor_is_dirty():
-            choice = messagebox.askyesnocancel("未保存的经验", "当前实体有未保存修改，是否先保存？", parent=self.knowledge_editor)
-            if choice is None:
-                return
-            if choice and not self._save_knowledge_editor():
-                return
-        target = self.knowledge_editor_index + delta
-        if 0 <= target < len(self.knowledge_editor_entities):
-            self.knowledge_editor_index = target
-            self._render_knowledge_editor()
-
-    def _close_knowledge_editor(self, dialog: tk.Toplevel) -> None:
-        if self.knowledge_editor is not dialog:
-            return
-        if self._knowledge_editor_is_dirty():
-            choice = messagebox.askyesnocancel("未保存的经验", "当前实体有未保存修改，是否先保存？", parent=dialog)
-            if choice is None:
-                return
-            if choice and not self._save_knowledge_editor():
-                return
-        try:
-            dialog.destroy()
-        except tk.TclError:
-            pass
-        self.knowledge_editor = None
-        self.knowledge_editor_all_entities = []
-        self.knowledge_editor_entities = []
-        self.knowledge_editor_fields = []
-        self.knowledge_editor_kind = None
-        self.knowledge_editor_color = None
-        self.knowledge_editor_search = None
-        self.knowledge_editor_jump = None
-        self.knowledge_editor_color_menu = None
 
     def _show_prompt_evolution_review(self, packet: dict[str, Any]) -> None:
         """Show either the pre-validation candidate gate or result gate."""
@@ -2623,26 +2032,6 @@ class OverlayTerminal:
                             response = self.prompt_evolution_responses.get()
                             writer.write(json.dumps(response, ensure_ascii=False) + "\n")
                             writer.flush()
-                        elif packet_type == "knowledge_experience_request":
-                            self._post_ui(self._show_knowledge_answer_dialog, packet)
-                            response = self.knowledge_answer_responses.get()
-                            writer.write(json.dumps(response, ensure_ascii=False) + "\n")
-                            writer.flush()
-                        elif packet_type == "knowledge_experience_update":
-                            status = packet.get("status")
-                            if status == "curating":
-                                self._post_ui(self._set_connection, "DeepSeek 正在整理实体经验", WARNING)
-                            elif status == "revising":
-                                self._post_ui(self._set_connection, f"DeepSeek 正在根据审核意见重写第 {packet.get('revision', '?')} 版经验", WARNING)
-                            elif status == "accepted":
-                                self._post_ui(self._set_connection, "实体经验已审核并写入知识库", ACCENT)
-                            elif status == "error":
-                                self._post_ui(self._set_connection, "实体经验整理失败", ERROR)
-                        elif packet_type == "knowledge_experience_review_request":
-                            self._post_ui(self._show_knowledge_review_dialog, packet)
-                            response = self.knowledge_review_responses.get()
-                            writer.write(json.dumps(response, ensure_ascii=False) + "\n")
-                            writer.flush()
                         elif packet_type == "shutdown":
                             self._post_ui(self._set_connection, str(packet.get("message", "controller 已停止")), ERROR)
                             break
@@ -2731,8 +2120,6 @@ class OverlayTerminal:
         self._save_layout()
         self.reflection_responses.put({"type": "posthoc_reflection", "skip": True})
         self.prompt_evolution_responses.put({"type": "prompt_evolution_review", "verdict": "abandon"})
-        self.knowledge_answer_responses.put({"type": "knowledge_experience_answer", "skip": True})
-        self.knowledge_review_responses.put({"type": "knowledge_experience_review", "verdict": "abandon"})
         self.actions.put("q")
         if self.reflection_dialog is not None:
             try:
@@ -2746,14 +2133,6 @@ class OverlayTerminal:
             except tk.TclError:
                 pass
             self.attribution_dialog = None
-        for attribute in ("knowledge_answer_dialog", "knowledge_review_dialog", "knowledge_editor"):
-            dialog = getattr(self, attribute)
-            if dialog is not None:
-                try:
-                    dialog.destroy()
-                except tk.TclError:
-                    pass
-                setattr(self, attribute, None)
         try:
             self.control.destroy()
         except tk.TclError:

@@ -203,50 +203,6 @@ def read_prompt_evolution_review(packet: dict) -> dict:
     return {"type": "prompt_evolution_review", "verdict": verdict, "reason": reason}
 
 
-def read_knowledge_experience_answer(packet: dict, use_color: bool) -> dict:
-    entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
-    print("\n知识经验请求")
-    print(f"实体：{entity.get('name') or packet.get('entity_id')} ({packet.get('entity_type', '?')})")
-    existing = packet.get("existing_experience")
-    if isinstance(existing, list) and existing:
-        print("已有经验：")
-        for index, value in enumerate(existing, 1):
-            print(f"  {index}. {value}")
-    print(f"教师问题：{packet.get('question', '')}")
-    try:
-        answer = input("人类回答（留空跳过）> ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return {"type": "knowledge_experience_answer", "skip": True}
-    return {"type": "knowledge_experience_answer", "skip": not answer, "answer": answer}
-
-
-def read_knowledge_experience_review(packet: dict) -> dict:
-    entity = packet.get("entity") if isinstance(packet.get("entity"), dict) else {}
-    print("\n知识经验候选审核")
-    print(f"实体：{entity.get('name') or packet.get('entity_id')} ({packet.get('entity_type', '?')})")
-    revision = max(1, int(packet.get("revision") or 1))
-    print(f"候选完整列表（第 {revision} 版）：")
-    previous_feedback = str(packet.get("reviewer_feedback") or "").strip()
-    if previous_feedback:
-        print(f"上一轮审核意见：{previous_feedback}")
-    for index, value in enumerate(packet.get("proposed_experience") or [], 1):
-        print(f"  {index}. {value}")
-    try:
-        verdict = input("审核 accept / reject / abandon> ").strip().lower()
-        reason = input("理由（将交给模型重写）> ").strip() if verdict in {"reject", "r"} else ""
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return {"type": "knowledge_experience_review", "verdict": "abandon"}
-    if verdict in {"accept", "a", "yes", "y"}:
-        verdict = "accept"
-    elif verdict in {"reject", "r", "no", "n"}:
-        verdict = "reject"
-    else:
-        verdict = "abandon"
-    return {"type": "knowledge_experience_review", "verdict": verdict, "reason": reason}
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Terminal UI for the StS CommunicationMod controller")
     parser.add_argument("--config", default="config/agent.json", help="项目根目录下的配置文件路径")
@@ -309,24 +265,6 @@ def main() -> int:
                 print_posthoc_attribution(packet)
             elif packet_type == "prompt_evolution_review_request":
                 response = read_prompt_evolution_review(packet)
-                writer.write(json.dumps(response, ensure_ascii=False) + "\n")
-                writer.flush()
-            elif packet_type == "knowledge_experience_request":
-                response = read_knowledge_experience_answer(packet, use_color)
-                writer.write(json.dumps(response, ensure_ascii=False) + "\n")
-                writer.flush()
-            elif packet_type == "knowledge_experience_update":
-                status = packet.get("status", "")
-                if status == "curating":
-                    print("DeepSeek 正在整理实体经验...", flush=True)
-                elif status == "revising":
-                    print(f"DeepSeek 正在根据审核意见重写第 {packet.get('revision', '?')} 版经验...", flush=True)
-                elif status == "accepted":
-                    print("知识经验已写入静态知识库：", packet.get("experience", []), flush=True)
-                elif status == "error":
-                    print(f"知识经验整理失败：{packet.get('error', '')}", flush=True)
-            elif packet_type == "knowledge_experience_review_request":
-                response = read_knowledge_experience_review(packet)
                 writer.write(json.dumps(response, ensure_ascii=False) + "\n")
                 writer.flush()
             elif packet_type == "shutdown":

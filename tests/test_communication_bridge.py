@@ -8,8 +8,11 @@ from pathlib import Path
 from sts_agent.recording.communication_bridge import CommunicationBridgeRecorder
 
 
-def state(screen: str, *, floor: int = 1, room_phase: str = "COMPLETE") -> dict:
+def state(screen: str, *, floor: int = 1, room_phase: str = "COMPLETE", seq: int = 1) -> dict:
     return {
+        "recorder_state_id": f"java:state-{seq}",
+        "recorder_state_seq": seq,
+        "recorder_session": "java",
         "in_game": True,
         "ready_for_command": True,
         "available_commands": ["choose", "wait"],
@@ -31,7 +34,7 @@ class CommunicationBridgeTests(unittest.TestCase):
     def test_transaction_uses_state_before_marker_and_waits_for_after(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)
-            recorder = CommunicationBridgeRecorder(tmp_path, match_window_ms=2000)
+            recorder = CommunicationBridgeRecorder(tmp_path)
             recorder.start()
             try:
                 recorder.ingest_state(state("SHOP_ROOM"))
@@ -39,13 +42,13 @@ class CommunicationBridgeTests(unittest.TestCase):
                     {"type": "run_started", "run_id": "run-1", "character": "IRONCLAD", "ascension": 0, "seed": "ABC123"}
                 )
                 recorder.ingest_marker(
-                    {"type": "action_begin", "run_id": "run-1", "transaction_id": "tx-1", "expected_screen": "SHOP_ROOM"}
+                    {"type": "action_begin", "run_id": "run-1", "transaction_id": "tx-1", "expected_screen": "SHOP_ROOM", "before_state_id": "java:state-1"}
                 )
                 recorder.ingest_marker(
                     {"type": "action_accepted", "run_id": "run-1", "transaction_id": "tx-1", "action": {"id": "OPEN:SHOP", "kind": "shop_opened"}}
                 )
                 self.assertIn("tx-1", recorder.transactions)
-                recorder.ingest_state(state("SHOP_SCREEN", room_phase="INCOMPLETE"))
+                recorder.ingest_state(state("SHOP_SCREEN", room_phase="INCOMPLETE", seq=2))
                 self.assertNotIn("tx-1", recorder.transactions)
             finally:
                 recorder.close()

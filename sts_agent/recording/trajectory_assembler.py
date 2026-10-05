@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -52,6 +53,10 @@ def _choice_keywords(action: dict[str, Any]) -> tuple[str, ...]:
         "reward_gold_claimed": ("gold", "金币"),
         "reward_relic_claimed": ("relic", "遗物"),
         "reward_potion_claimed": ("potion", "药水"),
+        "reward_sapphire_key_claimed": ("sapphire", "蓝宝石", "蓝钥匙"),
+        "reward_emerald_key_claimed": ("emerald", "翡翠", "绿钥匙"),
+        "shop_purge_opened": ("purge", "删牌", "移除"),
+        "singing_bowl_chosen": ("bowl", "颂钵", "碗"),
     }
     if kind in fixed:
         return fixed[kind]
@@ -78,10 +83,36 @@ def resolve_recorded_action(
     action_id = str(recorded.get("id") or "")
     exact = next((item for item in legal_actions if str(item.get("id") or "") == action_id), None)
     if exact is not None:
+        # A positional PLAY/CHOOSE ID is insufficient if the hand/order moved.
+        card_uuid = recorded.get("card_uuid")
+        if card_uuid and action_id.startswith("PLAY:"):
+            combat = state.get("combat_state", {}) if isinstance(state, dict) else {}
+            hand = combat.get("hand", [])
+            index = int(exact.get("card_index", 0)) - 1
+            if not (0 <= index < len(hand) and str(hand[index].get("uuid")) == str(card_uuid)):
+                return copy.deepcopy(recorded), False, "card_identity_mismatch"
         return copy.deepcopy(exact), True, "exact_id"
 
     state = state if isinstance(state, dict) else {}
     screen_state = state.get("screen_state") if isinstance(state.get("screen_state"), dict) else {}
+    # Parent reward choices have generic labels (e.g. 'potion'). Match the
+    # actual structured reward, never a held potion's use/discard label.
+    reward_type = recorded.get("reward_type")
+    rewards = screen_state.get("rewards")
+    if reward_type and state.get("screen_type") == "COMBAT_REWARD" and isinstance(rewards, list):
+        matches = []
+        for index, reward in enumerate(rewards):
+            if not isinstance(reward, dict) or reward.get("reward_type") != reward_type:
+                continue
+            entity_type = {"POTION": "potion", "RELIC": "relic"}.get(reward_type)
+            if entity_type and recorded.get(f"{entity_type}_id"):
+                entity = reward.get(entity_type) or {}
+                if entity.get("id") != recorded[f"{entity_type}_id"]:
+                    continue
+            matches.extend(item for item in legal_actions if item.get("id") == f"CHOOSE:index={index}")
+        if len(matches) == 1:
+            return copy.deepcopy(matches[0]), True, "reward_entry"
+        return copy.deepcopy(recorded), False, "ambiguous_or_missing_reward"
     if str(recorded.get("kind") or "") == "map_node_selected":
         nodes = screen_state.get("next_nodes")
         if isinstance(nodes, list):
@@ -113,6 +144,8 @@ def resolve_recorded_action(
             }
 
         changed = card_ids(selected_before) ^ card_ids(selected_after)
+        if recorded.get("card_uuid"):
+            changed = {str(recorded["card_uuid"])}
         if len(changed) == 1 and isinstance(cards, list):
             changed_id = next(iter(changed))
             index = next(
@@ -135,6 +168,8 @@ def resolve_recorded_action(
         "PROCEED": ("PROCEED", "CONFIRM"),
         "RETURN": ("RETURN", "CANCEL"),
         "LEAVE": ("LEAVE", "RETURN", "CANCEL"),
+        "SELECT_CARDS:CONFIRM": ("CONFIRM", "PROCEED"),
+        "SELECT_CARDS:HAND_CONFIRM": ("CONFIRM", "PROCEED"),
     }.get(action_id, ())
     compatible = [item for item in legal_actions if str(item.get("id") or "") in compatible_ids]
     if len(compatible) == 1:
@@ -146,7 +181,7 @@ def resolve_recorded_action(
     needles = {_token(recorded.get(name)) for name in fields if _token(recorded.get(name))}
     if needles:
         matches = [
-            item for item in legal_actions
+            item for item in legal_actions if item.get("kind") in {"choose", "shop_buy_card", "shop_buy_potion", "shop_buy_relic"}
             if any(needle in _token(item.get("label")) for needle in needles)
         ]
         if len(matches) == 1:
@@ -156,17 +191,11 @@ def resolve_recorded_action(
     if keywords:
         matches = [
             item for item in legal_actions
+            if item.get("kind") == "choose"
             if any(keyword and keyword in _token(item.get("label")) for keyword in keywords)
         ]
         if len(matches) == 1:
             return copy.deepcopy(matches[0]), True, "choice_label"
-
-    choices = [item for item in legal_actions if str(item.get("kind") or "") == "choose"]
-    if len(choices) == 1 and (
-        str(recorded.get("kind") or "").startswith(("reward_", "shop_"))
-        or recorded.get("kind") in {"card_reward_opened", "chest_opened", "campfire_action"}
-    ):
-        return copy.deepcopy(choices[0]), True, "only_choice"
 
     unresolved = copy.deepcopy(recorded)
     unresolved.setdefault("label", recorded.get("kind") or action_id)
@@ -181,6 +210,7 @@ class RunContext:
     declined_card_reward_keys: set[tuple[int, int]] = field(default_factory=set)
     action_history: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, dict[str, Any]] = field(default_factory=dict)
+    selection_steps: list[dict[str, Any]] = field(default_factory=list)
     output: TextIO | None = None
     output_path: Path | None = None
 
@@ -194,6 +224,7 @@ class ActionRecorderEnricher:
 
     def close(self) -> None:
         for context in self.runs.values():
+            self._flush_selection(context, cancelled=True)
             if context.output is not None:
                 context.output.flush()
                 context.output.close()
@@ -216,8 +247,16 @@ class ActionRecorderEnricher:
             return None
         if event_type == "step_resolved":
             return self._finish_step(context, event)
-        if event_type == "run_ended":
-            self._flush_unresolved(context, str(event.get("reason") or "run_ended"))
+        if event_type in {"run_finished", "run_ended"}:
+            if event_type == "run_ended":
+                self._flush_unresolved(context, str(event.get("reason") or "run_ended"))
+            self._flush_selection(context, cancelled=True)
+            self._open_output(context)
+            self._write(context, {"type": event_type, "schema_version": "0.5", "run_id": run_id,
+                                  "run_config": copy.deepcopy(context.metadata),
+                                  "reason": event.get("reason"), "terminal": event.get("terminal"),
+                                  "context": copy.deepcopy(event.get("context")),
+                                  "timestamp_ms": event.get("timestamp_ms")})
         return None
 
     def _open_output(self, context: RunContext) -> None:
@@ -228,6 +267,22 @@ class ActionRecorderEnricher:
         seed = str(context.metadata.get("seed") or "unknown").replace("/", "_").replace("\\", "_")
         path = self.output_dir / f"human-{character}-A{ascension}-seed-{seed}-{context.run_id}.jsonl"
         context.output_path = path
+        if path.exists():
+            # Save-and-resume keeps the same run file and its recent history,
+            # even when CommunicationMod restarts the Python process.
+            with path.open(encoding="utf-8") as existing:
+                for line in existing:
+                    try:
+                        previous = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not previous.get("accepted") or not isinstance(previous.get("action"), dict):
+                        continue
+                    post = previous.get("raw_message_after")
+                    if not isinstance(post, dict):
+                        post = _message(previous.get("observation_after"))
+                    context.action_history.append(accepted_action_history_item(previous, post))
+                    del context.action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
         context.output = path.open("a", encoding="utf-8")
 
     def _start_step(self, context: RunContext, event: dict[str, Any]) -> None:
@@ -240,8 +295,10 @@ class ActionRecorderEnricher:
                 f"warning: run {context.run_id} has no CommunicationMod state; "
                 "steps will be marked unusable_for_sft",
                 flush=True,
+                file=sys.stderr,
             )
-        message = _message(raw_observation, event.get("available_actions"))
+        message = (copy.deepcopy(event["raw_message"]) if isinstance(event.get("raw_message"), dict)
+                   else _message(raw_observation, event.get("available_actions")))
         state = game_state(message)
         if str(state.get("screen_type") or "").upper() == "SHOP_SCREEN":
             key = shop_visit_key(message)
@@ -255,27 +312,75 @@ class ActionRecorderEnricher:
             context.action_history,
             context.declined_card_reward_keys,
         )
-        legal_actions = semantic_actions(
-            message, context.visited_shop_rooms, context.declined_card_reward_keys
-        )
+        legal_actions = semantic_actions(message, fine_grained=True, include_recorded_choices=True)
         recorded = event.get("chosen_action") if isinstance(event.get("chosen_action"), dict) else {}
         action, is_legal, resolution = resolve_recorded_action(recorded, legal_actions, state)
+        execution_message = event.get("execution_raw_message")
+        execution_match = event.get("execution_state_match") or {}
+        tracked = bool(event.get("execution_tracking"))
+        training_message = execution_message if tracked and isinstance(execution_message, dict) else message
+        training_state = normalize_state(training_message)
+        attach_runtime_context(training_state, context.visited_shop_rooms, context.action_history,
+                               context.declined_card_reward_keys)
+        training_legal = semantic_actions(training_message, fine_grained=True, include_recorded_choices=True)
+        execution_action = event.get("execution_action") or {}
+        training_recorded = execution_action if tracked else recorded
+        training_action, training_is_legal, training_resolution = resolve_recorded_action(
+            training_recorded, training_legal, game_state(training_message))
+        exact_pre = (isinstance(event.get("state_match"), dict)
+                     and event["state_match"].get("match_status") == "exact_state_id")
+        usable = state_available and is_legal and bool(legal_actions) and exact_pre
+        exclusion = None
+        if tracked:
+            execution_state = game_state(execution_message) if isinstance(execution_message, dict) else {}
+            same_identity = (execution_action.get("kind") == recorded.get("kind")
+                             and (recorded.get("kind") != "play_card"
+                                  or execution_action.get("card_uuid") == recorded.get("card_uuid")))
+            same_context = all(state.get(key) == execution_state.get(key) for key in ("act", "floor"))
+            usable = bool(exact_pre and event.get("execution_status") == "executed"
+                          and execution_match.get("match_status") == "exact_state_id"
+                          and execution_match.get("logical_boundary") is True
+                          and same_identity and same_context and training_is_legal)
+            if not usable:
+                exclusion = ("execution_not_performed" if event.get("execution_status") in {"cancelled", "skipped"}
+                             else "missing_or_invalid_execution_state")
+        elif state.get("screen_type") == "NONE" and state.get("action_phase") == "EXECUTING_ACTIONS":
+            usable = False
+            exclusion = "combat_submission_during_execution_without_execution_state"
         step_id = str(event.get("step_id") or "")
         context.pending[step_id] = {
-            "schema_version": "0.4",
+            "schema_version": "0.5",
             "source": "communicationmod_action_recorder_bridge",
             "run_id": context.run_id,
             "run_config": copy.deepcopy(context.metadata),
             "step_id": step_id,
             "screen_type": full_state.get("screen_type"),
             "pre_state": full_state,
+            "observation_before": copy.deepcopy(raw_observation),
+            "available_actions": copy.deepcopy(event.get("available_actions")),
+            "raw_message_before": copy.deepcopy(message),
             "policy_observation": route_policy_observation(copy.deepcopy(full_state)),
             "legal_actions": legal_actions,
             "action": action,
             "raw_action": copy.deepcopy(recorded),
             "selected_action_id": action.get("id"),
             "chosen_action_legal": is_legal,
-            "usable_for_sft": state_available and is_legal and bool(legal_actions),
+            "usable_for_sft": usable,
+            "training_exclusion_reason": exclusion,
+            "execution_tracking": tracked,
+            "execution_status": event.get("execution_status") if tracked else "not_tracked",
+            "execution_observation_before": copy.deepcopy(game_state(execution_message))
+            if isinstance(execution_message, dict) else None,
+            "execution_raw_message_before": copy.deepcopy(execution_message),
+            "execution_state_match": copy.deepcopy(event.get("execution_state_match")),
+            "execution_action": copy.deepcopy(event.get("execution_action")),
+            "training_observation_source": "execution" if tracked else "submission",
+            "training_pre_state": training_state if (not tracked or isinstance(execution_message, dict)) else None,
+            "training_policy_observation": route_policy_observation(copy.deepcopy(training_state))
+            if (not tracked or isinstance(execution_message, dict)) else None,
+            "training_legal_actions": training_legal if (not tracked or isinstance(execution_message, dict)) else [],
+            "training_action": training_action if (not tracked or isinstance(execution_message, dict)) else None,
+            "training_action_resolution": training_resolution,
             "action_resolution": resolution,
             "command": action.get("command"),
             "pre_message": message,
@@ -289,7 +394,8 @@ class ActionRecorderEnricher:
         pending = context.pending.pop(step_id, None)
         if pending is None:
             return None
-        post_message = _message(event.get("observation_after"))
+        post_message = (copy.deepcopy(event["raw_message"]) if isinstance(event.get("raw_message"), dict)
+                        else _message(event.get("observation_after")))
         post_state = None
         if post_message["in_game"]:
             if str(game_state(post_message).get("screen_type") or "").upper() == "SHOP_SCREEN":
@@ -302,8 +408,15 @@ class ActionRecorderEnricher:
         record.update(
             {
                 "post_state": post_state,
+                "observation_after": copy.deepcopy(event.get("observation_after")),
+                "raw_message_after": copy.deepcopy(event.get("raw_message")),
                 "accepted": True,
-                "stable_after_action": event.get("resolution") in {"stable_state", "next_decision"},
+                "stable_after_action": (event.get("observation_after") is not None
+                                        and event.get("effect_complete", True)
+                                        and event.get("decision_ready_after",
+                                            post_message.get("ready_for_command", False)
+                                            and not (game_state(post_message).get("screen_type") == "NONE"
+                                                     and game_state(post_message).get("action_phase") == "EXECUTING_ACTIONS"))),
                 "resolution": event.get("resolution"),
                 "resolved_at_ms": event.get("timestamp_ms"),
             }
@@ -323,7 +436,10 @@ class ActionRecorderEnricher:
             remember_declined_combat_card_reward(
                 history_pending, post_message, context.declined_card_reward_keys
             )
-            context.action_history.append(accepted_action_history_item(history_pending, post_message))
+            history_item = accepted_action_history_item(history_pending, post_message)
+            if record.get("execution_tracking"):
+                history_item["execution_status"] = record.get("execution_status")
+            context.action_history.append(history_item)
             del context.action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
             attach_runtime_context(
                 record["post_state"],
@@ -331,15 +447,45 @@ class ActionRecorderEnricher:
                 context.action_history,
                 context.declined_card_reward_keys,
             )
-        self._write(context, record)
+        self._write_step(context, record)
         return record
+
+    def _write_step(self, context: RunContext, record: dict[str, Any]) -> None:
+        raw = record.get("raw_action") or {}
+        before = record.get("observation_before") or {}
+        after = record.get("observation_after") or {}
+        selection_screen = before.get("screen_type") in {"GRID", "HAND_SELECT"}
+        cancelled = selection_screen and raw.get("id") in {"RETURN", "CANCEL", "LEAVE"}
+        if cancelled:
+            record["usable_for_sft"] = False
+            record["training_exclusion_reason"] = "selection_cancelled_navigation"
+            self._flush_selection(context, cancelled=True)
+        if raw.get("kind") == "card_selection_changed" and not raw.get("selected_cards"):
+            record["usable_for_sft"] = False
+            record["training_exclusion_reason"] = "empty_or_deselected_selection"
+        if context.selection_steps or (raw.get("kind") == "card_selection_changed"
+                and after.get("screen_type") in {"GRID", "HAND_SELECT"}):
+            context.selection_steps.append(record)
+            if (raw.get("kind") == "card_selection_confirmed"
+                    or after.get("screen_type") not in {"GRID", "HAND_SELECT"}):
+                self._flush_selection(context, cancelled=False)
+        else:
+            self._write(context, record)
+
+    def _flush_selection(self, context: RunContext, *, cancelled: bool) -> None:
+        for record in context.selection_steps:
+            if cancelled and (record.get("raw_action") or {}).get("kind") == "card_selection_changed":
+                record["usable_for_sft"] = False
+                record["training_exclusion_reason"] = "selection_not_confirmed"
+            self._write(context, record)
+        context.selection_steps.clear()
 
 
     def _flush_unresolved(self, context: RunContext, reason: str) -> None:
         for pending in list(context.pending.values()):
             record = {key: value for key, value in pending.items() if key != "pre_message"}
             record.update({"post_state": None, "accepted": True, "resolution": reason})
-            self._write(context, record)
+            self._write_step(context, record)
         context.pending.clear()
 
     @staticmethod

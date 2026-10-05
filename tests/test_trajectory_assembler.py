@@ -45,10 +45,10 @@ def combat_state() -> dict:
 
 
 class ActionRecorderRecordingTests(unittest.TestCase):
-    def test_complete_room_decisions_need_no_click_or_confirmation_events(self) -> None:
+    def test_smith_and_purge_entry_are_fine_grained_choices(self) -> None:
         for screen, prefix, kind, choices in (
-            ("REST", "CAMPFIRE:SMITH", "campfire_smith", ["rest", "smith"]),
-            ("SHOP_SCREEN", "SHOP:PURGE", "shop_purge", ["purge"]),
+            ("REST", "CAMPFIRE:SMITH", "campfire_action", ["rest", "smith"]),
+            ("SHOP_SCREEN", "SHOP:PURGE", "shop_purge_opened", ["purge"]),
         ):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
                 receiver = ActionRecorderEnricher(Path(directory))
@@ -57,15 +57,16 @@ class ActionRecorderRecordingTests(unittest.TestCase):
                     "choice_list": choices, "screen_state": {},
                     "deck": [{"id": "Strike_R", "name": "打击", "uuid": "card-1", "upgrades": 0}],
                 }
-                selected_id = prefix + ":card=card-1"
+                selected_id = f"CHOOSE:index={len(choices)-1}"
                 # The mod can emit auxiliary lifecycle events, but the receiver
                 # must not need any of them to reconstruct the actual decision.
                 receiver.consume({"type": "decision_started", "run_id": "r", "decision": prefix})
                 receiver.consume({
                     "type": "action_observed", "run_id": "r", "step_id": "r:1",
+                    "state_match": {"match_status": "exact_state_id"},
                     "observation_before": before,
                     "available_actions": {"commands": ["choose"], "choices": choices},
-                    "chosen_action": {"id": selected_id, "kind": kind, "card_uuid": "card-1"},
+                    "chosen_action": {"id": prefix, "kind": kind},
                 })
                 record = receiver.consume({
                     "type": "step_resolved", "run_id": "r", "step_id": "r:1",
@@ -74,7 +75,7 @@ class ActionRecorderRecordingTests(unittest.TestCase):
                 receiver.close()
                 self.assertIsNotNone(record)
                 self.assertTrue(record["usable_for_sft"])
-                self.assertEqual(record["action_resolution"], "exact_id")
+                self.assertEqual(record["action_resolution"], "choice_label")
                 self.assertEqual(record["selected_action_id"], selected_id)
                 self.assertEqual(record["pre_state"]["screen_type"], screen)
                 self.assertEqual(len(receiver.runs["r"].action_history), 1)
@@ -99,6 +100,7 @@ class ActionRecorderRecordingTests(unittest.TestCase):
             })
             enricher.consume({
                 "type": "action_observed", "run_id": "run-1", "step_id": "run-1:1",
+                "state_match": {"match_status": "exact_state_id"},
                 "timestamp_ms": 1, "observation_before": combat_state(),
                 "available_actions": {"commands": ["play", "end"], "choices": []},
                 "chosen_action": {"id": "END_TURN", "kind": "end_turn"},
@@ -114,7 +116,6 @@ class ActionRecorderRecordingTests(unittest.TestCase):
             self.assertTrue(record["usable_for_sft"])
             self.assertEqual(record["selected_action_id"], "END_TURN")
             self.assertIn("PLAY:card=1:target=0", {item["id"] for item in record["legal_actions"]})
-            self.assertIn("knowledge", record["pre_state"]["combat"]["monsters"][0])
             self.assertNotIn("map", record["policy_observation"])
             output = next(Path(directory).glob("*.jsonl"))
             self.assertEqual(json.loads(output.read_text(encoding="utf-8").splitlines()[0])["step_id"], "run-1:1")
@@ -177,6 +178,7 @@ class ActionRecorderRecordingTests(unittest.TestCase):
                 "available_actions": {"commands": ["choose"], "choices": before["choice_list"]},
                 "chosen_action": {"id": "CHOOSE:index=1", "kind": "card_option_selected",
                                   "selection_mode": "discovery", "card_id": "B"},
+                "state_match": {"match_status": "exact_state_id"},
             })
             record = receiver.consume({
                 "type": "step_resolved", "run_id": "r", "step_id": "r:1",
@@ -206,6 +208,7 @@ class ActionRecorderRecordingTests(unittest.TestCase):
                 "available_actions": {"commands": ["choose"], "choices": before["choice_list"]},
                 "chosen_action": {"id": "SELECT_CARDS:grid:b;", "kind": "card_selection_changed",
                                   "screen": "grid", "selected_cards": [{"card_id": "B", "card_uuid": "b"}]},
+                "state_match": {"match_status": "exact_state_id"},
             })
             record = receiver.consume({
                 "type": "step_resolved", "run_id": "r", "step_id": "r:1",

@@ -48,7 +48,7 @@ class PosthocFeedbackTests(unittest.TestCase):
         self.assertEqual(combat["hand"][0]["name"], "打击")
         self.assertEqual(combat["monsters"][0]["intent_damage"], 11)
         self.assertEqual(ledger[0]["state"]["recent_actions"][0]["action"], "出牌 防御")
-        self.assertNotIn("description", str(ledger))
+        self.assertEqual(combat["hand"][0]["description"], "Deal 6 damage.")
 
     def test_action_ledger_deduplicates_repeated_map_nodes(self) -> None:
         map_nodes = [{"x": 0, "y": 0, "symbol": "M", "children": [{"x": 0, "y": 1}]}]
