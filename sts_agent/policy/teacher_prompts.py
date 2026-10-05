@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from sts_agent.paths import PROJECT_ROOT
+from sts_agent.policy.scenes import scene_key
 
-TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v7"
-PLAYER_PROMPT_VERSION = "sts1-player-zh-v3"
+TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v8"
+PLAYER_PROMPT_VERSION = "sts1-player-zh-v4"
 # Kept as the default public version for the SFT teacher client.
 PROMPT_VERSION = TEACHER_PROMPT_VERSION
 CHARACTER_PROMPT_LIBRARY_VERSION = "sts1-character-prompt-library-v1"
@@ -131,6 +132,20 @@ SCENARIO_PROMPTS: dict[str, str] = {
 - 优先选择能补足当前牌组长期瓶颈、提高稳定性或明确配合已有核心的遗物。
 - 不要仅按遗物 tier、名字或通用榜单选择；当前牌组和资源状态优先。
 - 如果某个遗物的机制会改变抽牌、费用、生命、药水或商店策略，要把这些长期影响纳入比较。""",
+    "SHOP_ROOM": """【商店房间】
+当前尚未打开商品界面。区分进入商店房间、打开商人和离开房间；只按当前合法动作查看商人，不臆测未展示商品。若本局记忆说明已经访问并离开商人，不重复进入。""",
+    "HAND_SELECT": """【手牌选择】
+读取选择要求、触发来源、最多或必须选择数量、已选牌和当前战斗状态，比较弃牌、消耗或升级等实际目的。允许少选、取消或跳过时按明确效果权衡；需要确认时使用当前合法确认动作，不把它当作普通奖励。""",
+    "GRID_CONFIRM": """【选牌确认】
+当前处于选牌后的确认阶段。核对待确认卡牌、已选项目和升级、变化或移除目的，决定确认或按合法动作返回重选；不要重复上一阶段的选牌。""",
+    "EVENT_MATCH": """【事件翻牌配对】
+先读事件说明和 match_game：公开棋盘位置、曾揭示的牌面、已配对项目、当前选中位置和剩余尝试。未揭示牌面是未知的，不能根据名称或隐藏信息猜测；曾揭示后重新盖住的牌面可以作为记忆。有已知配对时比较其收益，否则优先探索未揭示的合法位置，不重复已证伪的组合。""",
+    "CHEST": """【宝箱】
+区分打开宝箱和领取奖励，按公开内容和合法动作处理。遗物和蓝钥匙可能互斥，结合钥匙持有情况和本局目标权衡，不假定可以同时获得。""",
+    "GAME_OVER": """【终局】
+本局已结束，只处理当前合法终局确认或返回动作，不再提交战斗或地图动作。""",
+    "VICTORY": """【胜利终局】
+本局已胜利结束，只处理当前合法终局确认或返回动作，不自行开始下一局。""",
     "TRANSITION": """【过渡状态】
 当前状态可能是房间尚未完成时的短暂过渡。不要尝试提前选择地图节点或重复上一房间动作；遵守当前合法动作，选择能安全等待状态稳定的动作。""",
     "GENERIC": """【通用场景】
@@ -167,39 +182,8 @@ def character_key_for_observation(observation: dict[str, Any], fallback: Any = N
 
 
 def scenario_key(observation: dict[str, Any]) -> str:
-    """Map normalized public state to a specific teacher strategy prompt."""
-    screen = str(observation.get("screen_type") or "").upper()
-    if screen == "NONE" and str(observation.get("room_phase") or "").upper() == "COMBAT":
-        return "COMBAT"
-    if (
-        screen == "CARD_REWARD"
-        and isinstance(observation.get("selection_context"), dict)
-        and observation["selection_context"].get("kind") == "COMBAT_GENERATED_CARD_CHOICE"
-    ):
-        return "COMBAT_CARD_SELECTION"
-    if (
-        screen == "CARD_REWARD"
-        and isinstance(observation.get("selection_context"), dict)
-        and observation["selection_context"].get("kind") == "RELIC_PICKUP_CARD_SELECTION"
-    ):
-        return "RELIC_PICKUP_CARD_SELECTION"
-    if screen == "GRID":
-        mode = str((observation.get("screen_state") or {}).get("selection_mode") or "").upper()
-        specific = {
-            "PURGE": "GRID_PURGE",
-            "UPGRADE": "GRID_UPGRADE",
-            "TRANSFORM": "GRID_TRANSFORM",
-            "TRANSFORM_UPGRADE": "GRID_TRANSFORM",
-        }.get(mode)
-        if specific is not None:
-            return specific
-        if (
-            isinstance(observation.get("selection_context"), dict)
-            and observation["selection_context"].get("kind") == "RELIC_PICKUP_CARD_SELECTION"
-        ):
-            return "RELIC_PICKUP_CARD_SELECTION"
-        return "GRID_SELECT"
-    return screen if screen in SCENARIO_PROMPTS else "GENERIC"
+    """Use the same scene classification as policy inference and human SFT."""
+    return scene_key(observation)
 
 
 def build_system_prompt(

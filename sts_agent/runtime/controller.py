@@ -1295,14 +1295,25 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
     # Full route information belongs only to the actual map selection screen.
     # A transient map overlay is normalized as TRANSITION and must not leak
     # route detail into event/reward/combat decisions.
-    if normalized.get("screen_type") == "MAP":
+    screen = str(normalized.get("screen_type") or "").upper()
+    if screen == "MAP":
+        normalized.pop("combat", None)
         return normalized
 
     normalized.pop("map", None)
-    if normalized.get("screen_type") != "NONE" or normalized.get("room_phase") != "COMBAT":
+    active_combat = (
+        str(normalized.get("room_phase") or "").upper() == "COMBAT"
+        and screen in {"NONE", "COMBAT", "GRID", "HAND_SELECT", "CARD_REWARD"}
+    )
+    if not active_combat:
         # CommunicationMod may briefly retain the previous combat payload on
         # a non-combat screen. Never expose that stale state to a prompt.
         normalized.pop("combat", None)
+        return normalized
+
+    # Combat-time choices still require energy, hand, intents and powers.
+    # Keep their selection requirements/source as well as the live battle.
+    if screen in {"GRID", "HAND_SELECT", "CARD_REWARD"}:
         return normalized
 
     # Combat runs every turn, so keep this prompt compact even though map
@@ -1442,6 +1453,35 @@ def normalize_event_option(value: Any) -> Any:
     return _enrich_public_item_fields(value)
 
 
+def normalize_match_game(value: Any) -> dict[str, Any] | None:
+    """Project public board memory without revealing unturned card faces."""
+    if not isinstance(value, dict):
+        return None
+    result = {
+        key: value[key] for key in (
+            "phase", "remaining_attempts", "matched_pairs", "game_done",
+            "awaiting_resolution", "selected_positions",
+        ) if key in value
+    }
+    board = value.get("board")
+    if board is None:
+        result["board"] = None
+    elif isinstance(board, list):
+        result["board"] = []
+        for raw in board:
+            if not isinstance(raw, dict):
+                continue
+            item = {key: raw[key] for key in (
+                "position", "row", "column", "face_up", "revealed", "matched",
+            ) if key in raw}
+            card = raw.get("card")
+            # 'revealed' is durable public memory. Merely matched/face-up
+            # is not sufficient evidence in an incomplete source snapshot.
+            item["card"] = visible_card(card) if raw.get("revealed") is True and isinstance(card, dict) else None
+            result["board"].append(item)
+    return result
+
+
 def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if screen_type in {"CARD_REWARD", "GRID"}:
@@ -1482,6 +1522,8 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
         result["event_name"] = value.get("event_name")
         result["body_text"] = value.get("body_text")
         result["options"] = [normalize_event_option(item) for item in value.get("options", [])]
+        if "match_game" in value:
+            result["match_game"] = normalize_match_game(value["match_game"])
     elif screen_type == "COMBAT_REWARD":
         result["rewards"] = [normalize_reward(item) for item in value.get("rewards", [])]
     elif screen_type == "REST":

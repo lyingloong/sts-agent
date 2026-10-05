@@ -21,6 +21,7 @@ from sts_agent.config import ConfigError, load_agent_config
 from sts_agent.core.contracts import validate_action_list, validate_observation
 from sts_agent.core.policy import PolicyBackend
 from sts_agent.policy.gpu import select_configured_gpu
+from sts_agent.policy.scenes import scene_key, screen_key
 
 
 def configure_jsonl_stdio() -> None:
@@ -137,6 +138,20 @@ _FIELD_LABELS = {
     "body_text": "事件说明",
     "event_name": "事件名称",
     "event_id": "事件 ID",
+    "match_game": "翻牌配对状态",
+    "board": "公开棋盘",
+    "position": "位置",
+    "row": "行",
+    "column": "列",
+    "face_up": "当前翻开",
+    "revealed": "曾经揭示",
+    "matched": "已配对",
+    "remaining_attempts": "剩余尝试",
+    "matched_pairs": "已配对数量",
+    "selected_positions": "已翻位置",
+    "awaiting_resolution": "等待结算",
+    "game_done": "小游戏结束",
+    "confirmation_card": "待确认卡牌",
 }
 
 _SCREEN_LABELS = {
@@ -146,25 +161,43 @@ _SCREEN_LABELS = {
     "CARD_REWARD": "卡牌奖励",
     "COMBAT_REWARD": "战斗奖励",
     "SHOP": "商店",
+    "SHOP_ROOM": "商店房间",
+    "SHOP_SCREEN": "商人界面",
     "REST": "营火",
     "BOSS_REWARD": "Boss奖励",
     "GRID": "选牌",
     "HAND_SELECT": "从手牌选择",
     "TRANSITION": "房间切换",
     "NONE": "游戏界面",
+    "CHEST": "宝箱",
+    "GAME_OVER": "终局",
+    "VICTORY": "胜利",
 }
 
 _SCENE_GUIDANCE = {
-    "MAP": "这是战斗界面。先看我方生命、能量、手牌和敌人意图，优先计算本回合能造成的伤害和格挡；有可用能量和有效动作时不要无故结束回合，必要时合理使用药水，目标是减少掉血而不是机械保留资源。",
+    "MAP": "这是地图界面。根据完整公开地图、当前可达节点、生命、牌组、金币、药水和本幕首领比较后续路线；兼顾补强、营火恢复或升级、商店和精英风险，只选择当前合法的可达节点，不臆测问号房内容。",
     "COMBAT": "这是战斗界面。先看我方生命、能量、手牌和敌人意图，优先计算本回合能造成的伤害和格挡；有可用能量和有效动作时不要无故结束回合，必要时合理使用药水，目标是减少掉血而不是机械保留资源。",
     "CARD_REWARD": "这是卡牌奖励界面。先读取并比较全部可见卡牌，再决定获得或跳过；前期通常需要能解决当前战斗的过渡牌，不要因为稀有度或单张牌面看起来强就忽略牌组协同。",
+    "COMBAT_CARD_SELECTION": "这是战斗内生成选牌，不是普通战后永久卡牌奖励。读取触发来源、描述和最近动作，确认卡牌进入手牌或其他位置、临时费用和持续时间；结合当前能量、敌人意图和手牌比较即时收益，不要因担心永久牌组变大而跳过。不知道的来源效果保持未知。",
+    "RELIC_PICKUP_CARD_SELECTION": "这是遗物触发的选牌。读取 selection_context 的来源、选择目的、数量和已选项目，按本次遗物效果比较候选；不要套用普通卡牌奖励或其他选牌流程。",
     "COMBAT_REWARD": "这是战斗奖励界面。先确认可见金币、药水和遗物等奖励是否仍未领取，再处理卡牌奖励；没有明确理由不要跳过尚未领取的资源。",
     "EVENT": "这是事件界面。先读事件说明、选项和事件历史，确认当前选项是否已经改变事件阶段；比较生命、金币、牌组和后续路线的长期代价，避免重复上一阶段的选项。",
-    "SHOP": "这是商店界面。先确认商人和全部可见商品，再比较价格、牌组缺口、遗物和药水的价值；购买或移除牌都要考虑后续路线和当前金币，离开商店后不要重复进入同一商店。",
+    "SHOP_ROOM": "这是商店房间，还未打开商品界面。区分进入商店房间、打开商人和离开房间；按合法动作查看商人，不猜测未展示商品。若本局记忆表明已经访问并离开该商人，不要重复进入。",
+    "SHOP_SCREEN": "这是商人界面。比较全部可见商品的效果、价格、当前金币和牌组缺口，以及移除牌的价值；考虑后续资源需求，不按名称或稀有度盲目购买。离开商人界面和离开商店房间是不同动作。",
     "REST": "这是营火界面。根据当前生命、牌组缺口和下一场精英或首领的风险，在休息、升级及其他可见选项之间权衡。",
     "BOSS_REWARD": "这是Boss奖励界面。比较所有Boss遗物和钥匙等可见选项对当前牌组、资源和后续路线的影响，不要把未查看的选项当成不存在。",
-    "GRID": "这是多选或翻牌界面。先读清楚选牌目的和已选项目；已经选择的项目不能重复选择，必须完成当前选择要求后再继续。",
+    "GRID_SELECT": "这是选牌界面。读取选择目的、触发来源、数量和已选项目，按本次效果选择；多选时不要重复选择已选项目。若合法动作允许取消、少选或跳过，可按效果权衡，不把它当作普通卡牌奖励或翻牌配对。",
+    "GRID_PURGE": "这是移除卡牌的选择。删除会永久改变牌组，按当前牌组缺口、重复数量和协同比较候选，不要误删关键伤害、防御或成长牌；以本次选择要求为准。",
+    "GRID_UPGRADE": "这是升级卡牌的选择。比较本次升级对费用、效果和牌组需求的改善；是否永久升级或仅本场战斗生效，以触发来源和选择要求为准。",
+    "GRID_TRANSFORM": "这是变化卡牌的选择。按牌组缺口和协同选择值得替换的牌；结果未公开时不要假定会得到理想卡牌。遵守本次变化数量和要求。",
+    "GRID_CONFIRM": "这是选牌后的确认界面。查看待确认卡牌、已选项目和本次升级、移除或变化目的，决定确认或按合法动作返回重选；不是重新选择另一张牌的阶段。",
     "HAND_SELECT": "这是从手牌选择的界面。先读清楚触发该选择的牌、遗物或事件及其要求，只选择能完成当前效果的牌，不要把它当作普通卡牌奖励。",
+    "EVENT_MATCH": "这是事件内的翻牌配对。根据公开棋盘的位置、曾经揭示的牌面、已配对项目、当前翻开位置和剩余尝试选择；未揭示牌面未知，不得猜作已知。有已知配对时优先比较配对价值，否则探索未揭示的合法位置，不重复已证伪的组合。",
+    "CHEST": "这是宝箱界面。区分打开宝箱与领取奖励，按可见内容和合法动作继续；遗物与蓝钥匙可能互斥，需结合钥匙持有情况和本局目标权衡，不能假定两者都能领取。",
+    "TRANSITION": "这是房间切换或未完成流程的过渡状态。不要把上一场景的状态当成当前可执行决策；只使用当前合法动作，未提供合法动作时等待控制器更新。",
+    "GAME_OVER": "本局已结束。只处理当前合法的终局确认或返回动作，不继续提交战斗或地图动作。",
+    "VICTORY": "本局已胜利结束。只处理当前合法的终局确认或返回动作，不自行开始新局。",
+    "GENERIC": "根据当前界面内容、最近动作、明确的选择要求和合法动作处理本步；未知效果保持未知，不猜测隐藏内容或重复已经完成的动作。",
 }
 
 PROMPT_TEMPLATES = ("canonical", "state_first", "decision_first")
@@ -254,10 +287,7 @@ def _natural_lines(value: Any, indent: str = "", title: str | None = None) -> li
 
 
 def _prompt_screen(observation: dict[str, Any]) -> str:
-    screen = str(observation.get("screen_type") or "NONE").upper()
-    if screen == "NONE" and observation.get("room_phase") == "COMBAT":
-        return "COMBAT"
-    return screen
+    return screen_key(observation)
 
 
 def render_observation(observation: dict[str, Any]) -> str:
@@ -338,13 +368,12 @@ def _policy_prompt_prefix() -> list[str]:
 
 
 def build_prompt(observation: dict[str, Any], legal_actions: list[dict[str, Any]], top_k: int) -> str:
-    screen_type = _prompt_screen(observation)
+    scene = scene_key(observation)
     lines = _policy_prompt_prefix() + [
-        "只能从合法动作中选择一个。下面的 ID 是程序令牌，必须原样输出。不要输出 JSON、解释、Markdown、命令或其他文字。",
+        "只能使用合法动作中的 ID。下面的 ID 是程序令牌，必须原样输出，不得输出游戏命令。",
         f"请按优先级返回最多 {top_k} 个动作 ID，第一项是首选。只能输出一个 JSON 对象：{{\"ranked_action_ids\":[\"A1\",\"A2\"]}}。不要输出解释、Markdown 或列表外的 ID。",
     ]
-    if screen_type in _SCENE_GUIDANCE:
-        lines.append(f"当前场景提示：{_SCENE_GUIDANCE[screen_type]}")
+    lines.append(f"当前场景提示：{_SCENE_GUIDANCE[scene]}")
     lines.extend(action_prompt_lines(observation, legal_actions))
     lines.append("JSON:")
     return "\n".join(lines)
@@ -356,13 +385,11 @@ def build_scoring_prompt(
     template: str = "canonical",
 ) -> str:
     """Build one single-action prompt from equivalent deterministic layouts."""
-    screen_type = _prompt_screen(observation)
+    scene_type = scene_key(observation)
     instructions = _policy_prompt_prefix() + [
         "只能从合法动作中选择一个。下面的 ID 是程序令牌，必须原样输出。不要输出 JSON、解释、Markdown、命令或其他文字。",
     ]
-    scene = []
-    if screen_type in _SCENE_GUIDANCE:
-        scene.append(f"当前场景提示：{_SCENE_GUIDANCE[screen_type]}")
+    scene = [f"当前场景提示：{_SCENE_GUIDANCE[scene_type]}"]
     state = action_prompt_lines(observation, legal_actions)
     # Keep the continuation on the next line so aliases such as A1 and A10
     # are scored with an explicit newline boundary rather than prefix matching.
