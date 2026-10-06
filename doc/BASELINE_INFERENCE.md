@@ -28,7 +28,8 @@ SSH 主机来自 `agent.json.shared.policy.remote.ssh_host`。模型只在 `poli
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
-| `policy.model.revision` | `main` | 准备时解析成精确 SHA；启动服务使用已下载的固定 snapshot，不追随远端 main 更新 |
+| `policy.model.revision` | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | Qwen 官方仓库的固定 SHA；镜像 SHA 已与 Hugging Face 官方 API 核对 |
+| `policy.model.hub_endpoint` | `https://hf-mirror.com` | 远端下载入口；只影响获取权重，不改模型内容或版本 |
 | `policy.api.temperature` | 0 | 贪心生成；多 GPU 算子等因素仍可能导致细微非确定性 |
 | `policy.api.thinking` | false | 显式传入 `chat_template_kwargs.enable_thinking=false`，只生成一个动作别名 |
 | `policy.api.max_output_tokens` | 64 | 回答预算；`finish_reason=length` 是错误，即使回答看起来包含合法别名也不执行 |
@@ -62,17 +63,18 @@ SSH 主机来自 `agent.json.shared.policy.remote.ssh_host`。模型只在 `poli
 ```bash
 git pull --ff-only
 uv venv .venv-serving --python 3.12
-uv pip install --python .venv-serving/bin/python -e '.[serving]'
+uv pip install --python .venv-serving/bin/python -e '.[serving]' --torch-backend=cu128
 .venv-serving/bin/python -m sts_agent.policy.serving --prepare
 ```
 
-不要覆盖原训练 `.venv`。下载使用 profile 的 `policy.model.hub_endpoint`，默认官方 Hugging Face；
-`--prepare` 才会下载，将 revision 解析为 SHA 保存，下载完成后就退出，不占 GPU。
-若需要严格复现，把该 SHA 写回 profile 的 `policy.model.revision`，同步后再次 `--prepare`。
+不要覆盖原训练 `.venv`。下载使用 profile 的 `policy.model.hub_endpoint`；当前配置使用 hf-mirror，
+权重文件放在项目内 `models/hub/`。`--prepare` 才会下载，并记录精确 SHA，下载完成后就退出，不占 GPU。
+模型源、SHA 或镜像变更时，先检查新版本 SHA，再更新 profile 并提交。
 本机不需要远端的 deployment 文件，也不需要模型权重。
 
 服务依赖必须是支持这个架构的近期 vLLM 与 Transformers；启动器检查 Transformers ≥ 5.8。
 安装项中的 vLLM 下限不是“所有版本都已在这台机器验证”的承诺，uv 应解析到当前兼容版本。
+使用 CUDA 12.8 wheel 与服务器现有 CUDA 12.8 PyTorch/RTX 4090；不使用 CUDA 13 wheel。
 安装或启动报架构、CLI 参数或 CUDA 内核错误时先查 [vLLM 官方 Qwen3.8 部署说明](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)，
 不要回退到本仓库旧的 Qwen3 `AutoModelForCausalLM`/4-bit subprocess 入口。
 服务会记录实际依赖版本；驱动/PyTorch/CUDA 兼容性仍需远端检查。

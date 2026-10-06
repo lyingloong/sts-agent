@@ -39,7 +39,8 @@ def select_devices(candidates: list[dict], settings: dict) -> list[int]:
 
 def launch_command(model_path: str, policy: dict) -> list[str]:
     api, serving = policy["api"], policy["api"]["serving"]
-    cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--model", model_path,
+    vllm_executable = str(Path(sys.executable).with_name("vllm"))
+    cmd = [vllm_executable, "serve", model_path,
            "--served-model-name", policy["model"]["base"], "--host", "127.0.0.1", "--port", str(api["remote_port"]),
            "--dtype", "bfloat16", "--kv-cache-dtype", "auto", "--tensor-parallel-size", str(serving["tensor_parallel_size"]),
            "--max-model-len", str(serving["max_model_len"]), "--max-num-seqs", "1",
@@ -93,6 +94,7 @@ def main() -> int:
                                          endpoint=model["hub_endpoint"], cache_dir=str(PROJECT_ROOT / "models" / "hub"))
             deployment = {"model": model["base"], "requested_revision": model["revision"],
                           "resolved_revision": info.sha, "snapshot_path": snapshot,
+                          "hub_endpoint": model["hub_endpoint"],
                           "prepared_at": datetime.now(timezone.utc).isoformat()}
             deployment_path.parent.mkdir(parents=True, exist_ok=True)
             deployment_path.write_text(json.dumps(deployment, indent=2), encoding="utf-8")

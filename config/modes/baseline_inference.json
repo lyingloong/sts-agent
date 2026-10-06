@@ -2,7 +2,8 @@
   "policy": {
     "model": {
       "base": "Qwen/Qwen3.8-27B",
-      "revision": "main",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "hub_endpoint": "https://hf-mirror.com",
       "initial_adapter": "",
       "initial_policy_version": "official-baseline"
     },
