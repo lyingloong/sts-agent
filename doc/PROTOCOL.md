@@ -34,6 +34,17 @@ Windows 后台入口使用 `pythonw.exe`，避免启动时弹出控制台窗口�
 `pre_state/post_state/policy_observation/legal_actions/action`。配对结果为
 `state_match.match_status=exact_state_id`，可训练性由 `usable_for_sft` 独立判断。
 营火锻造/商店删牌不折叠为房间级动作；不以agent策略过滤人类重复进入或取消选择。
+
+Recorder 0.1.5 的奖励领取优先按 `reward_id + reward_index` 在动作前完整奖励列表中校验，
+再映射 CommunicationMod 的 `CHOOSE n`，不能用多个同名奖励的标签猜测。卡牌奖励子操作
+校验 `source_reward_id`。原始奖励身份、关联钥匙和卡牌来源字段始终保留。
+
+`run_resumed` 延续原 run_id 与文件，携带新的 `segment_id` 和 checkpoint 来源。bridge 在
+恢复边界关闭旧事务，不把读档后状态当作旧动作结果；清空动作历史、已访问商店和奖励记忆。
+每步与 SFT provenance 保存 segment_id，不跨片段拼接历史；回滚前的原始动作不删除。
+`run_checkpoint` 是保存存档的生命周期通知，没有动作事务 ID；bridge 将其记为
+`run_checkpoint_marker`，不创建动作样本、不结算待处理动作，也不清空历史。真正的读档
+边界以 `run_resumed` 为准；checkpoint 原文始终保留在 Recorder 日志和提取包中。
 训练筛选另行处理：需要确认的选牌尝试暂存在内存，返回/取消时将该尝试和返回动作
 标为 `usable_for_sft=false`，保留真实history；重选并确认的步骤仍可训练。原始mod日志不筛选。
 动作后状态除ready外，还检查钥匙持有、药水/卡牌获得、删除/升级完成等可验证效果；
@@ -135,7 +146,11 @@ run-events-20260823-120000-run-002-THE_SILENT-A5-seed-4QTKQ7VBMFX47.jsonl
 - `COMBAT_REWARD` 在请求模型前按“遗物、金币、药水、卡牌奖励入口”的顺序自动推进：遗物和金币必取；药水仅在有空位时必取；卡牌奖励只自动打开，选牌或跳过仍交给模型。除地图和地图过渡态外，只要 CommunicationMod 当前声明支持 `potion` 命令，合法动作中还会保留可使用或可丢弃的持有药水；战斗中的目标药水展开为敌人目标。非战斗场景只允许主动使用 `BLOODPOTION`（鲜血药水）和 `FRUITJUICE`（果汁），其他药水即使通信层误报 `can_use=true` 也只保留丢弃动作。这样在领取新药水前，可以先由模型决定使用或丢弃旧药水。首次进入 `SHOP_ROOM` 也会自动打开商人界面，购买和移除仍是模型决策。环境动作完成后，如果语义合法动作列表只剩一个动作（例如离开商人后的 `PROCEED`，或战斗中没有可出牌、可用药水时的 `END_TURN`），controller 直接执行该动作，不请求模型；自动执行前会短暂停顿 `0.25` 秒，让界面先显示动作。每个这类动作都以 `decision.source=environment_auto` 正常写入 trace 和 recent_actions，但不会进入教师 SFT 或在线 RL 的策略更新；`BOSS_REWARD` 的遗物选择始终保留为策略决策。
 - 启用 `posthoc_feedback.enabled` 且远端 `attribution.enabled` 后，在线 RL 的每个终局会额外产生本地 `data/reflections/` 与 `data/attributions/` artifact。`posthoc_feedback.mode="human"` 时前者保存人类的可强化/应弱化复盘；`mode="auto"` 时保存自动复盘标记，教师根据账本独立给出双向候选。后者保存本地校验过的 `step_id/direction/confidence/severity`；只有后者的已应用字段进入远端 episode。教师原始 completion 与思考不写入 artifact 或更新协议。详情见[终局反思归因 GRPO](POSTHOC_ATTRIBUTION_GRPO.md)。
 
-Candidate Assist 由 controller 在 CommunicationMod 启动握手前预热独立的 `sts_agent.policy.local_qwen`。模型、端口、超时和模式全部由 `config/agent.json` 管理；模型必须先通过 `sts_agent.commands.download_model` 从 `policy.model.hub_endpoint` 预下载。脚本会在没有显式代理变量时读取 Windows 系统代理。游戏运行时 policy server 只从本地缓存加载，以免网络问题阻塞回合。默认对所有游戏内场景请求候选；可将 `policy.request.screens` 配置为 `["COMBAT"]` 收窄。`MAP` 才发送完整公开 `map.nodes`、当前位置和可选节点；战斗、事件、商店、奖励、休息和地图过渡态都移除地图。controller 维护显式环境记忆 `run_memory.visited_shop_rooms`。首次观察到 `SHOP_SCREEN` 时按 `(Act, Floor)` 记录该商店；之后同层 `SHOP_ROOM` 从合法动作中移除 `CHOOSE shop`，只保留 `PROCEED` 等离开动作，人工输入也不能绕过。它把其余真实合法动作映射为本请求内短别名 `A1/A2/...`，policy server 返回至多三个别名，controller 再映射、校验并编译 CommunicationMod 命令。这避免小模型复制长的卡牌/目标 ID 时产生空候选。终端 `a` 接受首选，`pick <序号>` 选择其他候选；裸数字不被候选逻辑截获，保留给游戏界面自己的选项。模型无候选、超时或加载失败时，`decision` 会记录 `assist_status` 和 `assist_reason`，终端显示原因后退回人工操作。将 `policy.enabled` 设为 `false` 可关闭，`policy.development.mock=true` 可在不加载模型时测试协议。
+Candidate Assist 由 controller 在 CommunicationMod 启动握手前预热独立的 `sts_agent.policy.local_qwen`。模型、端口、超时和模式全部由 `config/agent.json` 管理；模型必须先通过 `sts_agent.commands.download_model` 从 `policy.model.hub_endpoint` 预下载。脚本会在没有显式代理变量时读取 Windows 系统代理。游戏运行时 policy server 只从本地缓存加载，以免网络问题阻塞回合。默认对所有游戏内场景请求候选；可将 `policy.request.screens` 配置为 `["COMBAT"]` 收窄。`MAP` 才发送完整公开 `map.nodes`、当前位置和可选节点；战斗、事件、商店、奖励、休息和地图过渡态都移除地图。
+
+controller 维护环境记忆 `run_memory.visited_shop_rooms`。首次观察到 `SHOP_SCREEN` 时按 `(Act, Floor)` 记录该商店；已访问不会屏蔽同层商人入口，也不会拒绝人工重入。星系仪等遗物的奖励流程可能自动关闭商人界面，模型或玩家仍可根据需求重新打开。自动打开商人只在首次访问时触发；之后由模型或玩家选择重入或离开，避免自动进出循环。
+
+合法动作映射为本请求内短别名 `A1/A2/...`，policy server 返回至多三个别名，controller 再映射、校验并编译 CommunicationMod 命令。这避免小模型复制长的卡牌/目标 ID 时产生空候选。终端 `a` 接受首选，`pick <序号>` 选择其他候选；裸数字不被候选逻辑截获，保留给游戏界面自己的选项。模型无候选、超时或加载失败时，`decision` 会记录 `assist_status` 和 `assist_reason`，终端显示原因后退回人工操作。将 `policy.enabled` 设为 `false` 可关闭，`policy.development.mock=true` 可在不加载模型时测试协议。
 
 设置 `policy.confidence_auto.enabled=true` 后，controller 不再请求生成式 top-k 排序，而请求 policy server 为每个当前合法别名计算精确续写 `A<n>\\n` 的条件 `logprob`。controller 仅在这一个合法集合内 softmax，完整 `action_scores` 按规范 action ID 写入 trace；`confidence` 保存首选/次选概率、margin、entropy、`min_probability` 和路由结果。默认 `min_probability=0.85`；首选满足 `p1 >= min_probability` 即执行 `source=model_auto`。margin 与 entropy 用于校准记录，不作为第二道门槛。评分缺项、格式异常、超时或上一动作返回协议错误时，自动执行被禁用并回退人工，不能绕过 controller 的合法动作表。
 

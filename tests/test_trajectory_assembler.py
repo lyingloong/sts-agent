@@ -45,6 +45,82 @@ def combat_state() -> dict:
 
 
 class ActionRecorderRecordingTests(unittest.TestCase):
+    def test_identical_rewards_resolve_by_identity_and_current_index(self):
+        state = {"screen_type": "COMBAT_REWARD", "screen_state": {"rewards": [
+            {"reward_type": "CARD", "reward_id": "a", "reward_index": 0},
+            {"reward_type": "CARD", "reward_id": "b", "reward_index": 1}]}}
+        legal = [{"id": f"CHOOSE:index={i}", "kind": "choose"} for i in range(2)]
+        raw = {"id": "REWARD:TAKE:CARD", "kind": "reward_card_claimed", "reward_type": "CARD",
+               "reward_id": "b", "reward_index": 1}
+        action, valid, reason = resolve_recorded_action(raw, legal, state)
+        self.assertTrue(valid)
+        self.assertEqual((action["id"], reason), ("CHOOSE:index=1", "reward_identity"))
+        self.assertFalse(resolve_recorded_action(raw | {"reward_index": 0}, legal, state)[1])
+        self.assertFalse(resolve_recorded_action(raw | {"reward_id": "missing"}, legal, state)[1])
+        self.assertFalse(resolve_recorded_action(raw | {"reward_type": "GOLD"}, legal, state)[1])
+        state["screen_state"]["rewards"] = [{"reward_type": "CARD", "reward_id": "b", "reward_index": 0}]
+        self.assertTrue(resolve_recorded_action(raw | {"reward_index": 0}, legal, state)[1])
+        self.assertFalse(resolve_recorded_action({k: v for k, v in raw.items() if k not in {"reward_id", "reward_index"}},
+                                                legal, {"screen_type": "COMBAT_REWARD", "screen_state": {"rewards": [
+                                                    {"reward_type": "CARD"}, {"reward_type": "CARD"}]}})[1])
+
+    def test_child_card_choice_validates_source_reward(self):
+        raw = {"id": "CHOOSE:index=0", "kind": "card_reward_selected", "source_reward_id": "a"}
+        legal = [{"id": "CHOOSE:index=0", "kind": "choose"}]
+        self.assertTrue(resolve_recorded_action(raw, legal, {"screen_state": {"source_reward_id": "a"}})[1])
+        self.assertFalse(resolve_recorded_action(raw, legal, {"screen_state": {"source_reward_id": "b"}})[1])
+
+    def test_boss_rewards_and_normalized_sources_keep_identity(self):
+        relics = [{"id": "Empty Cage", "name": "空鸟笼", "reward_id": "cage", "reward_index": 0}]
+        game = combat_state() | {"screen_type": "BOSS_REWARD", "room_phase": "COMPLETE",
+                                 "screen_state": {"relics": relics}}
+        obs = normalize_state({"game_state": game})
+        self.assertEqual(obs["screen_state"]["relics"][0]["reward_id"], "cage")
+        raw = {"id": "CHOOSE:index=0", "kind": "boss_relic_selected", "reward_id": "wrong", "reward_index": 0}
+        legal = [{"id": "CHOOSE:index=0", "kind": "choose"}]
+        self.assertFalse(resolve_recorded_action(raw, legal, game)[1])
+        self.assertTrue(resolve_recorded_action(raw | {"reward_id": "cage"}, legal, game)[1])
+        game.update(screen_type="CARD_REWARD", screen_state={"cards": [], "source_reward_id": "cards-a"})
+        self.assertEqual(normalize_state({"game_state": game})["screen_state"]["source_reward_id"], "cards-a")
+
+    def test_resume_after_receiver_restart_does_not_reuse_old_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = {"run_id": "r", "character": "IRONCLAD", "ascension": 0, "seed": "123", "act": 1}
+            path = Path(directory) / "human-ironclad-A0-seed-123-r.jsonl"
+            path.write_text(json.dumps({"accepted": True, "action": {"id": "END_TURN"}, "step_id": "old"}) + "\n",
+                            encoding="utf-8")
+            receiver = ActionRecorderEnricher(Path(directory))
+            receiver.consume(metadata | {"type": "run_resumed", "segment_id": "b"})
+            self.assertEqual(receiver.runs["r"].action_history, [])
+            receiver.close()
+            self.assertEqual(len(list(Path(directory).glob("human-*.jsonl"))), 1)
+
+    def test_resume_appends_one_file_and_resets_roll_back_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receiver = ActionRecorderEnricher(Path(directory))
+            metadata = {"run_id": "r", "character": "IRONCLAD", "ascension": 0, "seed": "123", "act": 1}
+            receiver.consume(metadata | {"type": "run_started", "segment_id": "a"})
+            context = receiver.runs["r"]
+            context.action_history.append({"action_id": "old"})
+            context.visited_shop_rooms.add((1, 14))
+            context.declined_card_reward_keys.add((1, 2))
+            receiver.consume(metadata | {"type": "run_resumed", "segment_id": "b", "checkpoint_id": "cp"})
+            self.assertEqual(context.action_history, [])
+            self.assertEqual(context.visited_shop_rooms, set())
+            self.assertEqual(context.declined_card_reward_keys, set())
+            receiver.consume({"type": "action_observed", "run_id": "r", "step_id": "s:t", "segment_id": "b",
+                              "state_match": {"match_status": "exact_state_id"}, "observation_before": combat_state(),
+                              "available_actions": {"commands": ["end"], "choices": []},
+                              "chosen_action": {"id": "END_TURN", "kind": "end_turn"}})
+            record = receiver.consume({"type": "step_resolved", "run_id": "r", "step_id": "s:t",
+                                       "observation_after": combat_state()})
+            self.assertEqual(record["segment_id"], "b")
+            receiver.close()
+            self.assertEqual(len(list(Path(directory).glob("human-*.jsonl"))), 1)
+            rows = [json.loads(line) for line in next(Path(directory).glob("human-*.jsonl")).read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["type"], "run_resumed")
+            self.assertEqual(rows[0]["checkpoint_id"], "cp")
+
     def test_smith_and_purge_entry_are_fine_grained_choices(self) -> None:
         for screen, prefix, kind, choices in (
             ("REST", "CAMPFIRE:SMITH", "campfire_action", ["rest", "smith"]),

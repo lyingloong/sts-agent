@@ -9,6 +9,7 @@ compilation.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -125,6 +126,7 @@ _FIELD_LABELS = {
     "discard_pile": "弃牌堆数量",
     "exhaust_pile": "消耗牌堆数量",
     "energy": "能量",
+    "stance": "姿态",
     "player": "我方",
     "monsters": "敌人",
     "powers": "状态效果",
@@ -182,7 +184,7 @@ _SCENE_GUIDANCE = {
     "RELIC_PICKUP_CARD_SELECTION": "这是遗物触发的选牌。读取 selection_context 的来源、选择目的、数量和已选项目，按本次遗物效果比较候选；不要套用普通卡牌奖励或其他选牌流程。",
     "COMBAT_REWARD": "这是战斗奖励界面。先确认可见金币、药水和遗物等奖励是否仍未领取，再处理卡牌奖励；没有明确理由不要跳过尚未领取的资源。",
     "EVENT": "这是事件界面。先读事件说明、选项和事件历史，确认当前选项是否已经改变事件阶段；比较生命、金币、牌组和后续路线的长期代价，避免重复上一阶段的选项。",
-    "SHOP_ROOM": "这是商店房间，还未打开商品界面。区分进入商店房间、打开商人和离开房间；按合法动作查看商人，不猜测未展示商品。若本局记忆表明已经访问并离开该商人，不要重复进入。",
+    "SHOP_ROOM": "这是商店房间，当前未打开商品界面。区分进入商店房间、打开商人和离开房间；按合法动作查看商人，不猜测未展示商品。已访问不代表不能重入：星系仪等遗物的奖励流程可能自动关闭商人界面，仍有购买或删牌需求时可以再次进入；没有需求时离开，避免无目的反复进出。",
     "SHOP_SCREEN": "这是商人界面。比较全部可见商品的效果、价格、当前金币和牌组缺口，以及移除牌的价值；考虑后续资源需求，不按名称或稀有度盲目购买。离开商人界面和离开商店房间是不同动作。",
     "REST": "这是营火界面。根据当前生命、牌组缺口和下一场精英或首领的风险，在休息、升级及其他可见选项之间权衡。",
     "BOSS_REWARD": "这是Boss奖励界面。比较所有Boss遗物和钥匙等可见选项对当前牌组、资源和后续路线的影响，不要把未查看的选项当成不存在。",
@@ -681,7 +683,10 @@ class QwenRanker:
                     continuation = self.torch.tensor([suffix[:-1]], device=self.model_device)
                     continuation_output = self.model(
                         input_ids=continuation,
-                        past_key_values=prefix_output.past_key_values,
+                        # DynamicCache.update mutates the supplied cache even
+                        # with use_cache=False. Each alternative must start
+                        # from the same untouched prompt cache.
+                        past_key_values=copy.deepcopy(prefix_output.past_key_values),
                         use_cache=False,
                     )
                     next_logprobs = self.torch.log_softmax(continuation_output.logits[0].float(), dim=-1)

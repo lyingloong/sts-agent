@@ -1,0 +1,37 @@
+{
+  "policy": {
+    "model": {
+      "base": "Qwen/Qwen3.8-27B",
+      "revision": "main",
+      "initial_adapter": "",
+      "initial_policy_version": "official-baseline"
+    },
+    "confidence_auto": {"enabled": false},
+    "request": {"screens": ["ALL"]},
+    "api": {
+      "local_port": 18080,
+      "remote_port": 8000,
+      "ssh_tunnel": true,
+      "timeout_seconds": 120,
+      "max_retries": 2,
+      "retry_backoff_seconds": 5,
+      "temperature": 0,
+      "thinking": false,
+      "max_output_tokens": 64,
+      "prompt_template": "canonical",
+      "output_dir": "data/experiments/baseline",
+      "serving": {
+        "tensor_parallel_size": 4,
+        "devices": "auto",
+        "minimum_free_memory_mib": 21000,
+        "maximum_gpu_utilization_percent": 10,
+        "max_model_len": 16384,
+        "gpu_memory_utilization": 0.85,
+        "enforce_eager": true,
+        "disable_nccl_p2p": true,
+        "disable_nccl_ib": true,
+        "deployment_file": "data/runtime/baseline-deployment.json"
+      }
+    }
+  }
+}

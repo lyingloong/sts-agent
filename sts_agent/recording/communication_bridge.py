@@ -62,7 +62,7 @@ def _state_message(message: dict[str, Any]) -> dict[str, Any]:
     state.pop("seed", None)
     if state.get("screen_type") != "MAP":
         state["map"] = None
-    return {
+    result = {
         "in_game": bool(message.get("in_game", bool(state))),
         "ready_for_command": bool(message.get("ready_for_command", True)),
         "available_commands": list(message.get("available_commands") or []),
@@ -71,6 +71,9 @@ def _state_message(message: dict[str, Any]) -> dict[str, Any]:
         "recorder_state_seq": message.get("recorder_state_seq"),
         "recorder_session": message.get("recorder_session"),
     }
+    if "recorder_segment_id" in message:
+        result["recorder_segment_id"] = message["recorder_segment_id"]
+    return result
 
 
 def _available(message: dict[str, Any]) -> dict[str, Any]:
@@ -258,16 +261,36 @@ class CommunicationBridgeRecorder:
             if event_type == "hello":
                 self._log({"type": "marker_hello", "recorder_session": raw.get("recorder_session")})
                 return
+            if event_type == "run_checkpoint":
+                # A save notification is lifecycle metadata, not an action
+                # transaction. It must not close pending actions or history.
+                self._log({
+                    "type": "run_checkpoint_marker",
+                    **{key: raw.get(key) for key in (
+                        "run_id", "segment_id", "checkpoint_id",
+                        "checkpoint_state_id", "timestamp_ms",
+                    )},
+                })
+                return
             if event_type in {"action_observed", "step_resolved", "room_changed", "combat_turn_changed", "raw_input"}:
                 # Legacy snapshots and auxiliary events must never compete
                 # with the explicit state-ID transaction protocol.
                 return
-            if event_type == "run_started":
+            if event_type in {"run_started", "run_resumed"}:
                 run_id = str(raw.get("run_id") or "")
+                if event_type == "run_resumed":
+                    for transaction in list(self.transactions.values()):
+                        if transaction.begin.get("run_id") != run_id:
+                            continue
+                        if transaction.accepted is not None:
+                            self._finalize(transaction, None, "save_reload")
+                        else:
+                            self.transactions.pop(transaction.transaction_id, None)
+                            self.closed_ids.append(transaction.transaction_id)
                 if run_id:
                     self.runs.add(run_id)
                 self.enricher.consume(raw)
-                self._log({"type": "run_started_marker", "run_id": run_id})
+                self._log({"type": event_type + "_marker", "run_id": run_id, "segment_id": raw.get("segment_id")})
                 return
             if event_type == "run_ended":
                 for transaction in list(self.transactions.values()):
@@ -363,6 +386,9 @@ class CommunicationBridgeRecorder:
                           if item.message.get("recorder_state_id") == state_id), None)
         if candidate is None:
             return None, "unmatched_state_id"
+        if (transaction.begin.get("segment_id") is not None
+                and candidate.message.get("recorder_segment_id") != transaction.begin["segment_id"]):
+            return None, "unmatched_segment"
         state = game_state(candidate.message)
         context = transaction.begin.get("context") or {}
         for key in ("act", "floor"):
@@ -405,6 +431,7 @@ class CommunicationBridgeRecorder:
                 candidate = self._referenced_state(marker.get("execution_before_state_id"))
                 if (candidate is not None
                         and candidate.message.get("recorder_session") == transaction.before.message.get("recorder_session")
+                        and candidate.message.get("recorder_segment_id") == transaction.before.message.get("recorder_segment_id")
                         and (candidate.message.get("recorder_state_seq") or 0)
                         > (transaction.before.message.get("recorder_state_seq") or 0)
                         and all(game_state(candidate.message).get(key) == value
@@ -420,6 +447,7 @@ class CommunicationBridgeRecorder:
             after = self._referenced_state((transaction.settled or {}).get("after_state_id"))
             if after is not None and (transaction.settled or {}).get("logical_boundary") is True:
                 if (after.message.get("recorder_session") == transaction.execution_before.message.get("recorder_session")
+                        and after.message.get("recorder_segment_id") == transaction.execution_before.message.get("recorder_segment_id")
                         and (after.message.get("recorder_state_seq") or 0)
                         > (transaction.execution_before.message.get("recorder_state_seq") or 0)):
                     self._finalize(transaction, after, "execution_settled")
@@ -444,6 +472,7 @@ class CommunicationBridgeRecorder:
         return sorted([
             item for item in self.states
             if item.message.get("recorder_session") == before.message.get("recorder_session")
+            and item.message.get("recorder_segment_id") == before.message.get("recorder_segment_id")
             and (item.message.get("recorder_state_seq") or 0) > (before.message.get("recorder_state_seq") or 0)
             and item.state_hash != before.state_hash
             and item.message.get("in_game")
@@ -504,6 +533,7 @@ class CommunicationBridgeRecorder:
         self.enricher.consume({
             "type": "action_observed",
             "run_id": run_id,
+            "segment_id": accepted.get("segment_id") or transaction.begin.get("segment_id"),
             "step_id": transaction.transaction_id,
             "timestamp_ms": accepted.get("timestamp_ms"),
             "observation_before": observation_before,

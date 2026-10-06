@@ -15,6 +15,8 @@ sts-agent-controller = "sts_agent.runtime.controller:main"
 sts-agent-overlay = "sts_agent.ui.overlay:main"
 sts-agent-terminal = "sts_agent.ui.terminal:main"
 sts-agent-policy = "sts_agent.policy.local_qwen:main"
+sts-agent-serve-baseline = "sts_agent.policy.serving:main"
+sts-agent-check-baseline = "sts_agent.policy.api:main"
 sts-agent-download-model = "sts_agent.commands.download_model:main"
 sts-agent-communication-bridge = "sts_agent.recording.communication_bridge:main"
 sts-agent-export-sft = "sts_agent.learning.export_teacher_sft:main"
@@ -26,6 +28,7 @@ sts-agent-codex-mcp = "sts_agent.codex_mcp:main"
 
 [project.optional-dependencies]
 codex = ["mcp>=1.9,<2"]
+serving = ["vllm>=0.17.0", "transformers>=5.8.0", "huggingface-hub>=0.34"]
 
 [tool.setuptools.packages.find]
 include = ["sts_agent*"]

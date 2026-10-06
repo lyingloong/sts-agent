@@ -17,16 +17,22 @@ ActionRecorder 原始 JSONL 保留完整源字段；下游适配器只把公开�
 .\.venv\Scripts\python.exe -m sts_agent.learning.export_human_sft --input ../ActionRecorder/datasets/a0-ironclad-v1 --output data/datasets/human-a0-v1
 ```
 
-输出目录必须不存在。不指定 tokenizer 时不做 token 长度过滤。
-若本地有目标模型 tokenizer，可统计实际 chat template 下各 prompt 版本的长度，并排除超长样本：
+输出目录必须不存在。不指定 tokenizer 时完整保留输入，明确提示尚未校验 token 长度。
+正式导出建议指定目标模型 tokenizer，统计实际 chat template 下各 prompt 版本的完整长度：
 
 ```powershell
 .\.venv\Scripts\python.exe -m sts_agent.learning.export_human_sft --input ../ActionRecorder/datasets/a0-ironclad-v1 --output data/datasets/human-a0-v1-checked --tokenizer models/base/Qwen3-0.6B --max-length 8192
 ```
 
-tokenizer 只从本地加载，不自动下载。`--max-length` 包含完整输入、答案和 EOS；任一训练模板
-超限都会整条排除并写入 `excluded-steps.jsonl`，不会截断状态、动作表或答案。8192 只是命令示例，
-最终长度应按目标模型 tokenizer 和显存统计决定。
+tokenizer 只从本地加载，不自动下载。指定 tokenizer 时默认 `--max-length 8192`，可显式调高；
+长度包含 chat template、完整输入、答案和 EOS。任一训练模板超限会报 error 并终止整个导出，
+列出样本 ID、各模板 token 数和上限；不截断，也不因超长而悄悄排除样本。调高上限后重新导出。
+只有全部处理成功才发布目标目录，失败时不留下半成品数据集，也不覆盖已有目录。
+取消、未执行、关联缺失等质量排除仍记录在 `excluded-steps.jsonl`，与长度超限错误区分。
+manifest 中 `length_checked` 标记是否校验，`length_policy` 为 `error_on_overflow_no_truncation`。
+
+导出上限不代表训练一定能装入显存；训练时应按目标 tokenizer 和数据长度设置匹配的上下文上限，
+不能以截断状态或动作列表来降低显存占用。
 
 ## 转换规则
 

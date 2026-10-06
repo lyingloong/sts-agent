@@ -81,6 +81,7 @@ def action_panel_mode_info(decision: Any) -> tuple[str, str]:
         "candidate_assist": ("动作面板 · 候选辅助", "模型给出候选，等待人工确认"),
         "confidence_auto": ("动作面板 · 置信度自动", "高置信度动作自动执行，其余等待确认"),
         "remote_online_rl": ("动作面板 · 在线强化学习", "策略采样结果自动执行"),
+        "baseline_inference": ("动作面板 · 预训练基线", "单动作生成；复核状态后自动执行"),
         "environment_automation": ("动作面板 · 环境推进", "Controller 正在执行无决策推进动作"),
         "teacher_collection": ("动作面板 · 远程教师", "教师选择动作并记录 SFT 数据"),
         "prompt_evolution": ("动作面板 · Prompt 演化", "教师选择动作并评估策略候选"),
@@ -1537,6 +1538,7 @@ class OverlayTerminal:
                     self.candidate_buttons.append(automatic)
                 else:
                     title_by_mode = {
+                        "baseline_inference": "基线模型动作",
                         "candidate_assist": "候选动作",
                         "confidence_auto": "置信度评分",
                     }
@@ -1548,6 +1550,11 @@ class OverlayTerminal:
                         confidence = decision.get("confidence") if isinstance(decision, dict) else {}
                         route = confidence.get("route") if isinstance(confidence, dict) else None
                         meta = "高置信度，已自动执行" if route == "auto_execute" else "低置信度，等待确认"
+                    elif mode == "baseline_inference":
+                        api = decision.get("api", {})
+                        meta = f"{status} · {api.get('latency_ms', '-')} ms · 输入 {api.get('input_tokens', '-')} tokens"
+                        if decision.get("assist_reason") and not candidates:
+                            meta += " · " + table_cell(decision["assist_reason"])
                     else:
                         meta = f"{count} 个选项"
                     self.candidate_meta.configure(text=f"模型：{model_id}  ·  {meta}")
@@ -1583,6 +1590,8 @@ class OverlayTerminal:
             prefix = (
                 "在线策略已执行"
                 if online_rl_mode
+                else "基线策略已执行"
+                if decision.get("mode") == "baseline_inference"
                 else "环境已自动执行"
                 if environment_mode
                 else "教师已自动执行"

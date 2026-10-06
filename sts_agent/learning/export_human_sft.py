@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -18,6 +19,22 @@ from sts_agent.learning.sft import (git_metadata, read_jsonl, render_chat_prefix
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.policy.local_qwen import PROMPT_TEMPLATES, build_scoring_prompt
 from sts_agent.recording.communication_bridge import CommunicationBridgeRecorder
+
+
+DEFAULT_MAX_LENGTH = 8192
+
+
+class ExportLengthError(ValueError):
+    """A full sample cannot fit; never truncate or silently exclude it."""
+
+    def __init__(self, sample_id: str, lengths: dict[str, int], limit: int):
+        self.sample_id, self.lengths, self.limit = sample_id, lengths, limit
+        detail = ", ".join(f"{name}={length}" for name, length in lengths.items())
+        super().__init__(
+            f"sample {sample_id} exceeds --max-length {limit}: {detail} tokens "
+            "(chat template + input + answer + EOS). Export aborted; no truncation "
+            "or length-based sample exclusion. Increase --max-length and retry."
+        )
 
 
 def checked_path(root: Path, item: dict) -> Path:
@@ -51,7 +68,7 @@ def export_record(row: dict) -> tuple[dict | None, str]:
         "run_config": row.get("run_config"), "screen_type": observation.get("screen_type"),
         "observation": observation, "legal_actions": aliases,
         "target": {"alias": mapping[target_id], "action_id": target_id},
-        "provenance": {"transaction_id": row["step_id"],
+        "provenance": {"transaction_id": row["step_id"], "segment_id": row.get("segment_id"),
                        "observation_source": row.get("training_observation_source"),
                        "submission_state_id": (row.get("raw_message_before") or {}).get("recorder_state_id"),
                        "execution_state_id": (row.get("execution_raw_message_before") or {}).get("recorder_state_id")},
@@ -71,10 +88,26 @@ def write_json(path: Path, value) -> None:
 
 def build_dataset(source: Path, output: Path, *, tokenizer=None, max_length: int | None = None,
                   tokenizer_name: str | None = None) -> dict:
-    if output.exists():
+    """Publish a complete bundle only on success; failures leave no partial output."""
+    if output.exists() or output.is_symlink():
         raise ValueError(f"output must be a new directory: {output}")
     if max_length is not None and (tokenizer is None or max_length < 1):
         raise ValueError("a positive --max-length requires --tokenizer")
+    if tokenizer is not None and max_length is None:
+        max_length = DEFAULT_MAX_LENGTH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{output.name}.export-", dir=output.parent) as temporary:
+        staging = Path(temporary) / "bundle"
+        result = _build_dataset(source, staging, tokenizer=tokenizer,
+                                max_length=max_length, tokenizer_name=tokenizer_name)
+        if output.exists() or output.is_symlink():
+            raise ValueError(f"output appeared during export; refusing to overwrite: {output}")
+        staging.rename(output)
+    return result
+
+
+def _build_dataset(source: Path, output: Path, *, tokenizer, max_length: int | None,
+                   tokenizer_name: str | None) -> dict:
     manifest_path = source / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != "actionrecorder-dataset-1":
@@ -114,12 +147,12 @@ def build_dataset(source: Path, output: Path, *, tokenizer=None, max_length: int
                     seen_transactions.add(row["step_id"])
                     sample, reason = export_record(row)
                     if sample is not None and tokenizer is not None:
-                        target_length = len(tokenizer(sample["target"]["alias"] + "\n", add_special_tokens=False)["input_ids"])
+                        target_length = len(tokenizer(sample["target"]["alias"] + "\n", add_special_tokens=False, truncation=False)["input_ids"])
                         target_length += int(tokenizer.eos_token_id is not None)
                         lengths = {}
                         for template_name, prompt in sample["prompt_variants"].items():
                             prefix = render_chat_prefix(tokenizer, prompt)
-                            length = len(tokenizer(prefix, add_special_tokens=False)["input_ids"]) + target_length
+                            length = len(tokenizer(prefix, add_special_tokens=False, truncation=False)["input_ids"]) + target_length
                             lengths[template_name] = length
                             report["variant_token_lengths"][template_name].append(length)
                         length = lengths["canonical"]
@@ -128,7 +161,7 @@ def build_dataset(source: Path, output: Path, *, tokenizer=None, max_length: int
                         report["token_lengths"].append(length)
                         overlong = [name for name, count in lengths.items() if max_length is not None and count > max_length]
                         if overlong:
-                            sample, reason = None, "overlong_prompt_variant:" + ",".join(overlong)
+                            raise ExportLengthError(sample["sample_id"], lengths, max_length)
                     counts[reason] += 1
                     if sample is None:
                         rejected.write(json.dumps({"run_id": run["run_id"], "transaction_id": row["step_id"], "reason": reason}) + "\n")
@@ -168,6 +201,7 @@ def build_dataset(source: Path, output: Path, *, tokenizer=None, max_length: int
               "files": {p.relative_to(PROJECT_ROOT).as_posix(): sha256_file(p) for p in provenance_files},
               "action_granularity": "fine", "prompt_templates": list(PROMPT_TEMPLATES),
               "tokenizer": tokenizer_name, "max_length": max_length,
+              "length_checked": tokenizer is not None, "length_policy": "error_on_overflow_no_truncation",
               "notes": "Only response tokens are supervised. Runtime entity descriptions are supplied by the game bridge; no local entity snapshot or character truncation is used."}
     write_json(output / "manifest.json", result)
     return result
@@ -178,13 +212,16 @@ def main() -> int:
     parser.add_argument("--input", type=Path, required=True, help="ActionRecorder dataset directory")
     parser.add_argument("--output", type=Path, required=True, help="new SFT bundle directory")
     parser.add_argument("--tokenizer", help="optional locally cached tokenizer name/path; never downloads")
-    parser.add_argument("--max-length", type=int, help="reject overlong samples, never truncate; requires tokenizer")
+    parser.add_argument("--max-length", type=int,
+                        help=f"abort on any overlong sample; default {DEFAULT_MAX_LENGTH} with --tokenizer; never truncate")
     args = parser.parse_args()
     try:
         tokenizer = None
         if args.tokenizer:
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
+        else:
+            print("warning: no --tokenizer; token length is not checked. Full prompts are preserved without truncation.", file=sys.stderr)
         result = build_dataset(args.input, args.output, tokenizer=tokenizer,
                                max_length=args.max_length, tokenizer_name=args.tokenizer)
         print(json.dumps(result["dataset"], ensure_ascii=False))

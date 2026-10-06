@@ -3,9 +3,43 @@ from __future__ import annotations
 import unittest
 
 from sts_agent.policy import local_qwen as policy_server
+from sts_agent.runtime.controller import normalize_combat, policy_observation
+from tests.test_trajectory_assembler import combat_state
 
 
 class PolicyPromptTests(unittest.TestCase):
+    def test_runtime_stance_reaches_all_prompt_layouts_and_combat_selections(self) -> None:
+        for stance_id, name in (("Neutral", "正常"), ("Calm", "平静"), ("Wrath", "愤怒"), ("Divinity", "神格")):
+            for screen in ("NONE", "GRID", "HAND_SELECT", "CARD_REWARD"):
+                with self.subTest(stance=stance_id, screen=screen):
+                    state = combat_state() | {"class": "WATCHER", "screen_type": screen}
+                    stance = {"id": stance_id, "name": name, "description": f"运行时姿态说明：{name}"}
+                    state["combat_state"]["player"]["stance"] = stance
+                    observation = policy_observation({"in_game": True, "game_state": state})
+                    self.assertEqual(observation["combat"]["player"]["stance"], stance)
+                    for template in policy_server.PROMPT_TEMPLATES:
+                        prompt = policy_server.build_scoring_prompt(observation, [{"id": "A1", "label": "确认"}], template)
+                        self.assertIn("姿态：", prompt)
+                        self.assertIn(f"ID={stance_id}", prompt)
+                        self.assertIn(stance["description"], prompt)
+
+    def test_missing_stance_is_unknown_not_assumed_neutral(self) -> None:
+        for player in ({}, {"stance": None}, {"stance": "Wrath"}):
+            with self.subTest(player=player):
+                normalized = normalize_combat({"player": player})
+                self.assertIsNone(normalized["player"]["stance"])
+                rendered = policy_server.render_observation({"screen_type": "COMBAT", "combat": normalized})
+                self.assertIn("姿态=未知", rendered)
+
+    def test_noncombat_screens_do_not_leak_stale_stance(self) -> None:
+        for screen in ("MAP", "COMBAT_REWARD", "SHOP_SCREEN"):
+            with self.subTest(screen=screen):
+                state = combat_state() | {"screen_type": screen, "room_phase": "COMPLETE"}
+                state["combat_state"]["player"]["stance"] = {"id": "Wrath", "name": "愤怒", "description": "旧战斗状态"}
+                observation = policy_observation({"in_game": True, "game_state": state})
+                self.assertNotIn("combat", observation)
+                self.assertNotIn("旧战斗状态", policy_server.render_observation(observation))
+
     def test_prompt_is_chinese_and_keeps_action_protocol(self) -> None:
         prompt = policy_server.build_scoring_prompt(
             {

@@ -48,6 +48,12 @@ maxInitializationTimeout=300
 
 controller 必须由 CommunicationMod 启动，一次只接受一个终端类客户端。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。运行模式由 [config/agent.json](config/agent.json) 的 `active_mode` 决定，模式专属参数位于 `config/modes/`；修改配置后重启游戏/controller 和 UI。
 
+### 官方权重基线测试
+
+选择 `baseline_inference` 可用远端常驻 vLLM 测试官方 Qwen3.8-27B BF16：本机仅控制游戏，
+通过 SSH 通道请求单一动作；不启用训练或教师模式，评测轨迹与人工采集分开。
+远端与本机使用同仓库的不同入口，准备命令和全部参数见 [基线推理](doc/BASELINE_INFERENCE.md)。
+
 ### Codex 自动游玩采集
 
 将 `config/agent.json` 的 `active_mode` 设为 `collect_codex`，启动游戏使 CommunicationMod 拉起 controller，再在 Codex 会话中启用 `sts-agent-codex-mcp`。Codex 通过 MCP 获取当前模型可见 observation 和合法动作，并以动作 ID 提交选择；轨迹写入 `data/trajectories/codex/`，与人类数据分开。配置 MCP 的客户端步骤和逐步游玩规程见 [A0 战士 Codex 游玩说明](doc/CODEX_PLAY_A0_IRONCLAD.md)。

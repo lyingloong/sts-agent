@@ -46,6 +46,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "runtime": "local",
         "model": {
             "base": "Qwen/Qwen3-0.6B",
+            "revision": "main",
             "initial_adapter": "",
             "initial_policy_version": "sft-v0",
             "hub_endpoint": "https://huggingface.co",
@@ -78,6 +79,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "confidence_auto": {
             "enabled": True,
             "min_probability": 0.85,
+        },
+        "api": {
+            "local_port": 18080,
+            "remote_port": 8000,
+            "ssh_tunnel": True,
+            "timeout_seconds": 120.0,
+            "max_retries": 2,
+            "retry_backoff_seconds": 5.0,
+            "temperature": 0.0,
+            "thinking": False,
+            "max_output_tokens": 64,
+            "prompt_template": "canonical",
+            "output_dir": "data/experiments/baseline",
+            "serving": {
+                "tensor_parallel_size": 4,
+                "devices": "auto",
+                "minimum_free_memory_mib": 21000,
+                "maximum_gpu_utilization_percent": 10,
+                "max_model_len": 16384,
+                "gpu_memory_utilization": 0.85,
+                "enforce_eager": True,
+                "disable_nccl_p2p": True,
+                "disable_nccl_ib": True,
+                "deployment_file": "data/runtime/baseline-deployment.json",
+            },
         },
     },
     "teacher": {
@@ -217,6 +243,8 @@ def _validate_framework_combination(framework: dict[str, str]) -> None:
     control = framework["control_mode"]
     backend = framework["policy_backend"]
     learning = framework["learning_method"]
+    if backend == "remote_api" and (control != "autonomous" or learning != "none"):
+        raise ConfigError("remote_api requires autonomous control without learning")
     if control == "manual" and backend != "none":
         raise ConfigError("manual control requires framework.policy_backend=none")
     if control == "codex" and (backend != "none" or learning != "collect_codex"):
@@ -247,7 +275,13 @@ def _apply_framework_runtime(config: dict[str, Any], framework: dict[str, str]) 
     backend = framework["policy_backend"]
     learning = framework["learning_method"]
 
-    if backend in {"local_qwen", "remote_qwen", "mock"}:
+    if backend == "remote_api":
+        policy["enabled"] = True
+        policy["runtime"] = "remote_api"
+        teacher["enabled"] = False
+        posthoc["enabled"] = False
+        evolution["enabled"] = False
+    elif backend in {"local_qwen", "remote_qwen", "mock"}:
         policy["enabled"] = True
         policy["runtime"] = "local" if backend in {"local_qwen", "mock"} else (
             "remote_online_rl" if learning == "online_rl" else "remote_inference"
@@ -335,9 +369,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("codex mode uses Codex as the external policy; disable policy and teacher backends")
 
     _require_bool(policy["enabled"], "policy.enabled")
-    if policy["runtime"] not in {"local", "remote_inference", "remote_online_rl"}:
+    if policy["runtime"] not in {"local", "remote_inference", "remote_online_rl", "remote_api"}:
         raise ConfigError("policy.runtime must be local, remote_inference, or remote_online_rl")
     _require_string(model["base"], "policy.model.base")
+    _require_string(model["revision"], "policy.model.revision")
     if not isinstance(model["initial_adapter"], str):
         raise ConfigError("policy.model.initial_adapter must be a string")
     _require_string(model["initial_policy_version"], "policy.model.initial_policy_version")
@@ -381,6 +416,41 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("policy.remote.inference_gpu.minimum_free_memory_mib must be a positive integer")
     _require_bool(confidence["enabled"], "policy.confidence_auto.enabled")
     _require_number(confidence["min_probability"], "policy.confidence_auto.min_probability", 0.0, 1.0)
+    if policy["runtime"] == "remote_api":
+        if model["initial_adapter"] or development["mock"]:
+            raise ConfigError("baseline remote_api requires an unmodified model (no adapter/mock)")
+    api = policy["api"]
+    for key in ("local_port", "remote_port", "max_output_tokens"):
+        value = api[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            raise ConfigError(f"policy.api.{key} must be an integer from 1 to 65535")
+    for key in ("ssh_tunnel", "thinking"):
+        _require_bool(api[key], f"policy.api.{key}")
+    _require_number(api["timeout_seconds"], "policy.api.timeout_seconds", 1, 600)
+    _require_number(api["retry_backoff_seconds"], "policy.api.retry_backoff_seconds", 1, 60)
+    _require_number(api["temperature"], "policy.api.temperature", 0, 2)
+    if isinstance(api["max_retries"], bool) or not isinstance(api["max_retries"], int) or not 0 <= api["max_retries"] <= 5:
+        raise ConfigError("policy.api.max_retries must be an integer from 0 to 5")
+    if api["prompt_template"] not in {"canonical", "state_first", "decision_first"}:
+        raise ConfigError("policy.api.prompt_template is invalid")
+    serving = api["serving"]
+    for key in ("tensor_parallel_size", "minimum_free_memory_mib", "max_model_len"):
+        if isinstance(serving[key], bool) or not isinstance(serving[key], int) or serving[key] < 1:
+            raise ConfigError(f"policy.api.serving.{key} must be a positive integer")
+    devices = serving["devices"]
+    if devices != "auto" and (not isinstance(devices, list) or len(devices) != serving["tensor_parallel_size"] or
+            any(isinstance(d, bool) or not isinstance(d, int) or d < 0 for d in devices) or len(set(devices)) != len(devices)):
+        raise ConfigError("policy.api.serving.devices must be 'auto' or distinct GPU indices matching tensor_parallel_size")
+    _require_number(serving["maximum_gpu_utilization_percent"], "policy.api.serving.maximum_gpu_utilization_percent", 0, 100)
+    _require_number(serving["gpu_memory_utilization"], "policy.api.serving.gpu_memory_utilization", 0.1, 0.95)
+    for key in ("enforce_eager", "disable_nccl_p2p", "disable_nccl_ib"):
+        _require_bool(serving[key], f"policy.api.serving.{key}")
+    for name, value in (("output_dir", api["output_dir"]), ("serving.deployment_file", serving["deployment_file"])):
+        _require_string(value, f"policy.api.{name}")
+        if Path(value).is_absolute() or ".." in Path(value).parts:
+            raise ConfigError(f"policy.api.{name} must be project-relative")
+    if api["max_output_tokens"] >= serving["max_model_len"]:
+        raise ConfigError("policy.api.max_output_tokens must be smaller than max_model_len")
 
     _require_bool(teacher["enabled"], "teacher.enabled")
     _require_string(teacher["base_url"], "teacher.base_url")
@@ -506,7 +576,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def load_agent_config(root: Path | None = None, config_file: str | Path | None = None) -> dict[str, Any]:
+def load_agent_config(root: Path | None = None, config_file: str | Path | None = None, *, mode: str | None = None) -> dict[str, Any]:
     """Load the active named mode plus shared settings into runtime config."""
     path = config_path(root, config_file)
     try:
@@ -525,7 +595,7 @@ def load_agent_config(root: Path | None = None, config_file: str | Path | None =
         raise ConfigError(f"unknown config field(s) in {path}: {unknown}; mode-specific settings belong in config/modes/<mode>.json")
     if provided.get("schema_version") != 2:
         raise ConfigError("config/agent.json schema_version must be 2")
-    mode_name = provided.get("active_mode")
+    mode_name = mode if mode is not None else provided.get("active_mode")
     if not isinstance(mode_name, str) or mode_name not in MODE_FRAMEWORKS:
         choices = ", ".join(sorted(MODE_FRAMEWORKS))
         raise ConfigError(f"active_mode must be one of: {choices}")

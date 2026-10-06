@@ -13,6 +13,7 @@
 | `active_mode` | 用途 | 配置文件 |
 | --- | --- | --- |
 | `collect_human` | 人类在游戏内游玩并采集轨迹；当前默认 | [collect_human.json](modes/collect_human.json) |
+| `baseline_inference` | 官方 27B BF16 基线；本机控制、远端常驻 vLLM、SSH 调用，不训练 | [baseline_inference.json](modes/baseline_inference.json) |
 | `candidate_assist_local` | 本机 Qwen 给出候选，由玩家选择或修正 | [candidate_assist_local.json](modes/candidate_assist_local.json) |
 | `candidate_assist_remote` | 远端 Qwen 候选辅助 | [candidate_assist_remote.json](modes/candidate_assist_remote.json) |
 | `teacher_sft` | 远端教师自动游玩并生成 SFT 数据 | [teacher_sft.json](modes/teacher_sft.json) |
@@ -35,6 +36,14 @@ python -c "from sts_agent.config import load_agent_config; c=load_agent_config()
 - `online_rl.json`：仅训练机上的在线 RL 实验参数，被 Git 忽略；结构见 [`online_rl.example.json`](online_rl.example.json) 和 [远端在线 RL 文档](../doc/REMOTE_ONLINE_RL.md)。
 
 模式加载后，内部仍生成统一的运行配置供 controller、Overlay、MCP 和训练组件使用；该运行时配置不需要手动编辑。JSON 有严格字段校验，未知字段会在启动时明确报错。
+
+## 官方模型基线
+
+`baseline_inference` 的模型与全部 API/服务参数集中在该模式 profile 中，SSH 主机沿用共享的
+`policy.remote.ssh_host`。本机使用 controller，远端使用 `python -m sts_agent.policy.serving`；
+远端服务入口显式加载 baseline profile，无需修改远端 `active_mode`。
+远端部署、输入限制与日志解释见 [基线推理文档](../doc/BASELINE_INFERENCE.md)。
+首次实验关闭 thinking、无 adapter、生成一个动作并复核状态后自动执行，不使用 0.85 置信度门槛。
 
 ## 人类轨迹采集
 

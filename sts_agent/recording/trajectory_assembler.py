@@ -81,6 +81,27 @@ def resolve_recorded_action(
 ) -> tuple[dict[str, Any], bool, str]:
     """Resolve a game-side semantic event to one current agent action."""
     action_id = str(recorded.get("id") or "")
+    state = state if isinstance(state, dict) else {}
+    screen_state = state.get("screen_state") if isinstance(state.get("screen_state"), dict) else {}
+    source_id = recorded.get("source_reward_id")
+    if source_id is not None and source_id != screen_state.get("source_reward_id"):
+        return copy.deepcopy(recorded), False, "source_reward_identity_mismatch"
+    reward_id = recorded.get("reward_id")
+    if reward_id is not None:
+        entries = screen_state.get("relics" if state.get("screen_type") == "BOSS_REWARD" else "rewards")
+        matches = [(i, item) for i, item in enumerate(entries if isinstance(entries, list) else [])
+                   if isinstance(item, dict) and item.get("reward_id") == reward_id]
+        if len(matches) != 1:
+            return copy.deepcopy(recorded), False, "reward_identity_missing_or_ambiguous"
+        index, reward = matches[0]
+        if (type(recorded.get("reward_index")) is not int or recorded["reward_index"] != index
+                or type(reward.get("reward_index")) is not int or reward["reward_index"] != index):
+            return copy.deepcopy(recorded), False, "reward_index_mismatch"
+        if recorded.get("reward_type") and reward.get("reward_type") != recorded["reward_type"]:
+            return copy.deepcopy(recorded), False, "reward_type_mismatch"
+        match = next((item for item in legal_actions if item.get("id") == f"CHOOSE:index={index}"), None)
+        return (copy.deepcopy(match), True, "reward_identity") if match else (
+            copy.deepcopy(recorded), False, "reward_choice_not_legal")
     exact = next((item for item in legal_actions if str(item.get("id") or "") == action_id), None)
     if exact is not None:
         # A positional PLAY/CHOOSE ID is insufficient if the hand/order moved.
@@ -205,6 +226,7 @@ def resolve_recorded_action(
 @dataclass
 class RunContext:
     run_id: str
+    segment_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     visited_shop_rooms: set[tuple[int, int]] = field(default_factory=set)
     declined_card_reward_keys: set[tuple[int, int]] = field(default_factory=set)
@@ -236,11 +258,20 @@ class ActionRecorderEnricher:
         if not run_id:
             return None
         context = self.runs.setdefault(run_id, RunContext(run_id))
-        if event_type == "run_started":
+        if event_type in {"run_started", "run_resumed"}:
+            if event_type == "run_resumed":
+                self._flush_unresolved(context, "save_reload")
+                self._flush_selection(context, cancelled=True)
             context.metadata.update(
                 {key: event.get(key) for key in ("character", "ascension", "seed", "act")}
             )
             self._open_output(context)
+            context.segment_id = event.get("segment_id")
+            if event_type == "run_resumed":
+                context.action_history.clear()
+                context.visited_shop_rooms.clear()
+                context.declined_card_reward_keys.clear()
+                self._write(context, {**copy.deepcopy(event), "run_config": copy.deepcopy(context.metadata)})
             return None
         if event_type == "action_observed":
             self._start_step(context, event)
@@ -275,6 +306,9 @@ class ActionRecorderEnricher:
                     try:
                         previous = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if previous.get("type") == "run_resumed":
+                        context.action_history.clear()
                         continue
                     if not previous.get("accepted") or not isinstance(previous.get("action"), dict):
                         continue
@@ -330,7 +364,7 @@ class ActionRecorderEnricher:
         exact_pre = (isinstance(event.get("state_match"), dict)
                      and event["state_match"].get("match_status") == "exact_state_id")
         usable = state_available and is_legal and bool(legal_actions) and exact_pre
-        exclusion = None
+        exclusion = None if usable else (resolution if not is_legal else "missing_or_invalid_submission_state")
         if tracked:
             execution_state = game_state(execution_message) if isinstance(execution_message, dict) else {}
             same_identity = (execution_action.get("kind") == recorded.get("kind")
@@ -352,6 +386,7 @@ class ActionRecorderEnricher:
             "schema_version": "0.5",
             "source": "communicationmod_action_recorder_bridge",
             "run_id": context.run_id,
+            "segment_id": event.get("segment_id") or context.segment_id,
             "run_config": copy.deepcopy(context.metadata),
             "step_id": step_id,
             "screen_type": full_state.get("screen_type"),

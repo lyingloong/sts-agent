@@ -314,6 +314,7 @@ def reward_automation_label(reward_type: str, reward: dict[str, Any]) -> str:
 def environment_auto_action(
     message: dict[str, Any],
     actions: list[dict[str, Any]],
+    visited_shop_rooms: set[tuple[int, int]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Choose one non-strategic progress action before calling a policy.
 
@@ -355,8 +356,11 @@ def environment_auto_action(
                 }
 
     if screen_type == "SHOP_ROOM":
+        # Remember visits for automation only. Orrery rewards can close the
+        # merchant screen; revisiting remains a real, legal player decision.
+        already_visited = shop_visit_key(message) in (visited_shop_rooms or set())
         choices = state.get("choice_list")
-        if isinstance(choices, list):
+        if isinstance(choices, list) and not already_visited:
             for index, choice in enumerate(choices):
                 normalized = "".join(str(choice).casefold().split())
                 if normalized not in {"merchant", "shop", "entershop", "商人", "商店", "进入商店"}:
@@ -847,7 +851,7 @@ def is_settings_overlay(state: dict[str, Any]) -> bool:
 
 
 def shop_visit_key(message: dict[str, Any]) -> tuple[int, int] | None:
-    """Identify a shop by Act and floor for per-run re-entry guards."""
+    """Identify a shop by Act and floor for visit memory and automation."""
     state = game_state(message)
     try:
         act = int(state.get("act"))
@@ -861,18 +865,11 @@ def is_shop_room(state: dict[str, Any]) -> bool:
     return str(state.get("screen_type") or "").upper() == "SHOP_ROOM"
 
 
-def shop_reentry_blocked(message: dict[str, Any], visited_shop_rooms: set[tuple[int, int]] | None) -> bool:
-    if not visited_shop_rooms or not is_shop_room(game_state(message)):
-        return False
-    key = shop_visit_key(message)
-    return key in visited_shop_rooms if key is not None else False
-
-
 def run_memory_summary(
     visited_shop_rooms: set[tuple[int, int]] | None,
     declined_card_reward_keys: set[tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
-    """Expose explicit environment constraints without replaying history."""
+    """Expose visit/reward memory; a shop visit is not a re-entry constraint."""
     rooms = sorted(visited_shop_rooms or set())
     declined = sorted(declined_card_reward_keys or set())
     return {
@@ -1385,6 +1382,7 @@ def overlay_deck_summary(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 PUBLIC_ITEM_SCALAR_FIELDS = {
+    "reward_id", "reward_index", "linked_reward_id",
     "reward_type",
     "name",
     "id",
@@ -1484,6 +1482,8 @@ def normalize_match_game(value: Any) -> dict[str, Any] | None:
 
 def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
+    if "source_reward_id" in value:
+        result["source_reward_id"] = value["source_reward_id"]
     if screen_type in {"CARD_REWARD", "GRID"}:
         cards = value.get("cards", [])
         result["cards"] = [visible_card(card) for card in cards if isinstance(card, dict)]
@@ -1536,7 +1536,8 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
         result["purge_available"] = value.get("purge_available")
         result["purge_cost"] = value.get("purge_cost")
     elif screen_type == "BOSS_REWARD":
-        result["relics"] = [visible_relic(item) for item in value.get("relics", []) if isinstance(item, dict)]
+        result["relics"] = [visible_relic(item) | {key: item[key] for key in ("reward_id", "reward_index") if key in item}
+                            for item in value.get("relics", []) if isinstance(item, dict)]
     elif screen_type == "HAND_SELECT":
         result["hand"] = [visible_card(item) for item in value.get("hand", []) if isinstance(item, dict)]
         result["selected"] = [visible_card(item) for item in value.get("selected", []) if isinstance(item, dict)]
@@ -1560,6 +1561,11 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
 
 def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False) -> dict[str, Any]:
     player = combat.get("player") if isinstance(combat.get("player"), dict) else {}
+    raw_stance = player.get("stance")
+    stance = (
+        {key: raw_stance.get(key) for key in ("id", "name", "description")}
+        if isinstance(raw_stance, dict) else None
+    )
     player_powers = player.get("powers") if isinstance(player.get("powers"), list) else None
     raw_monsters = combat.get("monsters")
     monster_values = raw_monsters if isinstance(raw_monsters, list) else []
@@ -1603,6 +1609,7 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
             "max_hp": player.get("max_hp"),
             "block": player.get("block"),
             "energy": player.get("energy"),
+            "stance": stance,
             "powers": powers_summary(player.get("powers")),
         },
         "monsters": monsters if isinstance(raw_monsters, list) else None,
@@ -1796,7 +1803,7 @@ def semantic_actions(
     # emitted here because there is no combat target list on these screens.
     if not is_map_screen(state):
         result.extend(potion_actions(state, commands))
-    if "choose" in commands and isinstance(choices, list) and (include_recorded_choices or not shop_reentry_blocked(message, visited_shop_rooms)):
+    if "choose" in commands and isinstance(choices, list):
         blocked_indices = blocked_potion_reward_indices(message) | blocked_gold_reward_indices(message) | blocked_card_reward_indices(
             message,
             declined_card_reward_keys,
@@ -2201,8 +2208,6 @@ def parse_human_input(
             index = int(token)
         except ValueError:
             return None, None, "选项序号必须是整数。"
-        if shop_reentry_blocked(message, visited_shop_rooms):
-            return None, None, "该商店入口本层已访问，不能再次进入；请输入 c 继续离开。"
         blocked_error = blocked_potion_choice_error(message, index) or blocked_gold_choice_error(message, index)
         if blocked_error:
             return None, None, blocked_error
@@ -2554,8 +2559,6 @@ def format_view(
         if blocked_gold:
             labels = ", ".join(str(choices[index]) for index in sorted(blocked_gold))
             lines.append(f"不可选：{labels}（持有灵体外质，不能再获得金币）")
-    if shop_reentry_blocked(message, visited_shop_rooms):
-        lines.append("商店入口已在本层访问；不能再次进入。请输入 c 继续离开商店房间。")
     lines.append("合法动作")
     for action in actions if actions is not None else semantic_actions(message, visited_shop_rooms):
         label = action["id"]
@@ -2670,6 +2673,11 @@ class PolicyClient:
         self.remote_model_id = self.model
         self.online_rl_status: dict[str, Any] = {}
         self.online_rl_attribution_enabled = False
+        self.api = None
+        if self.runtime == "remote_api":
+            from sts_agent.policy.api import ApiPolicyClient
+
+            self.api = ApiPolicyClient(project_root, config)
 
     def _python_executable(self) -> str:
         if self.python != "auto":
@@ -2792,6 +2800,8 @@ class PolicyClient:
 
     def status_decision(self) -> dict[str, Any]:
         """Expose startup/readiness state even on screens without ranking."""
+        if self.api is not None:
+            return self.api.status_decision()
         if self.enabled and self.process is not None and self.process.poll() is None:
             if self.runtime == "remote_online_rl":
                 return self.online_rl_status_decision("在线策略就绪；等待下一次 rollout")
@@ -2805,6 +2815,8 @@ class PolicyClient:
 
     def requesting_decision(self) -> dict[str, Any]:
         """Expose an immediate UI state while a policy request is in flight."""
+        if self.api is not None:
+            return self.api.requesting_decision()
         if not self.enabled:
             return self.status_decision()
         if self.runtime == "remote_online_rl":
@@ -2822,6 +2834,8 @@ class PolicyClient:
 
     def prewarm(self) -> dict[str, Any]:
         """Load the local policy before CommunicationMod receives readiness."""
+        if self.api is not None:
+            return self.api.prewarm()
         if not self.enabled:
             return self.status_decision()
         self._start()
@@ -2976,6 +2990,8 @@ class PolicyClient:
         run_id: str | None = None,
         run_config: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        if self.api is not None:
+            return self.api.rank(observation, legal_actions, run_id=run_id, run_config=run_config)
         if not legal_actions:
             return None
         if not self.enabled:
@@ -3264,6 +3280,8 @@ class PolicyClient:
         }
 
     def close(self) -> None:
+        if getattr(self, "api", None) is not None:
+            self.api.close()
         process = self.process
         self.process = None
         if process is None:
@@ -3690,6 +3708,11 @@ def auto_action_for_decision(
     """Resolve only a controller-approved high-confidence model action."""
     if not isinstance(decision, dict):
         return None
+    if decision.get("mode") == "baseline_inference":
+        if not decision.get("api", {}).get("revalidated"):
+            return None
+        action_id = str(decision.get("model_action", ""))
+        return next((action for action in actions if str(action.get("id", "")) == action_id), None)
     if decision.get("mode") == "remote_online_rl":
         action_id = str(decision.get("model_action", ""))
         return next((action for action in actions if str(action.get("id", "")) == action_id), None)
@@ -3887,7 +3910,7 @@ def ask_action(
     # Do this before contacting a teacher or policy. It keeps reward handling
     # deterministic and avoids spending an inference call on a non-decision.
     if not error:
-        environment_action = environment_auto_action(message, actions)
+        environment_action = environment_auto_action(message, actions, visited_shop_rooms)
         if environment_action is not None:
             action, detail = environment_action
             decision = environment_auto_decision(action, detail)
@@ -3967,17 +3990,26 @@ def ask_action(
         )
     elif policy is None:
         decision = None
+    elif error and getattr(policy, "runtime", "local") == "remote_api":
+        policy.api.pending = None
+        decision = {**policy.status_decision(), "assist_status": "暂停，需人工处理", "assist_reason": error}
     elif candidate_assist_allowed(message, policy.screens):
         observation = policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys)
         requesting_decision = getattr(policy, "requesting_decision", None)
         if callable(requesting_decision):
             send_model_update(requesting_decision(), model_pending=True)
-        if getattr(policy, "runtime", "local") == "remote_online_rl":
+        if getattr(policy, "runtime", "local") in {"remote_online_rl", "remote_api"}:
             decision = policy.rank(observation, actions, run_id=run_id, run_config=run_config)
         else:
             decision = policy.rank(observation, actions)
     else:
         decision = policy.status_decision()
+    if (not error and isinstance(decision, dict) and decision.get("mode") == "baseline_inference"
+            and decision.get("model_action") and not decision.get("api", {}).get("revalidated")):
+        send_model_update(decision, model_pending=True)
+        # STATE is a protocol query, not a game action or training example.
+        print("STATE", flush=True)
+        return "STATE", {"id": "STATE", "kind": "state_request", "command": "STATE"}, None
     # Error responses are a hard human handoff. Repeating an otherwise
     # high-confidence action after the protocol rejects it can create a tight
     # automatic loop and should never be treated as a new policy decision.
@@ -3991,6 +4023,8 @@ def ask_action(
             automatic = auto_action_for_decision(decision, actions)
             if isinstance(decision, dict) and decision.get("mode") == "remote_online_rl":
                 automatic_source = "online_policy_sample"
+            elif isinstance(decision, dict) and decision.get("mode") == "baseline_inference":
+                automatic_source = "baseline_model"
     if automatic is not None:
         automatic_decision = finalize_decision(decision, automatic, automatic_source)
         confidence = automatic_decision.get("confidence", {}) if automatic_decision else {}
@@ -4010,6 +4044,10 @@ def ask_action(
                 file=sys.stderr,
                 flush=True,
             )
+        elif automatic_source == "baseline_model":
+            api_info = automatic_decision.get("api", {})
+            print(f"baseline auto: {automatic.get('id')} latency_ms={api_info.get('latency_ms')} "
+                  f"input_tokens={api_info.get('input_tokens')}", file=sys.stderr, flush=True)
         else:
             print(
                 f"confidence auto: {automatic.get('id')} "
@@ -4018,7 +4056,7 @@ def ask_action(
                 file=sys.stderr,
                 flush=True,
             )
-        if automatic_source in {"teacher_auto", "online_policy_sample"}:
+        if automatic_source in {"teacher_auto", "online_policy_sample", "baseline_model"}:
             # Both automatic modes bypass terminal input. Push their resolved
             # result first so the Overlay can show the actual selected action
             # instead of leaving the Model/Action panel blank.
@@ -4136,6 +4174,10 @@ def main() -> int:
         print(f"prompt evolution unavailable: {exc}", file=sys.stderr, flush=True)
         return 2
     policy = PolicyClient(project_root, config)
+    if policy.runtime == "remote_api":
+        # AI evaluation records never enter the human collection directory.
+        trace_dir = policy.api.output_dir
+        raw_path = trace_dir / f"messages-{session_id}.jsonl"
     teacher = TeacherClient(project_root, config, prompt_evolution)
     posthoc = PosthocFeedbackClient(project_root, config["posthoc_feedback"])
     pending: dict[str, Any] | None = None
@@ -4197,6 +4239,8 @@ def main() -> int:
     def write_trace(value: dict[str, Any]) -> None:
         if trace_output is not None:
             write_jsonl(trace_output, value)
+            if policy.runtime == "remote_api":
+                policy.api.record_result(value)
 
     def write_event(value: dict[str, Any]) -> None:
         if event_output is not None:
@@ -4806,6 +4850,16 @@ def main() -> int:
                     write_event({"event": "prompt_evolution_auto_restart", "run_id": run_id, "at": now_iso()})
                     print(command, flush=True)
                     continue
+                if policy.runtime == "remote_api" and run_id is None and message.get("in_game"):
+                    # Attaching mid-run is allowed, but is explicitly partial
+                    # and must not count as a full autonomous baseline game.
+                    attached_state = game_state(message)
+                    begin_run({"character": attached_state.get("class", "UNKNOWN"),
+                               "ascension": attached_state.get("ascension_level", 0),
+                               "command": None}, "baseline_inference")
+                    assert run_config is not None
+                    run_config["partial_run"] = True
+                    write_event({"event": "run_attached", "run_id": run_id, "partial_run": True, "at": now_iso()})
                 if run_config is not None and run_config.get("internal_seed") is None and message.get("in_game"):
                     observed_seed = game_state(message).get("seed")
                     if observed_seed is not None:
@@ -4844,7 +4898,9 @@ def main() -> int:
                 if action.get("kind") == "start_run":
                     collection_mode = "codex" if config["framework"]["control_mode"] == "codex" else (
                         "prompt_evolution" if prompt_evolution.enabled else ("teacher_sft" if teacher.enabled else (
-                            "remote_online_rl" if policy.runtime == "remote_online_rl" else "interactive"
+                            "remote_online_rl" if policy.runtime == "remote_online_rl" else (
+                                "baseline_inference" if policy.runtime == "remote_api" else "interactive"
+                            )
                         ))
                     )
                     print(begin_run(action, collection_mode), flush=True)

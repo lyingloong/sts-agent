@@ -611,6 +611,30 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(decision["source"], "environment_auto")
         self.assertEqual(decision["environment"]["rule"], "shop_open_merchant")
 
+    def test_visited_shop_remains_legal_without_automatic_reopening(self) -> None:
+        message = shop_room_message()
+        message["game_state"].update({"act": 1, "floor": 14})
+        visited = {(1, 14)}
+        actions = controller.semantic_actions(message, visited)
+        self.assertEqual(actions, controller.semantic_actions(message))
+        self.assertIn("CHOOSE 0", [action["command"] for action in actions])
+        self.assertIsNone(controller.environment_auto_action(message, actions, visited))
+        command, action, error = controller.parse_human_input("0", message, visited_shop_rooms=visited)
+        self.assertEqual(command, "CHOOSE 0")
+        self.assertEqual(action["id"], "CHOOSE:index=0")
+        self.assertIsNone(error)
+        self.assertNotIn("不能再次进入", controller.format_view(message, "run-1", visited_shop_rooms=visited))
+        observation = controller.policy_observation(message, visited)
+        self.assertEqual(observation["run_memory"]["visited_shop_rooms"], [{"act": 1, "floor": 14}])
+
+    def test_visiting_another_shop_does_not_disable_first_visit_automation(self) -> None:
+        message = shop_room_message()
+        message["game_state"].update({"act": 2, "floor": 22})
+        visited = {(1, 14)}
+        result = controller.environment_auto_action(message, controller.semantic_actions(message, visited), visited)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1]["rule"], "shop_open_merchant")
+
     def test_automatic_action_waits_briefly_before_command(self) -> None:
         with patch.object(controller.time, "sleep") as sleep:
             command, action, decision = controller.ask_action(
