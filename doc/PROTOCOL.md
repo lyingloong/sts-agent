@@ -27,6 +27,12 @@ ActionRecorder 0.5 通过 `recording.listen` 端口发送完整状态及动作�
 
 Windows 后台入口使用 `pythonw.exe`，避免启动时弹出控制台窗口；CommunicationMod 提供的 stdin/stdout/stderr 管道仍用于协议和诊断。手动在终端排错时使用 `python.exe`。
 
+Recorder 的主动采集快照复用该管道，并带 `recorder_snapshot_only=true` 和
+`recorder_snapshot_kind=action_before/execution_before/effects_settled`。
+controller 会保存它们，但不能用其 ready_for_command 确认动作或推进决策；
+人类采集 bridge 则仍用于精确状态 ID 配对。正常 CM 发布标记为 false。
+错误包不包含有效观察：执行控制器先发 STATE，拿新观察后再处理人工恢复。
+
 ### 人类采集格式
 
 `human-*.jsonl` 为每局独立文件，保留 `observation_before/after`、原始

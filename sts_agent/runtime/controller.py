@@ -4008,7 +4008,6 @@ def ask_action(
             and decision.get("model_action") and not decision.get("api", {}).get("revalidated")):
         send_model_update(decision, model_pending=True)
         # STATE is a protocol query, not a game action or training example.
-        print("STATE", flush=True)
         return "STATE", {"id": "STATE", "kind": "state_request", "command": "STATE"}, None
     # Error responses are a hard human handoff. Repeating an otherwise
     # high-confidence action after the protocol rejects it can create a tight
@@ -4121,7 +4120,6 @@ def ask_action(
             error = parse_error or "无效动作。"
             continue
         if command == "STATE":
-            print(command, flush=True)
             return command, {"id": "STATE", "kind": "state_request", "command": command}, None
         codex_control = config is not None and config["framework"]["control_mode"] == "codex"
         source = "codex" if codex_control else candidate_source_for_input(text, decision)
@@ -4181,6 +4179,7 @@ def main() -> int:
     teacher = TeacherClient(project_root, config, prompt_evolution)
     posthoc = PosthocFeedbackClient(project_root, config["posthoc_feedback"])
     pending: dict[str, Any] | None = None
+    protocol_error: str | None = None
     current_message: dict[str, Any] | None = None
     run_id: str | None = None
     run_config: dict[str, Any] | None = None
@@ -4285,6 +4284,8 @@ def main() -> int:
                 "at": now_iso(),
             }
         )
+        if policy.runtime == "remote_api":
+            policy.api.record_observation(run_id, {}, run_config)
         return str(action["command"])
 
     # The game must not expose a start action before local setup has finished.
@@ -4327,6 +4328,12 @@ def main() -> int:
 
                 if not isinstance(message, dict):
                     continue
+                if message.get("recorder_snapshot_only") is True:
+                    # ActionRecorder publishes extra before/execution/settled
+                    # snapshots on this pipe. They remain in raw/local logs,
+                    # but must never acknowledge pending commands or trigger
+                    # inference, even when CM's readiness flag is still true.
+                    continue
                 if "error" in message:
                     if pending is not None:
                         write_trace(
@@ -4347,38 +4354,14 @@ def main() -> int:
                             },
                         )
                         pending = None
-                    if current_message is not None:
-                        result = ask_action(
-                            bridge=bridge,
-                            message=current_message,
-                            run_id=run_id,
-                            error=str(message.get("error")),
-                            policy=policy,
-                            teacher=teacher,
-                            run_config=run_config,
-                            visited_shop_rooms=visited_shop_rooms,
-                            action_history=action_history,
-                            declined_card_reward_keys=declined_card_reward_keys,
-                            config=config,
-                        )
-                        if result is None:
-                            return 0
-                        command, action, decision = result
-                        if command != "STATE":
-                            pending = make_pending(
-                                current_message,
-                                run_id,
-                                run_config,
-                                step_id,
-                                action,
-                                decision,
-                                visited_shop_rooms,
-                                action_history,
-                                declined_card_reward_keys,
-                            )
-                            step_id += 1
-                        else:
-                            pending = None
+                    # Error packets contain no observation. Refresh before
+                    # offering any recovery action; the previous screen can
+                    # already have closed. All commands have one writer here.
+                    protocol_error = str(message.get("error"))
+                    current_message = None
+                    if policy.runtime == "remote_api":
+                        policy.api.pending = None
+                    print("STATE", flush=True)
                     continue
 
                 if not message.get("ready_for_command"):
@@ -4879,11 +4862,13 @@ def main() -> int:
                             },
                         )
                         rebind_run_outputs_after_seed()
+                if policy.runtime == "remote_api" and run_id is not None and message.get("in_game"):
+                    policy.api.record_observation(run_id, trace_state(message), run_config)
                 result = ask_action(
                     bridge,
                     message,
                     run_id,
-                    error=smoke_bomb_timeout_error,
+                    error=smoke_bomb_timeout_error or protocol_error,
                     policy=policy,
                     teacher=teacher,
                     run_config=run_config,
@@ -4894,6 +4879,7 @@ def main() -> int:
                 )
                 if result is None:
                     return 0
+                protocol_error = None
                 command, action, decision = result
                 if action.get("kind") == "start_run":
                     collection_mode = "codex" if config["framework"]["control_mode"] == "codex" else (
@@ -4907,6 +4893,7 @@ def main() -> int:
                     pending = None
                 elif command == "STATE":
                     pending = None
+                    print(command, flush=True)
                 else:
                     pending = make_pending(
                         message,

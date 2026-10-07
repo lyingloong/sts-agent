@@ -53,6 +53,7 @@ controller 必须由 CommunicationMod 启动，一次只接受一个终端类客
 选择 `baseline_inference` 可用远端常驻模型服务测试官方 Qwen3.8-27B BF16：本机仅控制游戏，
 通过 SSH 通道请求单一动作；不启用训练或教师模式，评测轨迹与人工采集分开。
 远端与本机使用同仓库的不同入口，准备命令和全部参数见 [基线推理](doc/BASELINE_INFERENCE.md)。
+进度分、通关率及实验比较口径见 [基线评测方案](doc/BASELINE_EVALUATION.md)。
 
 ### Codex 自动游玩采集
 

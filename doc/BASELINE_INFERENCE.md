@@ -146,6 +146,11 @@ Overlay 在主菜单输入 `s IRONCLAD 0` 开随机种子 A0 战士，或加上�
 7. 游戏返回结果后，保留 controller 的动作轨迹以及执行接受/拒绝日志。
    `accepted=true` 表示协议未拒绝，不保证动画已彻底结算；后状态沿用现有记录语义。
 
+Recorder 主动采集发布的消息带 `recorder_snapshot_only=true`；它们即使 ready 为 true
+也只保存原始日志，不确认待执行命令、不触发推理或 STATE 复核。正常 CM 回复不受影响。
+需要同时更新 Recorder jar 和 controller 并重启。命令错误时先查询最新状态，再交回人工，
+不在错误前的旧界面上重试。排查过程见 [评测方案与协议修复](BASELINE_EVALUATION.md)。
+
 HTTP/模型错误后交回人工。需要恢复时可在 UI 输入 `s` 刷新当前状态，或手动执行合法动作；
 人工接管会留在本次评测记录中，统计无干预通关率时必须单独区分。
 
@@ -156,7 +161,8 @@ HTTP/模型错误后交回人工。需要恢复时可在 UI 输入 `s` 刷新当
 - `messages-*.jsonl`：游戏消息，仅游戏 controller 会话产生。
 - `action-trace-*.jsonl` / `run-events-*.jsonl`：逐局轨迹、种子、来源及终局事件，仅开局后产生。
 - `ssh.log`：本机会话自己的 SSH stderr。
-- `summary.json`：各局终局状态与模型/环境/人工动作数、拒绝动作数；未终局时胜负为 null。
+- `summary.json`：各局终局、动作来源和 Orak-style 进度分；未终局时胜负为 null，分数为暂时值。
+- `evaluation.json`：当前会话完整无人工干预局的平均进度分/标准差、各幕通过率、通关率和排除计数。
 
 这里不记录未经请求的候选概率；生成输出的概率并不等同于所有合法动作的归一化概率。
 manifest 不能单凭 API 验证实际 GPU dtype，BF16 依据远端部署命令和 deployment 记录确认。
@@ -175,3 +181,7 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 固定 SHA 校验、同模板 token 计数和单动作生成：253 输入 token，输出 `A1`，请求约 2.8 秒。
 这仅是接口检查，不是游戏策略测试，尚未完成真实游戏评测。接下来可用少量离线样本，
 再跑完整 A0 游戏，记录合法输出率、人工接管、每步延迟、到达幕/楼层、通关与心脏结果。
+
+后续采用 Orak-style 进度分作为主指标，通关率作为辅助指标；具体公式、实验边界和
+论文/公开实现的区别见 [BASELINE_EVALUATION.md](BASELINE_EVALUATION.md)。计分器已接入 baseline 汇总，
+不改 RL 奖励；旧会话文件不自动回写。

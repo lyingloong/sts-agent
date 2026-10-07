@@ -170,6 +170,51 @@ class BaselineTests(unittest.TestCase):
         self.assertTrue(records[0]["terminal"])
         self.assertEqual(list((self.root / "data" / "trajectories" / "human").glob("*.jsonl")), [])
 
+    def test_game_over_screen_distinguishes_victory_from_death(self):
+        for act, victory, won, heart in ((3, True, True, False), (4, True, True, True),
+                                         (4, False, False, False), (1, True, False, False)):
+            run_id = f"terminal-{act}-{victory}"
+            self.client.record_result({"run_id": run_id, "accepted": True, "terminal": True,
+                                       "decision": {"source": "baseline_model"},
+                                       "post_state": {"screen_type": "GAME_OVER", "act": act,
+                                                      "screen_state": {"victory": victory}}})
+            summary = self.client.run_summaries[run_id]
+            self.assertEqual(summary["won"], won)
+            self.assertEqual(summary["beat_heart"], heart)
+
+    def test_observation_only_terminal_is_scored_without_pending_action(self):
+        config = {"character": "IRONCLAD", "ascension": 0, "seed": "ABC"}
+        self.client.record_observation("run-1", {}, config)
+        terminal = {"screen_type": "GAME_OVER", "act": 3, "floor": 43,
+                    "current_hp": 0, "screen_state": {"victory": False}}
+        self.client.record_observation("run-1", terminal, config)
+        summary = self.client.run_summaries["run-1"]
+        self.assertEqual(summary["accepted_actions"], 0)
+        self.assertTrue(summary["terminal"])
+        self.assertAlmostEqual(summary["evaluation"]["progress_score"], 42 + 100 / 3)
+        self.assertEqual(summary["terminal_state"], terminal)
+        self.assertEqual(json.loads((self.client.output_dir / "evaluation.json").read_text())["eligible_runs"], 1)
+
+    def test_partial_or_human_intervention_keeps_score_but_excludes_aggregate(self):
+        terminal = {"screen_type": "GAME_OVER", "act": 3, "floor": 51,
+                    "screen_state": {"victory": True}}
+        self.client.record_observation("partial", terminal, {"partial_run": True})
+        self.client.record_result({"run_id": "human", "accepted": True,
+                                   "decision": {"source": "human_override"}, "post_state": terminal})
+        for run in self.client.run_summaries.values():
+            self.assertEqual(run["evaluation"]["progress_score"], 100)
+            self.assertFalse(run["evaluation"]["autonomous_eligible"])
+        self.assertEqual(json.loads((self.client.output_dir / "evaluation.json").read_text())["eligible_runs"], 0)
+
+    def test_leaving_terminal_preserves_final_score_and_state(self):
+        terminal = {"screen_type": "GAME_OVER", "act": 1, "floor": 5, "current_hp": 0}
+        self.client.record_result({"run_id": "run-1", "accepted": True,
+                                   "decision": {"source": "environment_auto"},
+                                   "pre_state": terminal, "post_state": {"in_game": False}})
+        summary = self.client.run_summaries["run-1"]
+        self.assertEqual(summary["evaluation"]["progress_score"], 4)
+        self.assertEqual(summary["terminal_state"], terminal)
+
     def test_http_transient_retry_but_no_retry_for_bad_request(self):
         self.client._http = ApiPolicyClient._http.__get__(self.client)
         self.client.settings["max_retries"] = 1
@@ -223,9 +268,67 @@ class BaselineTests(unittest.TestCase):
             second = controller.ask_action(bridge, message, "run-1", policy=policy)
             self.assertEqual(second[0], "CHOOSE 1")
             self.assertEqual(second[2]["source"], "baseline_model")
-            self.assertEqual(stdout.getvalue(), "STATE\n")
+            # ask_action only selects. main owns the single protocol writer.
+            self.assertEqual(stdout.getvalue(), "")
         bridge.receive.assert_not_called()
         self.assertEqual(len([x for x in self.calls if x[0] == "/v1/chat/completions"]), 1)
+
+    def _run_controller_packets(self, packets, inputs):
+        bridge = Mock()
+        bridge.receive.side_effect = [{"type": "input", "text": text} for text in inputs]
+        evolution = Mock(enabled=False)
+        with (patch.object(controller, "PROJECT_ROOT", self.root),
+              patch.object(controller, "load_agent_config", return_value=self.config),
+              patch.object(controller, "TerminalBridge", return_value=bridge),
+              patch.object(controller, "PromptEvolutionManager", return_value=evolution),
+              patch("sts_agent.policy.api.ApiPolicyClient", return_value=self.client),
+              patch.object(controller, "TeacherClient", return_value=Mock(enabled=False, prompt_evolution=evolution)),
+              patch.object(controller, "PosthocFeedbackClient", return_value=Mock(enabled=False)),
+              patch.object(controller, "environment_auto_action", return_value=None),
+              patch.object(controller.time, "sleep"),
+              patch("sys.argv", ["controller"]),
+              patch("sys.stdin", io.StringIO("\n".join(json.dumps(x) for x in packets) + "\n")),
+              redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(controller.main(), 0)
+        traces = list(self.client.output_dir.glob("action-trace-*.jsonl"))
+        records = [json.loads(line) for path in traces for line in path.read_text(encoding="utf-8").splitlines()]
+        return output.getvalue().splitlines(), records, bridge
+
+    def test_recording_boundary_snapshots_never_acknowledge_or_revalidate(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "game_state": {"screen_type": "EVENT", "choice_list": ["Take", "Leave"],
+                                "screen_state": {}, "act": 1, "floor": 0}}
+        snapshots = [{**event, "recorder_snapshot_only": True, "recorder_snapshot_kind": kind}
+                     for kind in ("action_before", "execution_before", "effects_settled")]
+        # A second snapshot arrives between generation and the STATE reply.
+        packets = [menu, event, snapshots[0], event, *snapshots,
+                   {"error": "Invalid command: choose.", "ready_for_command": True}]
+        output, records, _ = self._run_controller_packets(packets, ["s IRONCLAD 0"])
+        self.assertEqual(output, ["ready", "START IRONCLAD 0", "STATE", "CHOOSE 1", "STATE"])
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["accepted"])
+        self.assertEqual(records[0]["command"], "CHOOSE 1")
+        self.assertEqual(len([x for x in self.calls if x[0] == "/v1/chat/completions"]), 1)
+        raw = next(self.client.output_dir.glob("messages-*.jsonl"))
+        self.assertEqual(len(raw.read_text(encoding="utf-8").splitlines()), len(packets))
+
+    def test_protocol_error_refreshes_before_handoff_and_sends_recovery_once(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "game_state": {"screen_type": "EVENT", "choice_list": ["Take", "Leave"],
+                                "screen_state": {}, "act": 1, "floor": 0}}
+        fresh = {**event, "game_state": {**event["game_state"], "choice_list": ["Fresh", "Another"], "floor": 1}}
+        error = {"error": "Invalid command: choose.", "ready_for_command": True}
+        output, records, bridge = self._run_controller_packets(
+            [menu, event, event, error, fresh], ["s IRONCLAD 0", "0"])
+        self.assertEqual(output, ["ready", "START IRONCLAD 0", "STATE", "CHOOSE 1", "STATE", "CHOOSE 0"])
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["accepted"])
+        views = [call.args[0] for call in bridge.send.call_args_list if call.args[0].get("type") == "view"]
+        self.assertIn("Floor 1", views[-1]["overlay"]["summary"])
+        self.assertIn("Fresh", views[-1]["text"])
+        self.assertIn("Invalid command", views[-1]["decision"]["assist_reason"])
 
     def test_gpu_selection_is_idle_only_and_fixed_once(self):
         candidates = [{"index": i, "free_memory_mib": 23500, "utilization_percent": i * 3} for i in range(8)]

@@ -20,6 +20,7 @@ from typing import Any
 from urllib import error, request
 
 from sts_agent.config import load_agent_config
+from sts_agent.evaluation.progress import METRIC_VERSION, ProgressTracker, aggregate_summaries
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.policy.local_qwen import build_scoring_prompt
 from sts_agent.policy.ssh_tunnel import SshTunnel
@@ -53,6 +54,7 @@ class ApiPolicyClient:
         self.pending: tuple[str, dict] | None = None
         self.request_id = 0
         self.run_summaries: dict[str, dict] = {}
+        self.progress_trackers: dict[str, ProgressTracker] = {}
         try:
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             code_revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
@@ -68,6 +70,7 @@ class ApiPolicyClient:
             "settings": self.settings, "prompt_builder": "build_scoring_prompt",
             "prompt_code_sha256": hashlib.sha256(Path(__file__).with_name("local_qwen.py").read_bytes()).hexdigest(),
             "human_training_data": False,
+            "evaluation_metric": METRIC_VERSION,
         }
         self._save_manifest()
 
@@ -202,10 +205,7 @@ class ApiPolicyClient:
         run_id = record.get("run_id")
         if not run_id:
             return
-        summary = self.run_summaries.setdefault(run_id, {"run_id": run_id, "accepted_actions": 0,
-                "model_actions": 0, "environment_actions": 0, "human_actions": 0, "rejected_actions": 0,
-                "terminal": False, "won": None, "beat_heart": None})
-        summary["run_config"] = record.get("run_config")
+        summary = self._run_summary(run_id, record.get("run_config"))
         if record.get("accepted"):
             summary["accepted_actions"] += 1
             source = (record.get("decision") or {}).get("source")
@@ -213,15 +213,40 @@ class ApiPolicyClient:
             summary[key] += 1
         else:
             summary["rejected_actions"] += 1
-        if record.get("terminal"):
-            state = record.get("post_state") or {}
-            screen, act = state.get("screen_type"), state.get("act")
-            summary.update(terminal=True, terminal_state=state)
-            if screen == "GAME_OVER":
-                summary.update(won=False, beat_heart=False)
-            elif screen == "VICTORY" and isinstance(act, int) and act >= 3:
-                summary.update(won=True, beat_heart=act >= 4)
+        tracker = self.progress_trackers[run_id]
+        was_terminal = tracker.terminal
+        pre_state = record.get("pre_state") or {}
+        tracker.observe(pre_state)
+        if tracker.terminal and not was_terminal:
+            summary["terminal_state"] = pre_state
+        self.record_observation(run_id, record.get("post_state") or {}, record.get("run_config"))
+
+    def _run_summary(self, run_id: str, run_config: dict | None) -> dict:
+        summary = self.run_summaries.setdefault(run_id, {"run_id": run_id, "accepted_actions": 0,
+                "model_actions": 0, "environment_actions": 0, "human_actions": 0, "rejected_actions": 0,
+                "terminal": False, "won": None, "beat_heart": None})
+        self.progress_trackers.setdefault(run_id, ProgressTracker())
+        if run_config is not None:
+            summary["run_config"] = run_config.copy()
+        return summary
+
+    def record_observation(self, run_id: str, state: dict, run_config: dict | None = None) -> None:
+        """Score natural ready observations, including terminals with no pending action."""
+        summary = self._run_summary(run_id, run_config)
+        tracker = self.progress_trackers[run_id]
+        was_terminal = tracker.terminal
+        tracker.observe(state)
+        if tracker.terminal:
+            summary.update(terminal=True, won=tracker.won, beat_heart=tracker.beat_heart)
+            if not was_terminal:
+                summary["terminal_state"] = state
+        evaluation = tracker.result()
+        evaluation["autonomous_eligible"] = (tracker.score_final and evaluation["progress_score"] is not None
+                and not summary["human_actions"] and not (summary.get("run_config") or {}).get("partial_run"))
+        summary["evaluation"] = evaluation
         (self.output_dir / "summary.json").write_text(json.dumps(self.run_summaries, ensure_ascii=False, indent=2), encoding="utf-8")
+        (self.output_dir / "evaluation.json").write_text(json.dumps(aggregate_summaries(self.run_summaries),
+                ensure_ascii=False, indent=2), encoding="utf-8")
 
     def close(self) -> None:
         self.pending = None
