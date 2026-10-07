@@ -93,6 +93,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "prompt_template": "canonical",
             "output_dir": "data/experiments/baseline",
             "serving": {
+                "backend": "vllm",
                 "tensor_parallel_size": 4,
                 "devices": "auto",
                 "minimum_free_memory_mib": 21000,
@@ -434,6 +435,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if api["prompt_template"] not in {"canonical", "state_first", "decision_first"}:
         raise ConfigError("policy.api.prompt_template is invalid")
     serving = api["serving"]
+    if serving["backend"] not in {"vllm", "transformers"}:
+        raise ConfigError("policy.api.serving.backend must be 'vllm' or 'transformers'")
     for key in ("tensor_parallel_size", "minimum_free_memory_mib", "max_model_len"):
         if isinstance(serving[key], bool) or not isinstance(serving[key], int) or serving[key] < 1:
             raise ConfigError(f"policy.api.serving.{key} must be a positive integer")

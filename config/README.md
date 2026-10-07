@@ -12,8 +12,8 @@
 
 | `active_mode` | 用途 | 配置文件 |
 | --- | --- | --- |
-| `collect_human` | 人类在游戏内游玩并采集轨迹；当前默认 | [collect_human.json](modes/collect_human.json) |
-| `baseline_inference` | 官方 27B BF16 基线；本机控制、远端常驻 vLLM、SSH 调用，不训练 | [baseline_inference.json](modes/baseline_inference.json) |
+| `collect_human` | 人类在游戏内游玩并采集轨迹 | [collect_human.json](modes/collect_human.json) |
+| `baseline_inference` | 官方 27B BF16 基线；本机控制、远端常驻模型、自动 SSH 隧道，不训练 | [baseline_inference.json](modes/baseline_inference.json) |
 | `candidate_assist_local` | 本机 Qwen 给出候选，由玩家选择或修正 | [candidate_assist_local.json](modes/candidate_assist_local.json) |
 | `candidate_assist_remote` | 远端 Qwen 候选辅助 | [candidate_assist_remote.json](modes/candidate_assist_remote.json) |
 | `teacher_sft` | 远端教师自动游玩并生成 SFT 数据 | [teacher_sft.json](modes/teacher_sft.json) |
@@ -44,6 +44,10 @@ python -c "from sts_agent.config import load_agent_config; c=load_agent_config()
 远端服务入口显式加载 baseline profile，无需修改远端 `active_mode`。
 远端部署、输入限制与日志解释见 [基线推理文档](../doc/BASELINE_INFERENCE.md)。
 首次实验关闭 thinking、无 adapter、生成一个动作并复核状态后自动执行，不使用 0.85 置信度门槛。
+`policy.api.ssh_tunnel: true` 由本机 controller 自动创建隧道，不需要手动运行 SSH 转发。
+`policy.api.serving.backend` 当前为 `transformers`，适配已有服务器驱动；也支持显式选择 `vllm`。
+`tensor_parallel_size` 在 Transformers 后端表示可见 GPU 数，使用 `device_map=auto` 按层分配，
+不是 vLLM 的张量并行。`gpu_memory_utilization`、`enforce_eager` 仅对 vLLM 生效。
 
 ## 人类轨迹采集
 

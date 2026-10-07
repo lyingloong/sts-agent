@@ -29,6 +29,7 @@ sts-agent-codex-mcp = "sts_agent.codex_mcp:main"
 [project.optional-dependencies]
 codex = ["mcp>=1.9,<2"]
 serving = ["vllm>=0.17.0", "transformers>=5.8.0", "huggingface-hub>=0.34"]
+serving-transformers = ["transformers[serving]==5.17.0", "accelerate>=1.15,<2", "huggingface-hub>=0.34"]
 
 [tool.setuptools.packages.find]
 include = ["sts_agent*"]

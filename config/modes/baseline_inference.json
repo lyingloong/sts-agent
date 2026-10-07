@@ -22,6 +22,7 @@
       "prompt_template": "canonical",
       "output_dir": "data/experiments/baseline",
       "serving": {
+        "backend": "transformers",
         "tensor_parallel_size": 4,
         "devices": "auto",
         "minimum_free_memory_mib": 21000,

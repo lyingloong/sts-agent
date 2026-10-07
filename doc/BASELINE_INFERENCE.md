@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 本机 Windows | `sts_agent.runtime.controller` | 接 CommunicationMod，整理公开状态/合法动作，执行动作、保存轨迹 |
 | 本机 Windows | `sts_agent.ui.overlay` | 开局、人类接管、展示当前模型动作/请求状态 |
-| 远端 Linux | `sts_agent.policy.serving` | 一次加载模型，持续提供 vLLM API；不运行游戏、不训练 |
+| 远端 Linux | `sts_agent.policy.serving` | 一次加载模型，持续提供兼容 API；不运行游戏、不训练 |
 
 本机建立 `127.0.0.1:18080 → SSH → 远端 127.0.0.1:8000` 的持久通道。
 关闭本机 controller 只关闭它拥有的 SSH 通道，不关闭远端模型服务。
@@ -36,25 +36,29 @@ SSH 主机来自 `agent.json.shared.policy.remote.ssh_host`。模型只在 `poli
 | `policy.api.prompt_template` | canonical | 与 SFT 同源的自然语言单动作 prompt |
 | `policy.api.timeout_seconds` | 120 | 每次 HTTP 请求的超时，不是远端模型加载时间 |
 | `policy.api.max_retries` | 2 | 初次之外最多重试两次；仅网络/429/部分 5xx，等待 5、10 秒 |
-| `serving.tensor_parallel_size` | 4 | 模型在四卡间分片，不是四个独立模型 |
+| `policy.api.ssh_tunnel` | true | controller 自动建立持久隧道；不要另开同端口手动隧道 |
+| `serving.backend` | transformers | 固定 Transformers 5.17.0 的服务适配器；可显式选择 vllm |
+| `serving.tensor_parallel_size` | 4 | 可见 GPU 数；Transformers 按层分配，vLLM 张量并行，均不是四个独立模型 |
 | `serving.devices` | auto | 启动时选卡一次；也可指定如 `[0, 2, 4, 6]`，必须四张互不重复的物理 GPU |
 | `serving.minimum_free_memory_mib` | 21000 | 每张卡至少 21000 MiB 空闲，不够则启动失败，不占用/杀掉别人的任务 |
 | `serving.maximum_gpu_utilization_percent` | 10 | 筛掉当前明显忙碌的 GPU；查询不是调度器预留，请与其他使用者协调 |
 | `serving.max_model_len` | 16384 | 输入与输出合计上限，不启用模型的超长上下文 |
-| `serving.gpu_memory_utilization` | 0.85 | vLLM 每卡显存预算比例；不是只加载 85% 权重 |
-| `serving.enforce_eager` | true | 初测关闭 CUDA graph，降低启动资源/兼容性风险，吞吐可能稍低 |
+| `serving.gpu_memory_utilization` | 0.85 | 仅 vLLM：每卡显存预算比例；不是只加载 85% 权重 |
+| `serving.enforce_eager` | true | 仅 vLLM：关闭 CUDA graph；Transformers 本就未开启 compile |
 | `serving.disable_nccl_p2p/ib` | true/true | 消费级 4090 的稳妥初测设置，由启动器设置进程环境，不需维护环境变量 |
 | `serving.deployment_file` | data/runtime/baseline-deployment.json | 远端下载 SHA、snapshot、部署命令、GPU 与依赖版本记录；不提交 Git |
 
 `serving` 是 `policy.api.serving` 的简写。服务以 BF16 权重和自动（随模型 dtype）KV 精度运行，
-纯文本、最多一个并发序列、无 LoRA、无 MTP/推测解码，显式使用 vLLM 的生成配置而非仓库的默认采样参数。
-实际 HTTP 请求仍明确指定温度和回答预算。
+纯文本、串行生成、无 LoRA、无 MTP/推测解码。实际 HTTP 请求明确指定温度和回答预算。
+Transformers 适配器复用上游 `ChatCompletionHandler` 的生成实现，增加固定 SHA 元数据、
+同模板 `/tokenize` 和服务端超限检查；仅加载 deployment 中的本地 snapshot，不跟随浮动 main。
+上游 `transformers serve` CLI 单独运行缺少本客户端需要的 SHA 与 `/tokenize`，不能直接替代此入口。
 
 资源预估：权重约 50–55 GiB，四张 24 GiB 4090 可以分摊；KV、运行缓冲等另占显存。
-0.85 预算对应四卡总计约 82 GiB 的预算，首次实际启动才可确认够不够。
+当前四卡已成功加载权重，短请求每卡占用约 12–14 GiB；长游戏输入仍会增加缓存与运行缓冲。
 准备约 65–80 GB 可用磁盘空间；HF cache snapshot 通过链接复用 blobs，不应手工复制两份权重。
 本机不加载权重，3050 不新增模型显存占用。
-这不是四卡 4090 上已实测成功的保证。
+已验证短请求不代表完整游戏吞吐或通关能力已经验证。
 
 ## 远端：同步并单独准备服务环境
 
@@ -63,7 +67,8 @@ SSH 主机来自 `agent.json.shared.policy.remote.ssh_host`。模型只在 `poli
 ```bash
 git pull --ff-only
 uv venv .venv-serving --python 3.12
-uv pip install --python .venv-serving/bin/python -e '.[serving]' --torch-backend=cu128
+uv pip install --python .venv-serving/bin/python torch==2.11.0 torchaudio==2.11.0 torchvision==0.26.0 --torch-backend=cu128
+uv pip install --python .venv-serving/bin/python -e '.[serving-transformers]'
 .venv-serving/bin/python -m sts_agent.policy.serving --prepare
 ```
 
@@ -72,12 +77,12 @@ uv pip install --python .venv-serving/bin/python -e '.[serving]' --torch-backend
 模型源、SHA 或镜像变更时，先检查新版本 SHA，再更新 profile 并提交。
 本机不需要远端的 deployment 文件，也不需要模型权重。
 
-服务依赖必须是支持这个架构的近期 vLLM 与 Transformers；启动器检查 Transformers ≥ 5.8。
-安装项中的 vLLM 下限不是“所有版本都已在这台机器验证”的承诺，uv 应解析到当前兼容版本。
-使用 CUDA 12.8 wheel 与服务器现有 CUDA 12.8 PyTorch/RTX 4090；不使用 CUDA 13 wheel。
-安装或启动报架构、CLI 参数或 CUDA 内核错误时先查 [vLLM 官方 Qwen3.8 部署说明](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)，
-不要回退到本仓库旧的 Qwen3 `AutoModelForCausalLM`/4-bit subprocess 入口。
-服务会记录实际依赖版本；驱动/PyTorch/CUDA 兼容性仍需远端检查。
+当前服务器驱动 535.104.05，vLLM 0.24.0 的 CUDA 12.9/NCCL 在这台机器报驱动不足，
+所以改用已能加载与生成的 Transformers + Torch 2.11.0/cu128，不升级系统驱动、不影响其他人的任务。
+适配器依赖上游内部接口，严格锁定 Transformers 5.17.0；升级前应重新验证接口。
+以后若驱动兼容且需要更高吞吐，可设置 `backend: "vllm"` 并安装 `.[serving]`；
+不要回退到旧 Qwen3/4-bit 入口冒充 BF16 基线。
+服务会记录实际依赖版本。当前部分混合注意力算子使用参考实现，真实长输入延迟需游戏实测。
 
 ```bash
 .venv-serving/bin/python -m sts_agent.policy.serving --dry-run
@@ -85,7 +90,7 @@ uv pip install --python .venv-serving/bin/python -e '.[serving]' --torch-backend
 ```
 
 第一条检查 snapshot、空闲卡和基础依赖并打印命令，不加载 GPU；不等价于完整引擎启动验证。
-第二条以前台方式运行。建议在自己的 `tmux` 会话中运行，等待 vLLM 的服务就绪消息。
+第二条以前台方式运行。建议在自己的 `tmux` 会话中运行，等待 Uvicorn 的服务就绪消息。
 只有 loopback 监听，不需要对公网开放端口。
 若四张卡不足够空闲，等待或手动指定可用四卡，不能强行绕过其他任务。
 
@@ -166,5 +171,5 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 旧本机候选评分另修复了 `DynamicCache` 复用污染：各候选从独立缓存副本开始，
 用微型 Qwen3 的完整前向概率验证与候选遍历顺序无关。
 
-尚未在远端下载/启动 27B，也未完成真实游戏评测。接下来先跑接口检查与少量离线样本，
+远端已下载并在四张 4090 上加载 27B BF16，尚未完成真实游戏评测。接下来先跑实际客户端检查与少量离线样本，
 再跑完整 A0 游戏，记录合法输出率、人工接管、每步延迟、到达幕/楼层、通关与心脏结果。

@@ -37,8 +37,10 @@ def select_devices(candidates: list[dict], settings: dict) -> list[int]:
     return devices
 
 
-def launch_command(model_path: str, policy: dict) -> list[str]:
+def launch_command(model_path: str, policy: dict, config_file: str = "config/agent.json") -> list[str]:
     api, serving = policy["api"], policy["api"]["serving"]
+    if serving["backend"] == "transformers":
+        return [sys.executable, "-m", "sts_agent.policy.transformers_serving", "--config", config_file]
     vllm_executable = str(Path(sys.executable).with_name("vllm"))
     cmd = [vllm_executable, "serve", model_path,
            "--served-model-name", policy["model"]["base"], "--host", "127.0.0.1", "--port", str(api["remote_port"]),
@@ -102,8 +104,12 @@ def main() -> int:
             return 0
         deployment = read_deployment(deployment_path, policy)
         devices = select_devices(query_gpus(), settings)
-        command = launch_command(deployment["snapshot_path"], policy)
-        versions = {name: importlib.metadata.version(name) for name in ("vllm", "transformers", "torch", "huggingface-hub")}
+        command = launch_command(deployment["snapshot_path"], policy, args.config)
+        packages = ["transformers", "torch", "huggingface-hub"]
+        packages.append("vllm" if settings["backend"] == "vllm" else "accelerate")
+        versions = {name: importlib.metadata.version(name) for name in packages}
+        if settings["backend"] == "transformers" and versions["transformers"] != "5.17.0":
+            raise RuntimeError("the Transformers serving adapter requires transformers==5.17.0")
         if tuple(int(x) for x in versions["transformers"].split(".")[:2]) < (5, 8):
             raise RuntimeError("Qwen3.8 serving requires transformers >= 5.8; update the separate serving environment")
         print(f"Selected physical GPUs (fixed for service lifetime): {devices}", flush=True)
@@ -111,7 +117,7 @@ def main() -> int:
         if args.dry_run:
             return 0
         if os.name == "nt":
-            raise RuntimeError("start the vLLM service on the Linux GPU host, not Windows")
+            raise RuntimeError("start the model service on the Linux GPU host, not Windows")
         deployment.update({"devices": devices, "command": command, "versions": versions, "serving": settings,
                            "started_at": datetime.now(timezone.utc).isoformat()})
         deployment_path.write_text(json.dumps(deployment, indent=2), encoding="utf-8")

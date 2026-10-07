@@ -16,6 +16,7 @@ from sts_agent.config import ConfigError, load_agent_config, validate_config
 from sts_agent.policy.api import ApiPolicyClient
 from sts_agent.policy.serving import launch_command, read_deployment, select_devices
 from sts_agent.policy.ssh_tunnel import SshTunnel
+from sts_agent.policy.transformers_serving import check_budget, validate_request
 from sts_agent.runtime import controller
 from sts_agent.ui.overlay import action_panel_mode_info
 
@@ -39,7 +40,7 @@ class BaselineTests(unittest.TestCase):
         def http(path, body=None):
             self.calls.append((path, body))
             if path == "/v1/models":
-                return {"data": [{"id": self.client.model, "root": "/snapshots/" + "a" * 40}]}
+                return {"data": [{"id": self.client.model, "root": "/snapshots/" + self.config["policy"]["model"]["revision"]}]}
             if path == "/tokenize":
                 return {"count": 100}
             return self.response
@@ -50,14 +51,14 @@ class BaselineTests(unittest.TestCase):
         return [json.loads(line) for line in self.client.log_path.read_text(encoding="utf-8").splitlines()]
 
     def test_profile_override_does_not_change_human_collection(self):
-        self.assertEqual(load_agent_config()["framework"]["learning_method"], "collect_human")
+        self.assertEqual(load_agent_config(mode="collect_human")["framework"]["learning_method"], "collect_human")
         self.assertEqual(self.config["policy"]["runtime"], "remote_api")
         self.assertEqual(self.config["policy"]["model"]["base"], "Qwen/Qwen3.8-27B")
         for key in ("teacher", "posthoc_feedback", "prompt_evolution"):
             self.assertFalse(self.config[key]["enabled"])
 
     def test_invalid_gpu_and_context_configuration(self):
-        for changes in ({"devices": [0, 0, 1, 2]}, {"devices": [0, 1]}, {"max_model_len": 32}):
+        for changes in ({"devices": [0, 0, 1, 2]}, {"devices": [0, 1]}, {"max_model_len": 32}, {"backend": "invalid"}):
             bad = copy.deepcopy(self.config)
             bad["policy"]["api"]["serving"].update(changes)
             with self.assertRaises(ConfigError):
@@ -120,6 +121,7 @@ class BaselineTests(unittest.TestCase):
 
     def test_pinned_revision_mismatch_is_rejected(self):
         self.config["policy"]["model"]["revision"] = "b" * 40
+        self.client._http = Mock(return_value={"data": [{"id": self.client.model, "root": "/snapshots/" + "a" * 40}]})
         result = self.client.rank(self.observation, self.actions)
         self.assertIn("revision does not match", result["assist_reason"])
 
@@ -234,6 +236,7 @@ class BaselineTests(unittest.TestCase):
             select_devices(candidates, settings)
 
     def test_bf16_launch_is_text_only_loopback_without_training(self):
+        self.config["policy"]["api"]["serving"]["backend"] = "vllm"
         command = launch_command("/models/snapshots/" + "a" * 40, self.config["policy"])
         for flag, value in (("--dtype", "bfloat16"), ("--tensor-parallel-size", "4"), ("--host", "127.0.0.1"), ("--max-num-seqs", "1")):
             self.assertEqual(command[command.index(flag) + 1], value)
@@ -246,7 +249,7 @@ class BaselineTests(unittest.TestCase):
         snapshot.mkdir(parents=True)
         (snapshot / "config.json").write_text("{}", encoding="utf-8")
         manifest = self.root / "deployment.json"
-        content = {"model": self.client.model, "requested_revision": "main", "resolved_revision": sha, "snapshot_path": str(snapshot)}
+        content = {"model": self.client.model, "requested_revision": self.config["policy"]["model"]["revision"], "resolved_revision": sha, "snapshot_path": str(snapshot)}
         manifest.write_text(json.dumps(content), encoding="utf-8")
         self.assertEqual(read_deployment(manifest, self.config["policy"])["resolved_revision"], sha)
         (snapshot / "config.json").write_text('{"quantization_config": {"quant_method": "fp8"}}', encoding="utf-8")
@@ -261,6 +264,26 @@ class BaselineTests(unittest.TestCase):
         self.assertIn("ExitOnForwardFailure=yes", cmd)
         self.assertEqual(cmd[-1], "gpu-host")
         self.assertIn("预训练基线", action_panel_mode_info({"mode": "baseline_inference"})[0])
+
+    def test_transformers_launch_forwards_config_without_vllm(self):
+        command = launch_command("/unused", self.config["policy"], "config/custom.json")
+        self.assertEqual(command[1:], ["-m", "sts_agent.policy.transformers_serving", "--config", "config/custom.json"])
+
+    def test_transformers_request_is_fixed_text_only_and_never_truncates(self):
+        body = {"model": "test", "messages": [{"role": "user", "content": "choose"}],
+                "chat_template_kwargs": {"enable_thinking": False}}
+        validate_request(body, "test", False)
+        for change in ({"model": "other"}, {"chat_template_kwargs": {"truncation": True}},
+                       {"add_generation_prompt": False}, {"messages": []}, {"tools": []}):
+            with self.assertRaises(ValueError):
+                validate_request({**body, **change}, "test", False)
+        validate_request({**body, "max_tokens": 64, "stream": False}, "test", False, completion=True)
+        with self.assertRaises(ValueError):
+            validate_request({**body, "stream": True}, "test", False, completion=True)
+        check_budget(100, 64, 164)
+        for budget in (65, True, 0):
+            with self.assertRaises(ValueError):
+                check_budget(100, budget, 164)
 
     def test_tunnel_closes_only_its_owned_process(self):
         tunnel = SshTunnel("gpu-host", 18080, 8000, 30, self.root / "ssh.log")
