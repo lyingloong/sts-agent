@@ -16,7 +16,7 @@ from sts_agent.runtime import controller
 
 class CodexMcpTests(unittest.TestCase):
     def test_first_start_creates_configured_output_directory(self) -> None:
-        config = load_agent_config()
+        config = load_agent_config(mode="collect_codex")
         config["framework"]["control_mode"] = "codex"
         config["framework"]["learning_method"] = "collect_codex"
         config["codex"]["output_dir"] = "data/trajectories/new-codex-directory"

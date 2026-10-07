@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "active_mode": "collect_human",
+  "active_mode": "baseline_inference",
   "shared": {
     "server": {
       "host": "127.0.0.1",

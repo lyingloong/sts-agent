@@ -17,8 +17,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config["framework"]["control_mode"], "manual")
         self.assertEqual(config["framework"]["policy_backend"], "none")
 
-    def test_current_project_selects_human_collection(self) -> None:
-        config = agent_config.load_agent_config(PROJECT_ROOT)
+    def test_human_profile_selects_human_collection(self) -> None:
+        config = agent_config.load_agent_config(PROJECT_ROOT, mode="collect_human")
         self.assertEqual(config["framework"]["control_mode"], "manual")
         self.assertEqual(config["framework"]["policy_backend"], "none")
         self.assertEqual(config["framework"]["learning_method"], "collect_human")
