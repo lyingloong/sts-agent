@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
+from sts_agent.commands.preview_policy_prompt import preview_markdown
 from sts_agent.policy import local_qwen as policy_server
 from sts_agent.runtime.controller import normalize_combat, policy_observation
 from tests.test_trajectory_assembler import combat_state
 
 
 class PolicyPromptTests(unittest.TestCase):
+    def test_checked_in_preview_is_the_real_assembled_prompt(self) -> None:
+        path = Path(__file__).resolve().parents[1] / "doc" / "POLICY_PROMPT_PREVIEW.md"
+        self.assertEqual(path.read_text(encoding="utf-8").rstrip(), preview_markdown().rstrip())
+
     def test_runtime_stance_reaches_all_prompt_layouts_and_combat_selections(self) -> None:
         for stance_id, name in (("Neutral", "正常"), ("Calm", "平静"), ("Wrath", "愤怒"), ("Divinity", "神格")):
             for screen in ("NONE", "GRID", "HAND_SELECT", "CARD_REWARD"):

@@ -174,7 +174,7 @@ def observation_payload(packet: dict[str, Any]) -> dict[str, Any]:
         ),
         "automatic_actions_note": (
             "Controller-owned automatic actions have already been executed before this observation. "
-            "Use recent_actions for context and do not repeat them."
+            "Use room_history for context and do not repeat already executed actions."
         ),
     }
 

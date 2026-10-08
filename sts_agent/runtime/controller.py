@@ -38,15 +38,13 @@ from sts_agent.learning.posthoc_feedback import (
 )
 from sts_agent.learning.prompt_evolution import PromptEvolutionError, PromptEvolutionManager
 from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError
+from sts_agent.policy.history import enrich_history_item, room_history_summary
 from sts_agent.paths import PROJECT_ROOT
 
 
 ACTION_HISTORY_LIMIT = 6
-# Keep a longer private window so multi-step events can retain their opening
-# text and state transitions, while ordinary prompts still receive six recent
-# actions only.
-ACTION_HISTORY_STORAGE_LIMIT = 16
-EVENT_HISTORY_LIMIT = 16
+# The six-step summary is only for the compact overlay. Model history is
+# room-local (all rooms: 30), with no private 16-step truncation.
 # CommunicationMod can report a ready combat state before Smoke Bomb's escape
 # animation has switched the room to its actual post-escape screen.
 SMOKE_BOMB_ANIMATION_DELAY_SECONDS = 5.0
@@ -903,53 +901,15 @@ def event_snapshot(state: dict[str, Any] | None) -> dict[str, Any] | None:
     screen_state = state.get("screen_state")
     if not isinstance(screen_state, dict):
         return None
-    return {
+    result = {
         "event_id": screen_state.get("event_id"),
         "event_name": screen_state.get("event_name"),
         "body_text": screen_state.get("body_text"),
         "choices": list(state.get("choices", [])),
         "options": screen_state.get("options", []),
     }
-
-
-def same_event(snapshot: dict[str, Any], event_id: Any, event_name: Any) -> bool:
-    """Match snapshots by stable ID, falling back to the visible event name."""
-    snapshot_id = snapshot.get("event_id")
-    if snapshot_id is not None and event_id is not None:
-        return str(snapshot_id) == str(event_id)
-    snapshot_name = snapshot.get("event_name")
-    return snapshot_name is not None and event_name is not None and str(snapshot_name) == str(event_name)
-
-
-def event_history_summary(
-    history: list[dict[str, Any]] | None,
-    current_event: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Return a bounded transition history for the currently open event."""
-    if not isinstance(history, list) or not isinstance(current_event, dict):
-        return []
-    event_id = current_event.get("event_id")
-    event_name = current_event.get("event_name")
-    result: list[dict[str, Any]] = []
-    for item in history[-EVENT_HISTORY_LIMIT:]:
-        if not isinstance(item, dict):
-            continue
-        before = item.get("event_before")
-        after = item.get("event_after")
-        before_matches = isinstance(before, dict) and same_event(before, event_id, event_name)
-        after_matches = isinstance(after, dict) and same_event(after, event_id, event_name)
-        if not before_matches and not after_matches:
-            continue
-        entry: dict[str, Any] = {}
-        for key in ("step_id", "action_kind", "action_id", "action"):
-            value = item.get(key)
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                entry[key] = value
-        if before_matches:
-            entry["before"] = before
-        if after_matches:
-            entry["after"] = after
-        result.append(entry)
+    if isinstance(screen_state.get("match_game"), dict):
+        result["match_game"] = copy.deepcopy(screen_state["match_game"])
     return result
 
 
@@ -1111,8 +1071,9 @@ def attach_runtime_context(
     action_history: list[dict[str, Any]] | None,
     declined_card_reward_keys: set[tuple[int, int]] | None,
 ) -> dict[str, Any]:
-    """Add bounded cross-step context shared by live prompts and trace records."""
+    """Add public room-local context shared by live prompts and trace records."""
     normalized["recent_actions"] = recent_action_summary(action_history)
+    normalized["room_history"] = room_history_summary(normalized, action_history)
     normalized["run_memory"] = run_memory_summary(visited_shop_rooms, declined_card_reward_keys)
     constraints = relic_decision_constraints(normalized.get("relics"), action_history)
     if constraints:
@@ -1126,16 +1087,11 @@ def attach_runtime_context(
         if isinstance(screen_state, dict) and selection_context.get("kind") == "RELIC_PICKUP_CARD_SELECTION":
             screen_state["selection_mode"] = selection_context["selection_mode"]
             screen_state["selection_instruction"] = selection_context["selection_instruction"]
-    screen_state = normalized.get("screen_state")
-    if str(normalized.get("screen_type") or "").upper() == "EVENT" and isinstance(screen_state, dict):
-        event_history = event_history_summary(action_history, screen_state)
-        if event_history:
-            normalized["event_history"] = event_history
     return normalized
 
 
 def accepted_action_history_item(pending: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
-    """Convert one stable controller acknowledgement into compact model context."""
+    """Remember an accepted action and its publicly observed transition."""
     action = pending.get("action") if isinstance(pending.get("action"), dict) else {}
     state = game_state(message)
     result = {
@@ -1150,6 +1106,8 @@ def accepted_action_history_item(pending: dict[str, Any], message: dict[str, Any
     if isinstance(decision, dict) and isinstance(decision.get("source"), str):
         result["source"] = decision["source"]
     post_state = normalize_state(message)
+    pre_state = pending.get("pre_state") if isinstance(pending.get("pre_state"), dict) else {}
+    enrich_history_item(result, pre_state, post_state, action, pending.get("raw_action"))
     gained_relics = newly_gained_relics(
         pending.get("pre_state", {}).get("relics") if isinstance(pending.get("pre_state"), dict) else None,
         state.get("relics"),
@@ -1288,6 +1246,11 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
     # local-database fields. Do not train on context that inference no longer
     # receives.
     remove_local_knowledge(normalized)
+    if "room_history" in normalized:
+        # Avoid duplicating the six-row UI summary and old event snapshots in
+        # model prompts, including remote teachers' JSON observations.
+        normalized.pop("recent_actions", None)
+        normalized.pop("event_history", None)
 
     # Full route information belongs only to the actual map selection screen.
     # A transient map overlay is normalized as TRANSITION and must not leak
@@ -1321,6 +1284,7 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
             "screen_type",
             "room_phase",
             "action_phase",
+            "room_type",
             "floor",
             "act",
             "class",
@@ -1335,7 +1299,7 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
             "deck",
             "decision_constraints",
             "combat",
-            "recent_actions",
+            "room_history",
         )
     }
 
@@ -4406,7 +4370,6 @@ def main() -> int:
                                 }
                             )
                     action_history.append(accepted_action_history_item(pending, message))
-                    del action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
                     completed_record = {
                         "schema_version": "0.2" if pending.get("decision") else "0.1",
                         "session_id": session_id,

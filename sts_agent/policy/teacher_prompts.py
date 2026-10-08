@@ -13,8 +13,8 @@ from typing import Any
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.policy.scenes import scene_key
 
-TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v8"
-PLAYER_PROMPT_VERSION = "sts1-player-zh-v4"
+TEACHER_PROMPT_VERSION = "sts1-teacher-zh-v10"
+PLAYER_PROMPT_VERSION = "sts1-player-zh-v6"
 # Kept as the default public version for the SFT teacher client.
 PROMPT_VERSION = TEACHER_PROMPT_VERSION
 CHARACTER_PROMPT_LIBRARY_VERSION = "sts1-character-prompt-library-v1"
@@ -28,6 +28,8 @@ CHARACTER_ALIASES = {
 }
 
 _COMMON_RULES = """目标是提高整局通关概率，而不是只追求当前房间的即时收益。只使用观察中明确给出的公开信息；不要臆测没有展示的事件结果、牌堆顺序、敌人意图或物品效果。当前合法动作列表是唯一可执行集合。
+
+【房间历史】`room_history` 是当前房间的详细操作和公开进展：所有房间统一显示最近30步，二级选牌仍属于原房间。结合操作对象、目标、选择用途、事件初始说明和当前棋盘中已公开的翻牌位置/牌面判断流程，不重复已经成功执行的动作。取消或未执行的尝试不代表已生效；observed_changes 只是随后观察值，不保证动画已经结算，以当前状态为准。
 
 如果启用了思考模式，内部思考请使用简体中文，并保持短而有针对性：先识别场景与最紧迫风险，再比较少数关键候选，最后尽快输出动作 JSON。不要复述整段状态、重复同一结论或展开与当前动作无关的攻略；思考内容服务于决策，不应为了写长分析而牺牲最终动作。
 
@@ -119,9 +121,9 @@ SCENARIO_PROMPTS: dict[str, str] = {
 - 不要把所有事件都当成固定攻略答案；同一选项在不同 Act、牌组和生命状态下价值不同。
 - 高生命和有恢复/移除手段时可以承受更高风险；低生命、关键战斗临近或牌组已稳定时应更保守。
 - 若选项可能产生未知随机结果，不要假设最理想结果；优先选择在多种结果下都可接受的方案。
-- `event_history` 是当前事件的按时间顺序状态转移记录；当当前 body_text 为空、选项标签变化或事件已进入小游戏/二级页面时，先从其中恢复事件目标、已选项及其结果，再做决定。
+- `room_history` 是当前房间的按时间顺序动作记录；事件、商店、营火的二级选牌界面属于同一房间。当当前 body_text 为空、选项标签变化或事件已进入小游戏/二级页面时，从 event_opening 和 steps 的操作明细、event_changes 恢复事件目标、已选项与公开结果。随后观察值不保证动画已经结算，以当前状态为准。
 - 对翻牌、配对、递进选择等多步事件，记录已翻开的位置与牌面、已经证伪的组合和仍未探索的位置。不要反复选择已知无效的同一位置/组合；若没有已知可完成的组合，优先探索尚未翻开的合法位置。
-- 注意 recent_actions，避免在事件已进入下一步选择时重复执行上一层动作。""",
+- 注意 room_history，避免在事件已进入下一步选择时重复执行上一层动作。""",
     "REST": """【营火决策】
 在回复生命和升级之间比较：当前生命距离死亡的余量、下一场/精英/首领的威胁、是否有关键升级、遗物提供的回复或升级效果，以及本 Act 剩余路线。
 - 若不回复就可能在下一场战斗死亡或无法承受精英，应优先回复。
@@ -149,7 +151,7 @@ SCENARIO_PROMPTS: dict[str, str] = {
     "TRANSITION": """【过渡状态】
 当前状态可能是房间尚未完成时的短暂过渡。不要尝试提前选择地图节点或重复上一房间动作；遵守当前合法动作，选择能安全等待状态稳定的动作。""",
     "GENERIC": """【通用场景】
-优先解决当前明确的生存和流程目标，再考虑长期收益。严格读取当前 screen_type、screen_state、recent_actions 和合法动作，不要假设隐藏内容或重复已经完成的动作。""",
+优先解决当前明确的生存和流程目标，再考虑长期收益。严格读取当前 screen_type、screen_state、room_history 和合法动作，不要假设隐藏内容或重复已经完成的动作。""",
 }
 
 

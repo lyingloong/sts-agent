@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from sts_agent.runtime.controller import (
-    ACTION_HISTORY_STORAGE_LIMIT,
     accepted_action_history_item,
     attach_runtime_context,
     game_state,
@@ -41,6 +40,20 @@ def _message(state: Any, available: Any = None) -> dict[str, Any]:
 
 def _token(value: Any) -> str:
     return "".join(character for character in str(value or "").casefold() if character.isalnum())
+
+
+def recorded_history_pending(record: dict[str, Any]) -> dict[str, Any]:
+    """Prefer the actual execution boundary for queued human combat actions."""
+    executed = record.get("execution_tracking") and record.get("execution_status") == "executed"
+    pre = record.get("training_pre_state") if executed else record.get("pre_state")
+    action = record.get("training_action") if executed else record.get("action")
+    pre = pre if isinstance(pre, dict) else record.get("pre_state") or {}
+    return {
+        "step_id": record.get("step_id"), "screen_type": pre.get("screen_type"),
+        "pre_state": pre, "action": action or record.get("action"),
+        "raw_action": record.get("execution_action") if executed else record.get("raw_action"),
+        "decision": record.get("decision") or {"source": "human_game"},
+    }
 
 
 def _choice_keywords(action: dict[str, Any]) -> tuple[str, ...]:
@@ -315,8 +328,10 @@ class ActionRecorderEnricher:
                     post = previous.get("raw_message_after")
                     if not isinstance(post, dict):
                         post = _message(previous.get("observation_after"))
-                    context.action_history.append(accepted_action_history_item(previous, post))
-                    del context.action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
+                    item = accepted_action_history_item(recorded_history_pending(previous), post)
+                    if previous.get("execution_tracking"):
+                        item["execution_status"] = previous.get("execution_status")
+                    context.action_history.append(item)
         context.output = path.open("a", encoding="utf-8")
 
     def _start_step(self, context: RunContext, event: dict[str, Any]) -> None:
@@ -462,12 +477,7 @@ class ActionRecorderEnricher:
             record["state_match"]["resolution"] = event.get("resolution")
 
         if post_message["in_game"] and isinstance(record.get("post_state"), dict):
-            history_pending = {
-                "step_id": record.get("step_id"),
-                "screen_type": record.get("screen_type"),
-                "pre_state": record.get("pre_state"),
-                "action": record.get("action"),
-            }
+            history_pending = recorded_history_pending(record)
             remember_declined_combat_card_reward(
                 history_pending, post_message, context.declined_card_reward_keys
             )
@@ -475,7 +485,6 @@ class ActionRecorderEnricher:
             if record.get("execution_tracking"):
                 history_item["execution_status"] = record.get("execution_status")
             context.action_history.append(history_item)
-            del context.action_history[:-ACTION_HISTORY_STORAGE_LIMIT]
             attach_runtime_context(
                 record["post_state"],
                 context.visited_shop_rooms,

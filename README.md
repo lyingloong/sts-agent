@@ -59,9 +59,13 @@ controller 必须由 CommunicationMod 启动，一次只接受一个终端类客
 
 将 `config/agent.json` 的 `active_mode` 设为 `collect_codex`，启动游戏使 CommunicationMod 拉起 controller，再在 Codex 会话中启用 `sts-agent-codex-mcp`。Codex 通过 MCP 获取当前模型可见 observation 和合法动作，并以动作 ID 提交选择；轨迹写入 `data/trajectories/codex/`，与人类数据分开。配置 MCP 的客户端步骤和逐步游玩规程见 [A0 战士 Codex 游玩说明](doc/CODEX_PLAY_A0_IRONCLAD.md)。
 
-controller 会在向 MCP 提供决策状态前完成已有的环境自动动作。自动动作保留在轨迹和 `recent_actions` 中，但不会作为待选动作交给 Codex；Codex 不应重复执行它们。
+controller 会在向 MCP 提供决策状态前完成已有的环境自动动作。自动动作保留在轨迹和 `room_history` 中，但不会作为待选动作交给 Codex；Codex 不应重复执行它们。
 
 ### 人类游玩采集
+
+模型可见的状态、细粒度动作和历史格式见 [模型输入与动作空间](doc/MODEL_OBSERVATION_AND_ACTIONS.md)，
+完整输入示例见 [Prompt Preview](doc/POLICY_PROMPT_PREVIEW.md)。所有房间统一显示最近 30 步历史，
+二级选牌不清空历史，翻牌的已公开牌面还保留在当前棋盘记忆中。
 
 人类直接在游戏界面操作、并采集轨迹时，将 `config/agent.json` 中的活动模式设为：
 

@@ -93,6 +93,20 @@ _FIELD_LABELS = {
     "map": "地图全貌",
     "recent_actions": "最近动作",
     "event_history": "事件历史",
+    "room_history": "当前房间历史",
+    "choice_text": "选择文本",
+    "object": "操作对象",
+    "index": "序号",
+    "selection_context": "选牌触发来源",
+    "selection_reason": "选牌说明",
+    "source_reward_id": "所属奖励ID",
+    "observed_after": "随后观察值",
+    "before": "动作前值",
+    "entity": "实体",
+    "count_delta": "数量变化",
+    "revealed_cards": "本次公开的牌面",
+    "board_position": "翻牌位置",
+    "known_card_at_position": "该位置当前已公开的牌面",
     "run_memory": "本局记忆",
     "decision_constraints": "必须遵守的限制",
     "state_warning": "状态提示",
@@ -103,6 +117,12 @@ _FIELD_LABELS = {
     "color": "颜色",
     "rarity": "稀有度",
     "cost": "费用",
+    "cost_for_turn": "本回合费用",
+    "turn": "回合",
+    "hit_count": "段数",
+    "draw_count": "抽牌堆数量",
+    "discard_count": "弃牌堆数量",
+    "exhaust_count": "消耗牌堆数量",
     "upgrades": "升级次数",
     "count": "数量",
     "price": "价格",
@@ -116,6 +136,19 @@ _FIELD_LABELS = {
     "damage": "伤害",
     "block": "格挡",
     "intent": "意图",
+    "intent_base_damage": "意图基础单段伤害",
+    "intent_damage": "意图最终单段伤害",
+    "intent_hits": "意图段数",
+    "intent_total_damage": "意图总伤害",
+    "is_gone": "已离场",
+    "card": "卡牌",
+    "cards": "卡牌",
+    "text": "文本",
+    "num_cards": "选牌数量",
+    "for_purge": "用于移除",
+    "for_upgrade": "用于升级",
+    "for_transform": "用于变化",
+    "phase": "阶段",
     "powers": "状态效果",
     "nodes": "节点",
     "current_node": "当前位置",
@@ -129,7 +162,6 @@ _FIELD_LABELS = {
     "stance": "姿态",
     "player": "我方",
     "monsters": "敌人",
-    "powers": "状态效果",
     "selected": "已选",
     "selected_cards": "已选牌",
     "selection_mode": "选牌模式",
@@ -180,10 +212,10 @@ _SCENE_GUIDANCE = {
     "MAP": "这是地图界面。根据完整公开地图、当前可达节点、生命、牌组、金币、药水和本幕首领比较后续路线；兼顾补强、营火恢复或升级、商店和精英风险，只选择当前合法的可达节点，不臆测问号房内容。",
     "COMBAT": "这是战斗界面。先看我方生命、能量、手牌和敌人意图，优先计算本回合能造成的伤害和格挡；有可用能量和有效动作时不要无故结束回合，必要时合理使用药水，目标是减少掉血而不是机械保留资源。",
     "CARD_REWARD": "这是卡牌奖励界面。先读取并比较全部可见卡牌，再决定获得或跳过；前期通常需要能解决当前战斗的过渡牌，不要因为稀有度或单张牌面看起来强就忽略牌组协同。",
-    "COMBAT_CARD_SELECTION": "这是战斗内生成选牌，不是普通战后永久卡牌奖励。读取触发来源、描述和最近动作，确认卡牌进入手牌或其他位置、临时费用和持续时间；结合当前能量、敌人意图和手牌比较即时收益，不要因担心永久牌组变大而跳过。不知道的来源效果保持未知。",
+    "COMBAT_CARD_SELECTION": "这是战斗内生成选牌，不是普通战后永久卡牌奖励。读取触发来源、描述和当前房间历史，确认卡牌进入手牌或其他位置、临时费用和持续时间；结合当前能量、敌人意图和手牌比较即时收益，不要因担心永久牌组变大而跳过。不知道的来源效果保持未知。",
     "RELIC_PICKUP_CARD_SELECTION": "这是遗物触发的选牌。读取 selection_context 的来源、选择目的、数量和已选项目，按本次遗物效果比较候选；不要套用普通卡牌奖励或其他选牌流程。",
     "COMBAT_REWARD": "这是战斗奖励界面。先确认可见金币、药水和遗物等奖励是否仍未领取，再处理卡牌奖励；没有明确理由不要跳过尚未领取的资源。",
-    "EVENT": "这是事件界面。先读事件说明、选项和事件历史，确认当前选项是否已经改变事件阶段；比较生命、金币、牌组和后续路线的长期代价，避免重复上一阶段的选项。",
+    "EVENT": "这是事件界面。先读事件说明、选项和当前房间历史，确认当前选项是否已经改变事件阶段；比较生命、金币、牌组和后续路线的长期代价，避免重复上一阶段的选项。",
     "SHOP_ROOM": "这是商店房间，当前未打开商品界面。区分进入商店房间、打开商人和离开房间；按合法动作查看商人，不猜测未展示商品。已访问不代表不能重入：星系仪等遗物的奖励流程可能自动关闭商人界面，仍有购买或删牌需求时可以再次进入；没有需求时离开，避免无目的反复进出。",
     "SHOP_SCREEN": "这是商人界面。比较全部可见商品的效果、价格、当前金币和牌组缺口，以及移除牌的价值；考虑后续资源需求，不按名称或稀有度盲目购买。离开商人界面和离开商店房间是不同动作。",
     "REST": "这是营火界面。根据当前生命、牌组缺口和下一场精英或首领的风险，在休息、升级及其他可见选项之间权衡。",
@@ -199,7 +231,7 @@ _SCENE_GUIDANCE = {
     "TRANSITION": "这是房间切换或未完成流程的过渡状态。不要把上一场景的状态当成当前可执行决策；只使用当前合法动作，未提供合法动作时等待控制器更新。",
     "GAME_OVER": "本局已结束。只处理当前合法的终局确认或返回动作，不继续提交战斗或地图动作。",
     "VICTORY": "本局已胜利结束。只处理当前合法的终局确认或返回动作，不自行开始新局。",
-    "GENERIC": "根据当前界面内容、最近动作、明确的选择要求和合法动作处理本步；未知效果保持未知，不猜测隐藏内容或重复已经完成的动作。",
+    "GENERIC": "根据当前界面内容、当前房间历史、明确的选择要求和合法动作处理本步；未知效果保持未知，不猜测隐藏内容或重复已经完成的动作。",
 }
 
 PROMPT_TEMPLATES = ("canonical", "state_first", "decision_first")
@@ -292,6 +324,46 @@ def _prompt_screen(observation: dict[str, Any]) -> str:
     return screen_key(observation)
 
 
+def render_room_history(history: dict[str, Any]) -> list[str]:
+    room = history.get("room") or {}
+    lines = ["【当前房间历史】",
+             f"幕={_scalar_text(room.get('act'))}；楼层={_scalar_text(room.get('floor'))}；"
+             f"共{history.get('total_steps', 0)}步，显示{history.get('shown_steps', 0)}步；"
+             + f"每个房间最多显示{history['limit']}步"]
+    if history.get("omitted_steps"):
+        lines.append(f"更早的{history['omitted_steps']}步未在本次房间历史窗口中显示。")
+    if history.get("event_opening"):
+        lines.extend(_natural_lines(history["event_opening"], "", "进入事件时的说明与选项"))
+    lines.append("以下是过去的操作记录，不是待选动作；成功执行的不要重复提交，取消/未执行的尝试不代表已生效。随后观察值可能尚未完成动画结算，以当前状态为准。")
+    kind_labels = {"choose": "选择选项", "play": "出牌", "potion_use": "使用药水",
+                   "potion_discard": "丢弃药水", "confirm": "确认/继续", "return": "返回",
+                   "skip": "跳过", "leave": "离开", "cancel": "取消", "end_turn": "结束回合"}
+    for item in history.get("steps", []):
+        source = item.get("source") or "未标注"
+        source = {"human_game": "人类游戏内操作", "environment_auto": "控制器自动动作", "codex": "Codex"}.get(source, source)
+        turn = f"；回合={item['turn_before']}" if item.get("turn_before") is not None else ""
+        before = item.get("screen_before")
+        after = item.get("screen_after")
+        before_label = "战斗" if before == "NONE" and item.get("turn_before") is not None else _SCREEN_LABELS.get(before, before)
+        after_label = "战斗" if after == "NONE" and item.get("turn_after") is not None else _SCREEN_LABELS.get(after, after)
+        lines.append(f"步骤{item.get('step_id', '?')}：{before_label} → {after_label}{turn}；执行来源={source}")
+        if item.get("role"):
+            lines.append(f"  {item['role']}")
+        kind = item.get("action_kind")
+        status = item.get("execution_status")
+        prefix = "尝试（未执行）" if status in {"cancelled", "skipped", "rejected"} else "已执行"
+        lines.append(f"  {prefix}：{kind_labels.get(kind, kind or '操作')}；{item.get('action') or item.get('action_id') or '未知'}")
+        if item.get("details"):
+            lines.extend(_natural_lines(item["details"], "  ", "操作明细"))
+        if item.get("observed_changes"):
+            lines.extend(_natural_lines(item["observed_changes"], "  ", "随后观察到的变化（非最终结算保证）"))
+        if item.get("event_changes"):
+            lines.extend(_natural_lines(item["event_changes"], "  ", "事件进展"))
+        if item.get("execution_status"):
+            lines.append(f"  执行状态={item['execution_status']}")
+    return lines
+
+
 def render_observation(observation: dict[str, Any]) -> str:
     """Render routed state as concise Chinese prose instead of minified JSON.
 
@@ -342,11 +414,16 @@ def render_observation(observation: dict[str, Any]) -> str:
             lines.extend(_natural_lines(observation[key], "", title))
         consumed.add(key)
 
+    consumed.add("room_history")
+
     # Keep newly-added public fields visible without having to update this
     # renderer for every CommunicationMod release.
     for key, value in observation.items():
         if key not in consumed and not _is_empty(value):
             lines.extend(_natural_lines(value, "", f"【{_label(key)}】"))
+
+    if isinstance(observation.get("room_history"), dict):
+        lines.extend(render_room_history(observation["room_history"]))
 
     return "\n".join(lines)
 
@@ -364,7 +441,7 @@ def _policy_prompt_prefix() -> list[str]:
     """Shared natural-language instructions for ranking, scoring and SFT."""
     return [
         "你正在游玩《杀戮尖塔》，负责完成整局游戏。当前要选择下一步动作。",
-        "优先保证存活和减少不必要的掉血，再权衡牌组成长、资源、路线和本幕首领。必须遵守状态中的限制、选牌要求和最近动作。",
+        "优先保证存活和减少不必要的掉血，再权衡牌组成长、资源、路线和本幕首领。必须遵守状态中的限制和选牌要求，并结合当前房间历史判断流程；历史动作已执行，不要重复提交。",
         "默认规则：回合开始通常获得3能量并抽5张牌；回合结束会失去能量并弃手牌；普通战斗结束不回血，击败Boss后通常大量回血。当前状态中的真实数值和效果优先于默认规则。",
     ]
 

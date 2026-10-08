@@ -30,7 +30,7 @@ system prompt 之后的 user prompt 另行包含压缩后的公开 observation �
 ## 一轮流程
 
 1. 使用 Overlay 或终端输入 `s <角色> <进阶>` 或带种子的 `s <角色> <进阶> <种子>`。首次 incumbent 可以使用随机种子；游戏状态暴露实际显示种子后，controller 会把它写入本轮运行配置并作为后续候选复跑的锚点。
-2. controller 以当前角色目录 `prompts/characters/<角色>/manifest.json` 的 `active_version` 作为 incumbent，在该锚定种子完整运行；现有 `recent_actions`、战斗历史、事件历史和合法动作表照常送给教师。
+2. controller 以当前角色目录 `prompts/characters/<角色>/manifest.json` 的 `active_version` 作为 incumbent，在该锚定种子完整运行；当前房间 `room_history`（所有房间统一最近 30 步）和合法动作表照常送给教师。
 3. 终局后，DeepSeek 按 Act 读取该段压缩后的动态动作账本和终局指标，提出一个候选 JSON。它必须引用 1-8 个日志步骤，只修改一个 skill，不能把当前种子、楼层或具体随机结果写成规则。
 4. 候选只写入 `data/prompt_evolution/sessions/<session>/candidates/`，先弹出“候选验证前审核”。此时只显示 incumbent 的结果、候选 skill diff、证据和风险，不会启动下一局。
 5. 人工接受后，controller 才以候选 skill 在同一角色、进阶、种子上重开验证局；拒绝则把理由传回 DeepSeek 重写候选，并再次等待审核；放弃则结束本轮。候选在验证前不会改变已接受的 active version。
