@@ -54,12 +54,11 @@ class CodexMcpTests(unittest.TestCase):
         bridge = controller.TerminalBridge("127.0.0.1", 0)
         try:
             bridge.connection = Mock()
-            bridge.reader = Mock()
-            bridge.writer = Mock()
-            bridge.reader.readline.side_effect = ConnectionResetError("client exited")
-            self.assertIsNone(bridge.receive())
+            bridge.connection.recv.side_effect = ConnectionResetError("client exited")
+            with patch.object(controller.select, "select", return_value=([bridge.connection], [], [])):
+                self.assertIsNone(bridge.receive())
             self.assertIsNone(bridge.connection)
-            self.assertIsNone(bridge.reader)
+            self.assertEqual(bridge.input_buffer, bytearray())
             self.assertGreaterEqual(bridge.server.fileno(), 0)
         finally:
             bridge.close()

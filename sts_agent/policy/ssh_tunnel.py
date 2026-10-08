@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
+
+from sts_agent.runtime.owned_process import WindowsChildJob
 
 
 class SshTunnel:
@@ -15,6 +18,9 @@ class SshTunnel:
         self.timeout, self.log_path = timeout, log_path
         self.process: subprocess.Popen | None = None
         self.log = None
+        self.job: WindowsChildJob | None = None
+        self._lock = threading.RLock()
+        self._closed = threading.Event()
 
     def command(self) -> list[str]:
         return [
@@ -25,6 +31,12 @@ class SshTunnel:
         ]
 
     def start(self) -> None:
+        with self._lock:
+            self._start()
+
+    def _start(self) -> None:
+        if self._closed.is_set():
+            raise RuntimeError("SSH tunnel owner has shut down")
         if self.process is not None:
             if self.process.poll() is not None:
                 raise RuntimeError(f"SSH tunnel exited; inspect {self.log_path}")
@@ -38,12 +50,16 @@ class SshTunnel:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log = self.log_path.open("a", encoding="utf-8")
         try:
+            self.job = WindowsChildJob()
             self.process = subprocess.Popen(
                 self.command(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self.log,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
+            self.job.attach(self.process)
             deadline = time.monotonic() + self.timeout
             while time.monotonic() < deadline:
+                if self._closed.is_set():
+                    raise RuntimeError("SSH tunnel owner has shut down")
                 if self.process.poll() is not None:
                     raise RuntimeError(f"SSH forward failed; inspect {self.log_path}")
                 try:
@@ -53,19 +69,31 @@ class SshTunnel:
                     time.sleep(0.1)
             raise RuntimeError("SSH forward startup timed out")
         except Exception:
-            self.close()
+            self._cleanup()
             raise
 
     def close(self) -> None:
-        if self.process is not None:
-            if self.process.poll() is None:
-                self.process.terminate()
+        # Signal before acquiring the lock so a concurrent startup exits its
+        # polling loop immediately and cannot launch a late orphan after close.
+        self._closed.set()
+        with self._lock:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        process = self.process
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
                 try:
-                    self.process.wait(timeout=5)
+                    process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=5)
+                    process.kill()
+                    process.wait(timeout=5)
+        finally:
             self.process = None
-        if self.log is not None:
-            self.log.close()
-            self.log = None
+            if self.job is not None:
+                self.job.close()
+                self.job = None
+            if self.log is not None:
+                self.log.close()
+                self.log = None

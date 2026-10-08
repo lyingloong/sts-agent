@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import socket
 import subprocess
@@ -40,6 +41,7 @@ from sts_agent.learning.prompt_evolution import PromptEvolutionError, PromptEvol
 from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError
 from sts_agent.policy.history import enrich_history_item, room_history_summary
 from sts_agent.paths import PROJECT_ROOT
+from sts_agent.runtime.lifecycle import GameDisconnected, GameInput
 
 
 ACTION_HISTORY_LIMIT = 6
@@ -2542,41 +2544,71 @@ class TerminalBridge:
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((host, port))
         self.server.listen(1)
+        self.server.settimeout(0.25)
+        self.interrupted = threading.Event()
+        self.output_lock = threading.Lock()
         self.connection: socket.socket | None = None
-        self.reader: TextIO | None = None
-        self.writer: TextIO | None = None
+        self.input_buffer = bytearray()
 
     def accept(self) -> None:
+        self.check_connected()
         if self.connection is not None:
             return
         print(f"waiting for terminal client on {self.host}:{self.port}", file=sys.stderr, flush=True)
-        connection, address = self.server.accept()
+        while True:
+            self.check_connected()
+            try:
+                connection, address = self.server.accept()
+                break
+            except socket.timeout:
+                continue
+            except OSError:
+                self.check_connected()
+                raise
+        connection.settimeout(None)
         self.connection = connection
-        self.reader = connection.makefile("r", encoding="utf-8", newline="\n")
-        self.writer = connection.makefile("w", encoding="utf-8", newline="\n")
+        if self.interrupted.is_set():
+            connection.close()
+            self.connection = None
+            self.check_connected()
         self.send({"type": "hello", "message": f"connected to {address[0]}:{address[1]}"})
 
     def send(self, packet: dict[str, Any]) -> None:
         self.accept()
-        assert self.writer is not None
+        assert self.connection is not None
         try:
-            self.writer.write(json.dumps(packet, ensure_ascii=False) + "\n")
-            self.writer.flush()
+            with self.output_lock:
+                self.check_connected()
+                self.connection.sendall((json.dumps(packet, ensure_ascii=False) + "\n").encode("utf-8"))
         except OSError:
+            self.check_connected()
             self.close_client()
             raise
 
     def receive(self) -> dict[str, Any] | None:
         self.accept()
-        assert self.reader is not None
+        assert self.connection is not None
+        connection = self.connection
         try:
-            line = self.reader.readline()
-        except OSError:
+            while b"\n" not in self.input_buffer:
+                self.check_connected()
+                readable, _, _ = select.select([connection], [], [], 0.25)
+                if not readable:
+                    continue
+                chunk = connection.recv(65536)
+                if not chunk:
+                    self.check_connected()
+                    self.close_client()
+                    return None
+                self.input_buffer.extend(chunk)
+            line_bytes, _, remainder = self.input_buffer.partition(b"\n")
+            self.input_buffer = bytearray(remainder)
+            line = line_bytes.decode("utf-8").rstrip("\r")
+        except (OSError, UnicodeError):
+            self.check_connected()
             self.close_client()
             return None
-        if not line:
-            self.close_client()
-            return None
+        self.check_connected()
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
@@ -2584,19 +2616,39 @@ class TerminalBridge:
         return value if isinstance(value, dict) else {"type": "input", "text": str(value)}
 
     def close_client(self) -> None:
-        for item in (self.reader, self.writer, self.connection):
+        # No makefile/readline lock: even a partial message is cancellable.
+        if self.connection is not None:
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for item in (self.connection,):
             try:
                 if item is not None:
                     item.close()
             except OSError:
                 pass
-        self.reader = None
-        self.writer = None
         self.connection = None
+        self.input_buffer.clear()
 
     def close(self) -> None:
+        self.interrupt()
         self.close_client()
         self.server.close()
+
+    def check_connected(self) -> None:
+        if self.interrupted.is_set():
+            raise GameDisconnected("CommunicationMod input closed")
+
+    def interrupt(self) -> None:
+        """Wake blocked socket IO without closing a locked file in this thread."""
+        self.interrupted.set()
+        for connection in (self.connection, self.server):
+            if connection is not None:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
 
 class PolicyClient:
@@ -4134,6 +4186,7 @@ def main() -> int:
         )
     except PromptEvolutionError as exc:
         print(f"prompt evolution unavailable: {exc}", file=sys.stderr, flush=True)
+        bridge.close()
         return 2
     policy = PolicyClient(project_root, config)
     if policy.runtime == "remote_api":
@@ -4252,33 +4305,30 @@ def main() -> int:
             policy.api.record_observation(run_id, {}, run_config)
         return str(action["command"])
 
-    # The game must not expose a start action before local setup has finished.
-    # CommunicationMod waits for this stdout handshake.
-    teacher.prewarm()
-    prompt_evolution_preflight_error = prompt_evolution.preflight()
-    if prompt_evolution.enabled:
-        print(
-            f"prompt evolution ready: character selected at START; active skill version will be loaded per run"
-            if prompt_evolution_preflight_error is None
-            else f"prompt evolution unavailable: {prompt_evolution_preflight_error}",
-            file=sys.stderr,
-            flush=True,
-        )
-    posthoc_preflight_error = posthoc.preflight()
-    policy.prewarm()
-    if policy.runtime == "remote_online_rl" and policy.enabled and posthoc.enabled != policy.online_rl_attribution_enabled:
-        # The two switches must move together. Either mismatch would silently
-        # change update semantics: old workers would train every step, while a
-        # masked worker would receive no selected steps at all.
-        policy._disable("posthoc_feedback.enabled 与远端 attribution.enabled 必须同时启用或关闭")
-
-    # Required handshake. No diagnostics may go to stdout.
-    print("ready", flush=True)
-    print(f"controller session={session_id}", file=sys.stderr, flush=True)
-
+    game_input = GameInput(sys.stdin, bridge.interrupt)
     try:
+        # Setup can also block on a model or network; game exit must cancel it.
+        game_input.call(teacher.prewarm)
+        prompt_evolution_preflight_error = game_input.call(prompt_evolution.preflight)
+        if prompt_evolution.enabled:
+            print(
+                "prompt evolution ready: character selected at START; active skill version will be loaded per run"
+                if prompt_evolution_preflight_error is None
+                else f"prompt evolution unavailable: {prompt_evolution_preflight_error}",
+                file=sys.stderr,
+                flush=True,
+            )
+        posthoc_preflight_error = game_input.call(posthoc.preflight)
+        game_input.call(policy.prewarm)
+        if policy.runtime == "remote_online_rl" and policy.enabled and posthoc.enabled != policy.online_rl_attribution_enabled:
+            policy._disable("posthoc_feedback.enabled 与远端 attribution.enabled 必须同时启用或关闭")
+
+        # Required handshake. No diagnostics may go to stdout.
+        game_input.check()
+        print("ready", flush=True)
+        print(f"controller session={session_id}", file=sys.stderr, flush=True)
         with raw_path.open("w", encoding="utf-8") as raw_output:
-            for line in sys.stdin:
+            for line in game_input:
                 raw = line.rstrip("\r\n")
                 if not raw:
                     continue
@@ -4470,7 +4520,7 @@ def main() -> int:
                                     except OSError:
                                         pass
                                     try:
-                                        annotation = posthoc.annotate(reflection, online_episode)
+                                        annotation = game_input.call(posthoc.annotate, reflection, online_episode)
                                     except PosthocFeedbackError as exc:
                                         annotation = {
                                             "status": "teacher_error",
@@ -4540,7 +4590,7 @@ def main() -> int:
                                 )
                             except OSError:
                                 pass
-                            online_result = policy.submit_episode(online_episode)
+                            online_result = game_input.call(policy.submit_episode, online_episode)
                         if online_result is not None:
                             online_decision = policy.record_online_episode_result(online_result)
                             try:
@@ -4585,7 +4635,8 @@ def main() -> int:
                                 "error": prompt_evolution_preflight_error,
                             }
                         else:
-                            evolution_result = prompt_evolution.complete_run(
+                            evolution_result = game_input.call(
+                                prompt_evolution.complete_run,
                                 run_id,
                                 run_config,
                                 trace_path,
@@ -4606,7 +4657,7 @@ def main() -> int:
                                 except OSError:
                                     pass
                                 review_response = request_prompt_evolution_review(bridge, review, review_error)
-                                evolution_result = prompt_evolution.handle_review(review_response)
+                                evolution_result = game_input.call(prompt_evolution.handle_review, review_response)
                                 if evolution_result.get("kind") == "error":
                                     review_error = str(evolution_result.get("error") or "审核结果无效")
                                 else:
@@ -4827,7 +4878,8 @@ def main() -> int:
                         rebind_run_outputs_after_seed()
                 if policy.runtime == "remote_api" and run_id is not None and message.get("in_game"):
                     policy.api.record_observation(run_id, trace_state(message), run_config)
-                result = ask_action(
+                result = game_input.call(
+                    ask_action,
                     bridge,
                     message,
                     run_id,
@@ -4871,13 +4923,22 @@ def main() -> int:
                     )
                     step_id += 1
                     print(command, flush=True)
+    except GameDisconnected as exc:
+        print(f"controller stopped: {exc}", file=sys.stderr, flush=True)
+        write_event({"event": "controller_disconnected", "run_id": run_id, "at": now_iso(), "reason": str(exc)})
+        return 0
     except KeyboardInterrupt:
         print("controller interrupted", file=sys.stderr, flush=True)
         return 0
     finally:
-        close_run_outputs()
-        policy.close()
-        bridge.close()
+        game_input.close()
+        try:
+            close_run_outputs()
+        finally:
+            try:
+                policy.close()
+            finally:
+                bridge.close()
     return 0
 
 
