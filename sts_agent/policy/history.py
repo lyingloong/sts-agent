@@ -1,8 +1,8 @@
 """Public room-local decision history, shared by live play and recording.
 
 Never store full observations here: they contain the history itself, the map,
-and many repeated entities. Outcomes describe observed snapshots, not a claim
-that the animation has finished or that all changes were caused by one action.
+and many repeated entities. Internal audit items can contain observed changes;
+model history projects only action/selection context, not before/after changes.
 """
 
 from __future__ import annotations
@@ -50,6 +50,157 @@ def _at(items: Any, index: int | None) -> Any:
     return items[index] if isinstance(items, list) and index is not None and 0 <= index < len(items) else None
 
 
+def _identity(value: Any) -> dict[str, Any]:
+    """Historical identity, not an entity's attributes or effect description."""
+    if not isinstance(value, dict):
+        return {}
+    result = {key: value[key] for key in ("id", "name", "upgrades", "reward_id", "reward_type")
+              if value.get(key) is not None}
+    for key in ("card", "relic", "potion"):
+        if child := _identity(value.get(key)):
+            result[key] = child
+    return result
+
+
+def compact_history_step(item: dict[str, Any]) -> dict[str, Any]:
+    """Shared live/SFT/UI projection; raw audit history remains untouched."""
+    result = {key: copy.deepcopy(item[key]) for key in (
+        "step_id", "screen_before", "screen_after", "turn_before", "turn_after",
+        "action_kind", "action_id", "action", "role", "execution_status",
+    ) if key in item}
+    raw = item.get("details") or {}
+    details = {key: copy.deepcopy(raw[key]) for key in (
+        "choice_text", "selection_mode", "source_reward_id", "board_position",
+    ) if raw.get(key) is not None}
+    for key in ("object", "confirmation_card", "known_card_at_position"):
+        if entity := _identity(raw.get(key)):
+            details[key] = entity
+    if isinstance(raw.get("target"), dict):
+        details["target"] = _identity(raw["target"])
+        if raw["target"].get("index") is not None:
+            details["target"]["index"] = raw["target"]["index"]
+    if isinstance(raw.get("selected_cards"), list):
+        details["selected_cards"] = [_identity(card) for card in raw["selected_cards"]]
+    context = raw.get("selection_context")
+    if isinstance(context, dict):
+        lean = {key: context[key] for key in ("kind", "selection_type", "selection_mode")
+                if context.get(key) is not None}
+        if origin := _identity(context.get("source")):
+            lean["source"] = origin
+        if lean:
+            details["selection_context"] = lean
+    mode = details.get("selection_mode") or (details.get("selection_context") or {}).get("selection_mode")
+    # HAND_SELECT/modded selections sometimes have only an explicit reason.
+    # Preserve that purpose instead of guessing from a card's name/effect.
+    if not mode or mode == "SELECT":
+        reason = raw.get("selection_reason") or raw.get("selection_instruction")
+        if reason:
+            details["selection_reason"] = reason
+    if details:
+        result["details"] = details
+    return result
+
+
+def _name(entity: Any) -> str:
+    if not isinstance(entity, dict):
+        return ""
+    for child in ("card", "relic", "potion"):
+        if entity.get(child):
+            return _name(entity[child])
+    name = str(entity.get("name") or entity.get("id") or entity.get("reward_type") or "")
+    upgrades = entity.get("upgrades")
+    if isinstance(upgrades, int) and upgrades > 0 and not re.search(r"\+\d*$", name):
+        name += "+" if upgrades == 1 else f"+{upgrades}"
+    return name
+
+
+def history_step_text(item: dict[str, Any]) -> str:
+    """One semantic line, rendered identically for the model and Overlay."""
+    step = compact_history_step(item)
+    details = step.get("details") or {}
+    kind, screen = step.get("action_kind"), step.get("screen_before")
+    label = str(step.get("action") or step.get("action_id") or "未知动作").removeprefix("自动执行 ")
+    obj = _name(details.get("object"))
+    choice = str(details.get("choice_text") or label)
+    context = details.get("selection_context") or {}
+    mode = details.get("selection_mode") or context.get("selection_mode")
+    purposes = {"UPGRADE": "升级", "PURGE": "删除", "TRANSFORM": "变化", "TRANSFORM_UPGRADE": "变化并升级",
+                "COPY": "复制", "BOTTLE": "指定开场手牌", "RELIC_CARD_REWARD": "遗物卡牌奖励",
+                "DISCARD": "弃牌", "EXHAUST": "消耗"}
+    purpose = purposes.get(mode, mode if mode and mode != "SELECT" else details.get("selection_reason"))
+    if purpose:
+        purpose = purposes.get(str(purpose).upper(), purpose)
+    notes = []
+    if kind == "play" and obj:
+        action = f"使用{obj}"
+    elif kind in {"potion_use", "potion_discard"} and obj:
+        action = f"{'使用' if kind == 'potion_use' else '丢弃'}药水：{obj}"
+    elif kind == "choose" and details.get("board_position") is not None:
+        action = f"翻开位置{details['board_position']}"
+        if face := _name(details.get("known_card_at_position")):
+            notes.append(f"当前位置已公开：{face}")
+    elif kind == "choose":
+        if purpose:
+            action = f"选择{obj or choice}用于{purpose}"
+        elif screen == "SHOP_SCREEN" and obj:
+            action = f"购买{obj}"
+        elif screen == "SHOP_SCREEN" and choice.casefold() in {"purge", "删牌", "移除卡牌"}:
+            action = "打开删牌界面"
+        elif screen == "REST":
+            rest = {"smith": "锻造", "rest": "休息", "recall": "获取红钥匙", "lift": "举重", "dig": "挖掘"}
+            action = f"选择营火动作：{rest.get(choice.casefold(), choice)}"
+        elif screen == "BOSS_REWARD":
+            action = f"选择Boss遗物：{obj or choice}"
+        elif screen == "COMBAT_REWARD":
+            reward_type = str((details.get("object") or {}).get("reward_type") or "").upper()
+            action = "打开卡牌奖励" if reward_type == "CARD" else f"领取奖励：{obj or choice}"
+        elif screen == "CARD_REWARD":
+            action = f"选择卡牌：{obj or choice}"
+        elif screen == "EVENT":
+            action = f"选择事件选项：{choice}"
+        else:
+            action = f"选择：{obj or choice}"
+    elif kind in {"confirm", "return", "cancel", "skip"}:
+        action = {"confirm": "确认", "return": "返回", "cancel": "取消", "skip": "跳过"}[kind]
+        selected = [_name(card) for card in details.get("selected_cards", [])]
+        if not any(selected) and (card := _name(details.get("confirmation_card"))):
+            selected = [card]
+        if any(selected):
+            notes.append("已选牌：" + "、".join(name for name in selected if name))
+        if purpose:
+            notes.append(f"用途：{purpose}")
+    else:
+        action = "结束回合" if kind == "end_turn" else label
+    target = details.get("target") or {}
+    if target:
+        index, name = target.get("index"), _name(target)
+        action += f" → 敌人{index if index is not None else '?'}" + (f"（{name}）" if name else "")
+    if origin := _name(context.get("source")):
+        notes.append(f"由{origin}触发")
+    reward = details.get("source_reward_id") or (details.get("object") or {}).get("reward_id")
+    if reward is not None:
+        notes.append(f"奖励ID={reward}")
+    if step.get("role"):
+        notes.append(step["role"])
+    before, after = step.get("screen_before"), step.get("screen_after")
+    if before is not None and after is not None and before != after:
+        screens = {"MAP": "地图", "EVENT": "事件", "GRID": "网格选牌", "HAND_SELECT": "手牌选择",
+                   "CARD_REWARD": "卡牌选择", "COMBAT_REWARD": "战斗奖励", "REST": "营火",
+                   "SHOP_SCREEN": "商人", "SHOP_ROOM": "商店房间", "NONE": "战斗/房间"}
+        if step.get("turn_before") is not None or step.get("turn_after") is not None:
+            screens["NONE"] = "战斗"
+        notes.append(f"{screens.get(before, before)}→{screens.get(after, after)}")
+    status = step.get("execution_status")
+    if status in {"cancelled", "skipped", "rejected"}:
+        action = "尝试（未执行）：" + action
+    elif status and status not in {"executed", "not_tracked"}:
+        notes.append(f"执行状态={status}")
+    heading = f"步骤{step.get('step_id', '?')}"
+    if step.get("turn_before") is not None:
+        heading += f"｜回合{step['turn_before']}"
+    return heading + "：" + action + ("（" + "；".join(map(str, notes)) + "）" if notes else "")
+
+
 def action_details(pre: dict[str, Any], action: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     """Resolve objects using the pre-action screen's indices, never the next hand."""
     details: dict[str, Any] = {}
@@ -90,6 +241,11 @@ def action_details(pre: dict[str, Any], action: dict[str, Any], raw: dict[str, A
     for key in ("selection_mode", "selection_instruction", "selection_reason", "source_reward_id"):
         if content.get(key) is not None:
             details[key] = copy.deepcopy(content[key])
+    if not details.get("selection_mode"):
+        for flag, mode in (("for_purge", "PURGE"), ("for_transform", "TRANSFORM"), ("for_upgrade", "UPGRADE")):
+            if content.get(flag):
+                details["selection_mode"] = mode
+                break
     if isinstance(pre.get("selection_context"), dict):
         details["selection_context"] = copy.deepcopy(pre["selection_context"])
     if kind in {"confirm", "return", "cancel"}:
@@ -168,31 +324,6 @@ def enrich_history_item(item: dict[str, Any], pre: dict[str, Any], post: dict[st
             item["observed_changes"][key] = differences
 
 
-def _event_changes(before: Any, after: Any, details: dict[str, Any]) -> dict[str, Any]:
-    before = before if isinstance(before, dict) else {}
-    after = after if isinstance(after, dict) else {}
-    changes = {key: copy.deepcopy(after[key]) for key in ("body_text", "choices", "options")
-               if key in after and after[key] != before.get(key)}
-    previous = before.get("match_game") or {}
-    current = after.get("match_game") or {}
-    board_before = {card.get("position"): card for card in previous.get("board", []) or []}
-    revealed = []
-    position = details.get("board_position")
-    for card in current.get("board", []) or []:
-        old = board_before.get(card.get("position"), {})
-        if card.get("revealed") is True and isinstance(card.get("card"), dict) and (
-            card.get("position") == position or old.get("revealed") is not True
-            or (card.get("face_up") is True and old.get("face_up") is not True)
-        ):
-            revealed.append({"position": card.get("position"), "card": _entity(card["card"])})
-    if revealed:
-        changes["revealed_cards"] = revealed
-    for key in ("remaining_attempts", "matched_pairs", "selected_positions", "game_done", "awaiting_resolution"):
-        if key in current and current[key] != previous.get(key):
-            changes[key] = copy.deepcopy(current[key])
-    return changes
-
-
 def room_history_summary(state: dict[str, Any], history: list[dict[str, Any]] | None) -> dict[str, Any]:
     """One floor is one room even when its UI changes; show its last 30 steps."""
     room = room_identity(state)
@@ -224,20 +355,14 @@ def room_history_summary(state: dict[str, Any], history: list[dict[str, Any]] | 
         if opening is not None:
             break
     for item in shown:
-        entry = {key: copy.deepcopy(item[key]) for key in (
-            "step_id", "screen_before", "screen_after", "turn_before", "turn_after", "action_kind", "action_id",
-            "action", "source", "execution_status", "details", "observed_changes",
-        ) if key in item}
+        entry = compact_history_step(item)
         if isinstance(item.get("room_before"), dict) and _room_key(item["room_before"]) != key:
             entry["role"] = "进入当前房间"
         position = (entry.get("details") or {}).get("board_position")
         if position in known_cards:
             # Recover a slow flip's known face from durable public board memory
             # without pretending that its original post-snapshot was settled.
-            entry.setdefault("details", {})["known_card_at_position"] = known_cards[position]
-        transitions = _event_changes(item.get("event_before"), item.get("event_after"), item.get("details") or {})
-        if transitions:
-            entry["event_changes"] = transitions
+            entry.setdefault("details", {})["known_card_at_position"] = _identity(known_cards[position])
         steps.append(entry)
     result = {"room": room, "total_steps": len(entries), "shown_steps": len(steps),
               "omitted_steps": len(entries) - len(steps), "limit": limit, "steps": steps}

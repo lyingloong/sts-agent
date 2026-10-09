@@ -998,7 +998,7 @@ class ConfidenceAutoTests(unittest.TestCase):
         self.assertEqual(observation["room_history"]["steps"][0]["screen_after"], "GRID")
         self.assertEqual(observation["room_history"]["steps"][0]["action"], "净化")
 
-    def test_event_observation_keeps_event_specific_transition_history(self) -> None:
+    def test_event_observation_keeps_actions_and_opening_without_transition_deltas(self) -> None:
         message = event_message()
         message["game_state"]["choice_list"] = ["Bash", "Dropkick", "card2"]
         message["game_state"]["screen_state"] = {
@@ -1034,7 +1034,8 @@ class ConfidenceAutoTests(unittest.TestCase):
         observation = controller.policy_observation(message, action_history=history)
         self.assertEqual(observation["room_history"]["steps"][0]["action"], "card0")
         self.assertEqual(observation["room_history"]["event_opening"]["body_text"], "十二张牌，搭对就拿走。")
-        self.assertEqual(observation["room_history"]["steps"][0]["event_changes"]["choices"][0], "Bash")
+        self.assertNotIn("event_changes", observation["room_history"]["steps"][0])
+        self.assertEqual(observation["choices"], ["Bash", "Dropkick", "card2"])
 
     def test_combat_generated_card_choice_carries_potion_source(self) -> None:
         pre_message = combat_message()

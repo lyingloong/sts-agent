@@ -58,8 +58,8 @@ class OverlayFormattingTests(unittest.TestCase):
         self.assertIn("RUN test", rendered)
         self.assertIn("当前牌组", rendered)
         self.assertIn("打击*5  痛击+1*1", rendered)
-        self.assertIn("最近动作", rendered)
-        self.assertIn("#12 净化\n#13 选择 打击", rendered)
+        self.assertIn("当前房间历史（最近6步）", rendered)
+        self.assertIn("步骤12：净化\n步骤13：选择 打击", rendered)
         self.assertIn("动作类型\t选择\t目标\t动作指令", rendered)
         self.assertIn("出牌\t双重打击\t敌人 0\tp 1 0", rendered)
         self.assertIn("结束回合\t\t\te", rendered)
@@ -266,7 +266,7 @@ class OverlayFormattingTests(unittest.TestCase):
         self.assertIn("达到上限", rendered)
 
     def test_history_line_falls_back_to_action_id(self) -> None:
-        self.assertEqual(overlay_terminal.history_line({"step_id": 2, "action_id": "END_TURN"}), "#2 END_TURN")
+        self.assertEqual(overlay_terminal.history_line({"step_id": 2, "action_id": "END_TURN"}), "步骤2：END_TURN")
 
     def test_status_table_columns_are_evenly_spaced(self) -> None:
         self.assertEqual(overlay_terminal.status_tab_stops(560), (135, 270, 405))

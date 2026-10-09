@@ -28,6 +28,7 @@ except ImportError as exc:  # pragma: no cover - Windows Python includes Tk by d
 from sts_agent.config import ConfigError, load_agent_config
 from sts_agent.learning.prompt_evolution import skill_text_segments
 from sts_agent.paths import PROJECT_ROOT
+from sts_agent.policy.history import history_step_text
 
 
 ACTION_HELP = """输入格式
@@ -127,12 +128,8 @@ def table_cell(value: Any) -> str:
 
 
 def history_line(item: dict[str, Any]) -> str:
-    """Render one compact accepted-action history entry for the state window."""
-    action = table_cell(item.get("action") or item.get("action_id") or "未知动作")
-    step = item.get("step_id")
-    prefix = "[自动] " if item.get("source") == "environment_auto" else ""
-    text = prefix + action
-    return f"#{step} {text}" if step is not None else text
+    """Exactly the model's history line; the UI limits count, not contents."""
+    return history_step_text(item)
 
 
 def state_panel_text(overlay: Any, divider_columns: int = 36) -> str:
@@ -164,7 +161,7 @@ def state_panel_text(overlay: Any, divider_columns: int = 36) -> str:
             deck_labels.append(f"{name}*{count}")
         lines.append("  ".join(deck_labels) if deck_labels else "暂无牌组信息")
     if isinstance(history, list):
-        lines.extend(("", "最近动作"))
+        lines.extend(("", "当前房间历史（最近6步）"))
         history_lines = [history_line(item) for item in history if isinstance(item, dict)]
         lines.append("\n".join(history_lines) if history_lines else "暂无历史动作")
     lines.extend(("", "合法动作"))
@@ -1362,7 +1359,7 @@ class OverlayTerminal:
             self.status_text.insert("end", "\n" + ("  ".join(deck_labels) if deck_labels else "暂无牌组信息"), "deck_cards")
 
         if isinstance(history, list):
-            self.status_text.insert("end", "\n\n最近动作", "history_heading")
+            self.status_text.insert("end", "\n\n当前房间历史（最近6步）", "history_heading")
             history_lines = [history_line(item) for item in history if isinstance(item, dict)]
             self.status_text.insert(
                 "end",

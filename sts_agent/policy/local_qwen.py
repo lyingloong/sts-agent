@@ -325,6 +325,7 @@ def _prompt_screen(observation: dict[str, Any]) -> str:
 
 
 def render_room_history(history: dict[str, Any]) -> list[str]:
+    from sts_agent.policy.history import history_step_text
     room = history.get("room") or {}
     lines = ["【当前房间历史】",
              f"幕={_scalar_text(room.get('act'))}；楼层={_scalar_text(room.get('floor'))}；"
@@ -334,33 +335,9 @@ def render_room_history(history: dict[str, Any]) -> list[str]:
         lines.append(f"更早的{history['omitted_steps']}步未在本次房间历史窗口中显示。")
     if history.get("event_opening"):
         lines.extend(_natural_lines(history["event_opening"], "", "进入事件时的说明与选项"))
-    lines.append("以下是过去的操作记录，不是待选动作；成功执行的不要重复提交，取消/未执行的尝试不代表已生效。随后观察值可能尚未完成动画结算，以当前状态为准。")
-    kind_labels = {"choose": "选择选项", "play": "出牌", "potion_use": "使用药水",
-                   "potion_discard": "丢弃药水", "confirm": "确认/继续", "return": "返回",
-                   "skip": "跳过", "leave": "离开", "cancel": "取消", "end_turn": "结束回合"}
+    lines.append("以下是过去的操作记录，不是待选动作；成功执行的不要重复提交，取消/未执行的尝试不代表已生效。历史不包含动作后的状态变化，以当前状态为准。")
     for item in history.get("steps", []):
-        source = item.get("source") or "未标注"
-        source = {"human_game": "人类游戏内操作", "environment_auto": "控制器自动动作", "codex": "Codex"}.get(source, source)
-        turn = f"；回合={item['turn_before']}" if item.get("turn_before") is not None else ""
-        before = item.get("screen_before")
-        after = item.get("screen_after")
-        before_label = "战斗" if before == "NONE" and item.get("turn_before") is not None else _SCREEN_LABELS.get(before, before)
-        after_label = "战斗" if after == "NONE" and item.get("turn_after") is not None else _SCREEN_LABELS.get(after, after)
-        lines.append(f"步骤{item.get('step_id', '?')}：{before_label} → {after_label}{turn}；执行来源={source}")
-        if item.get("role"):
-            lines.append(f"  {item['role']}")
-        kind = item.get("action_kind")
-        status = item.get("execution_status")
-        prefix = "尝试（未执行）" if status in {"cancelled", "skipped", "rejected"} else "已执行"
-        lines.append(f"  {prefix}：{kind_labels.get(kind, kind or '操作')}；{item.get('action') or item.get('action_id') or '未知'}")
-        if item.get("details"):
-            lines.extend(_natural_lines(item["details"], "  ", "操作明细"))
-        if item.get("observed_changes"):
-            lines.extend(_natural_lines(item["observed_changes"], "  ", "随后观察到的变化（非最终结算保证）"))
-        if item.get("event_changes"):
-            lines.extend(_natural_lines(item["event_changes"], "  ", "事件进展"))
-        if item.get("execution_status"):
-            lines.append(f"  执行状态={item['execution_status']}")
+        lines.append(history_step_text(item))
     return lines
 
 

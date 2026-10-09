@@ -39,7 +39,7 @@ from sts_agent.learning.posthoc_feedback import (
 )
 from sts_agent.learning.prompt_evolution import PromptEvolutionError, PromptEvolutionManager
 from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError
-from sts_agent.policy.history import enrich_history_item, room_history_summary
+from sts_agent.policy.history import compact_history_step, enrich_history_item, room_history_summary
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.runtime.lifecycle import GameDisconnected, GameInput
 
@@ -1249,6 +1249,13 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
     # receives.
     remove_local_knowledge(normalized)
     if "room_history" in normalized:
+        # Historical/exported traces may already contain a cached room window.
+        # Strip observation deltas for all backends (including JSON teachers),
+        # while leaving current state and raw trace snapshots intact.
+        room_history = normalized.get("room_history")
+        if isinstance(room_history, dict):
+            room_history["steps"] = [compact_history_step(step) for step in room_history.get("steps", []) or []
+                                     if isinstance(step, dict)]
         # Avoid duplicating the six-row UI summary and old event snapshots in
         # model prompts, including remote teachers' JSON observations.
         normalized.pop("recent_actions", None)
@@ -2334,7 +2341,8 @@ def overlay_view_data(
     return {
         "summary": summary,
         "deck": overlay_deck_summary(message),
-        "recent_actions": recent_action_summary(action_history),
+        # Same room-local entries as the model, only a smaller display window.
+        "recent_actions": room_history_summary(normalize_state(message), action_history)["steps"][-ACTION_HISTORY_LIMIT:],
         "legal_actions": [overlay_action_row(message, action) for action in actions],
     }
 
