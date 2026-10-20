@@ -15,7 +15,8 @@
 controller 独立监听游戏输入管道：即使在等待界面连接、人工输入或模型 HTTP 响应，
 游戏断开后也会停止决策、关闭界面连接并回收自建隧道，不再提交动作。
 Windows 下，自建 SSH 加入独立的 kill-on-close Job；controller 被强制结束时也会回收它，
-但不会结束其他 SSH 会话。仅关闭 Overlay 或输入 `q` 是断开界面，游戏仍可重新连接。
+但不会结束其他 SSH 会话。普通 UI 模式仅关闭 Overlay 或输入 `q` 是断开界面，游戏仍可重新连接。
+批量测评客户端显式连接监督后，断开会暂停自动决策，避免脚本退出而游戏继续无人记录地运行。
 如果 18080 被非本 controller 的进程占用，仍会报错而不是擅自接管/结束该进程；
 界面暂停时先检查实验目录的 `requests.jsonl` 中的 `decision_error`，不一定是模型决策错误。
 代码只在本机修改，通过 Git 同步；服务不会自行 pull、修改代码或切换 GPU。
@@ -39,7 +40,8 @@ SSH 主机来自 `agent.json.shared.policy.remote.ssh_host`。模型只在 `poli
 | `policy.api.temperature` | 0 | 贪心生成；多 GPU 算子等因素仍可能导致细微非确定性 |
 | `policy.api.thinking` | false | 显式传入 `chat_template_kwargs.enable_thinking=false`，只生成一个动作别名 |
 | `policy.api.max_output_tokens` | 64 | 回答预算；`finish_reason=length` 是错误，即使回答看起来包含合法别名也不执行 |
-| `policy.api.prompt_template` | canonical | 与 SFT 同源的自然语言单动作 prompt |
+| `policy.api.prompt_format` | plain_text | 原有中文分区/字段格式；并列的 markdown 方案待开发 |
+| `policy.api.prompt_template` | canonical | 仅选择区块顺序，与 SFT 同源的自然语言单动作 prompt |
 | `policy.api.timeout_seconds` | 120 | 每次 HTTP 请求的超时，不是远端模型加载时间 |
 | `policy.api.max_retries` | 2 | 初次之外最多重试两次；仅网络/429/部分 5xx，等待 5、10 秒 |
 | `policy.api.ssh_tunnel` | true | controller 自动建立持久隧道；不要另开同端口手动隧道 |
@@ -132,7 +134,10 @@ uv pip install --python .venv\Scripts\python.exe -e .
 
 CommunicationMod 继续使用统一的 `sts_agent.runtime.controller` 入口，不用改 command。
 Overlay 在主菜单输入 `s IRONCLAD 0` 开随机种子 A0 战士，或加上指定的种子。
-它自动完成本局，但不会自动开第二局。模型请求期间不要在游戏中手动点击操作。
+普通 Overlay 会自动完成本局，但不会自动开第二局。固定多局测评改用
+`python -m sts_agent.commands.evaluate_baseline`，不与 Overlay 同时连接；
+步骤、预算与输出见[固定 10 种子批量测评](BASELINE_EVALUATION.md#固定-10-种子批量测评)。
+模型请求期间不要在游戏中手动点击操作。
 若 controller 接入时已经在局内，会继续该局并标注 `partial_run=true`，不能计作完整自主通关样本。
 恢复人工采集时把 `active_mode` 改回 `collect_human` 并重启，不需要卸载模型或改远端模式。
 
@@ -173,6 +178,20 @@ HTTP/模型错误后交回人工。需要恢复时可在 UI 输入 `s` 刷新当
 这里不记录未经请求的候选概率；生成输出的概率并不等同于所有合法动作的归一化概率。
 manifest 不能单凭 API 验证实际 GPU dtype，BF16 依据远端部署命令和 deployment 记录确认。
 这些文件被 Git 忽略，与 `data/trajectories/human` 分离。
+批量测试期间也可离线导出已完成局的完整输入输出：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.commands.export_baseline_io `
+  --batch-report data/experiments/baseline_batches/<批次目录名> `
+  --run-id <已完成的run-id>
+```
+
+省略 `--run-id` 选择当时最近完成的一局；默认输出在 `data/reviews/baseline/` 的新目录，
+包含可跳转的 `index.md`、完整原文 `full-input-output.md`、逐请求原始记录 `model-io.jsonl`
+及摘要。输入直接取保存的 API `request.messages`，不调用当前 prompt 构造器、不截断、不请求模型。
+已丢弃回答与真实执行分开标注；环境自动动作在动作索引中显示，不伪造模型回答。
+这只是复盘快照，不是 SFT 数据集，也不改写原始实验日志或干预仍在运行的批次。
+
 ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不能自动辨识操作者；
 人工数据整理时必须结合种子/时间排除这些 AI 局，不能因为它们也是 Recorder 文件就当成人工数据。
 
@@ -185,8 +204,10 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 
 远端已下载并在四张 4090 上加载 27B BF16。本机实际客户端已验证自动创建/关闭 SSH 隧道、
 固定 SHA 校验、同模板 token 计数和单动作生成：253 输入 token，输出 `A1`，请求约 2.8 秒。
-这仅是接口检查，不是游戏策略测试，尚未完成真实游戏评测。接下来可用少量离线样本，
-再跑完整 A0 游戏，记录合法输出率、人工接管、每步延迟、到达幕/楼层、通关与心脏结果。
+该短请求仅是接口检查。之后已实测 A0 战士的正常死亡终局；最近一次完整自主局
+停在第一幕 Guardian（Floor 16），进度分 15，尚无通关证据。
+固定 10 种子批量入口已准备，尚未实际执行这整批测评；它将记录到达幕/楼层、进度分、
+通关与心脏结果、动作来源、请求延迟及技术故障。
 
 后续采用 Orak-style 进度分作为主指标，通关率作为辅助指标；具体公式、实验边界和
 论文/公开实现的区别见 [BASELINE_EVALUATION.md](BASELINE_EVALUATION.md)。计分器已接入 baseline 汇总，

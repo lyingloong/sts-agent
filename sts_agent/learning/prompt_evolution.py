@@ -12,7 +12,7 @@ import json
 import os
 import re
 from difflib import SequenceMatcher
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ class PromptEvolutionError(RuntimeError):
 
 
 def now_utc() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:

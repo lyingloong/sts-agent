@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "output_root": "/data/wanghao/sts-agent/outputs/online_rl/ironclad-a0",
+  "output_root": "/srv/sts-agent/outputs/online_rl/ironclad-a0",
   "group_size": 2,
   "seed": 20260826,
   "sampling": {

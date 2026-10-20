@@ -11,6 +11,13 @@ from sts_agent.paths import PROJECT_ROOT
 
 
 class AgentConfigTests(unittest.TestCase):
+    def test_public_example_is_offline_human_collection(self) -> None:
+        config = agent_config.load_agent_config(PROJECT_ROOT, "config/agent.example.json")
+        self.assertEqual(config["framework"]["learning_method"], "collect_human")
+        self.assertFalse(config["policy"]["enabled"])
+        self.assertFalse(config["teacher"]["enabled"])
+        self.assertEqual(config["policy"]["remote"]["ssh_host"], "gpu-server")
+
     def test_default_framework_is_direct(self) -> None:
         config = agent_config.validate_config(agent_config.DEFAULT_CONFIG)
         self.assertEqual(config["framework"]["game"], "sts1")

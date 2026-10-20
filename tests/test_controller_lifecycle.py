@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock
 from sts_agent.runtime import controller
-config = controller.load_agent_config()
+config = controller.load_agent_config(mode='candidate_assist_local')
 controller.PROJECT_ROOT = Path(sys.argv[1])
 controller.load_agent_config = lambda *args: config
 real_bridge = controller.TerminalBridge

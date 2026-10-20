@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+from sts_agent.core.action_aliases import model_action_alias
 from sts_agent.paths import PROJECT_ROOT
 
 def read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
@@ -31,8 +32,8 @@ def action_label(action: dict[str, Any]) -> str:
     return str(action.get("label") or action.get("kind") or action.get("command") or "")
 
 
-def alias_actions(legal_actions: list[Any]) -> tuple[list[dict[str, str]], dict[str, str]]:
-    aliases: list[dict[str, str]] = []
+def alias_actions(legal_actions: list[Any]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    aliases: list[dict[str, Any]] = []
     action_to_alias: dict[str, str] = {}
     for index, item in enumerate(legal_actions, start=1):
         if not isinstance(item, dict):
@@ -42,7 +43,7 @@ def alias_actions(legal_actions: list[Any]) -> tuple[list[dict[str, str]], dict[
             continue
         alias = f"A{len(aliases) + 1}"
         action_to_alias[canonical_id] = alias
-        aliases.append({"id": alias, "label": action_label(item), "action_id": canonical_id})
+        aliases.append({**model_action_alias(item, alias), "action_id": canonical_id})
     return aliases, action_to_alias
 
 

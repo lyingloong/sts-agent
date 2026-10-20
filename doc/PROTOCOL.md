@@ -31,7 +31,82 @@ Recorder 的主动采集快照复用该管道，并带 `recorder_snapshot_only=t
 `recorder_snapshot_kind=action_before/execution_before/effects_settled`。
 controller 会保存它们，但不能用其 ready_for_command 确认动作或推进决策；
 人类采集 bridge 则仍用于精确状态 ID 配对。正常 CM 发布标记为 false。
-错误包不包含有效观察：执行控制器先发 STATE，拿新观察后再处理人工恢复。
+游戏动作的错误包不包含有效观察：执行控制器只发一次 `STATE`，拿新观察后再按恢复状态机处理。
+STATE 本身失败时，控制器按本地实际提交的命令识别协议故障，保存错误回执和命令 ID，
+通知已连接的界面后以非零状态退出；不继续刷新、重试游戏动作或使用旧观察猜测操作。
+即使解码失败回执缺少 command 字段，这一停止保护仍然生效。
+
+### 控制命令确认与恢复
+
+启用新版 ActionRecorder 后，controller 使用 `AR1 <command_id> <state_id> <base64_command>`
+封装命令。`CommandChannel` 是单一提交与确认通道：同一时刻只允许一个在途命令，
+旧状态、其他命令的回执和采集快照不能确认当前命令。只有 ID 与命令匹配、处于可决策状态，
+且队列执行不再为 `pending` 的回执才允许继续。超时或关联命令不一致时停止，不猜测是否执行。
+原版 CommunicationMod 仍支持未关联的旧协议，但不能据其错误包自动重试。
+
+`sts_agent.runtime.recovery.CommandRecovery` 独立管理恢复，控制器不会匹配错误文案来决定重试：
+
+- 当前关联回执的 `error_code` 为 `stale_observation` 或 `state_changed`，并明确给出
+  `status=rejected`、`execution_status=not_executed` 时，刷新后允许自动重新决策。
+  丢弃原模型候选，按新状态重新计算合法动作；不是重放旧命令。
+- 其他错误、旧版无结构化证明的错误、执行中失败或执行情况未知时，刷新后暂停并交给人工。
+- 连续自动恢复最多 3 次；成功确认一个非 `STATE` 游戏命令后才清零（包括 `START` 和内部续接动作，
+  不能在提交时提前清零）。耗尽后只能人工操作，
+  反复输入 `state` 不能绕过这个上限。
+- 人工输入 `state`（或局内输入 `s`）是只读控制操作：可刷新状态并显式恢复未耗尽的自动决策，
+  不作为游戏动作写入 trace、history 或 SFT 样本。模型提交前的只读校验不会清除候选。
+
+每个被拒绝的游戏动作仍保存 `accepted=false`、`command_confirmation` 和 `recovery`；
+恢复事件写入 `run-events`。执行确认不等于动画或所有效果已经结算。
+
+Mod 的命令校验使用独立状态投影，不改录制的完整 JSON：手牌、敌人、HP、能量、费用、
+升级、牌堆成员与顺序、未知字段等保持精确比较；只忽略抽牌/弃牌/消耗堆中有基础值佐证的
+临时伤害/格挡，以及可由已知 `D/B/M` 模板和数值重建的描述变化。
+这允许游戏重置非手牌的临时牌面值，而不会把真正的决策状态变化当作相同状态。
+完整契约见 ActionRecorder 的 `docs/STATE_SCHEMA.md`。
+
+### 基线批量客户端协议
+
+`sts_agent.commands.evaluate_baseline` 使用原有 `server.host/port` JSONL TCP 接口，
+与 Overlay/终端互斥。它只协调开局与汇总，不选择局内动作。
+
+`remote_api` 后端的 `view` 与 `model_update` 增加结构化 `baseline`：
+
+```json
+{
+  "protocol_version": 1,
+  "mode": "baseline_inference",
+  "experiment_dir": "<本机绝对路径>",
+  "model": "Qwen/Qwen3.8-27B",
+  "run_id": "<当前 run ID 或 null>",
+  "ready_for_command": true,
+  "can_start_run": false,
+  "batch_attached": true,
+  "controller_error": null,
+  "run_summary": "<summary.json 中本局对象或 null>"
+}
+```
+
+`run_summary` 是独立复制的对象，不发送体积很大的 `terminal_state`。
+菜单的场景字段为空是正常的，是否能开局依据 `in_game=false`、明确 readiness 和
+CommunicationMod 的 `start` 能力，不能猜测场景名或解析格式化 UI 文本。
+
+监督握手：主菜单发送 `{"type":"baseline_batch_attach","protocol_version":1}`，
+等待新的 `view` 中 `baseline.batch_attached=true`。只允许 baseline 的可开局菜单，
+不会执行任何游戏动作或绕过控制器已有暂停。随后发送普通
+`{"type":"input","text":"s IRONCLAD 0 <seed>"}`。局内 `model_update` 仅供读取，
+不应向 controller 回传动作或重复自动命令；局内要求人工输入的 `view` 是批次停止条件。
+
+正常终局的摘要会一直保留到主菜单。客户端验证对应 run ID、种子、角色/进阶、
+最终自主评分后，必须等 `can_start_run=true` 的菜单 `view` 才能开下一局。
+结束时发送 `{"type":"baseline_batch_detach"}`，等待菜单确认
+`batch_attached=false` 后正常关闭连接。
+
+只有显式 attach 的客户端受 `BatchClientGuard` 监督；普通 UI 关闭不改变已有行为。
+批量客户端意外断开或 Ctrl+C 时，controller 在自动环境动作、模型请求返回、
+STATE 复核及提交前的安全边界检查连接，清掉待执行模型候选并暂停。
+已经提交的命令不能撤销。失败后须人工检查并通过显式刷新/合法动作恢复，
+重连/重新 attach 本身不能清掉失败保护。详情见[批量测评](BASELINE_EVALUATION.md#固定-10-种子批量测评)。
 
 ### 人类采集格式
 

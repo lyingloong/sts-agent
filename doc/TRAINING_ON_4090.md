@@ -136,7 +136,7 @@ Qwen 基础模型应在训练机下载到明确目录，训练记录固定 revis
 先从 bundle 目录运行 checksum，再执行一轮单卡 smoke test：
 
 ```bash
-cd /data/wanghao/sts-agent
+cd /srv/sts-agent
 source .venv/bin/activate
 
 CUDA_VISIBLE_DEVICES=0 python -m sts_agent.learning.sft \
@@ -168,7 +168,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sts_agent.learning.sft \
 
 只有在首轮实机评测确认仍欠拟合时，才做 10 epoch 对照：将学习率降至 `5e-5`，设置 `--save-total-limit 10`，并比较第 1、3、5、10 个 epoch 的固定种子结果。不要只因训练 loss 继续下降就采用后面的 checkpoint。
 
-若希望用本地下载好的基座，可增加 `--model /data/wanghao/sts-agent/models/base/Qwen3-0.6B`；训练器会先校验相邻 bundle `manifest.json` 中的 JSONL SHA-256。输出目录必须是新的；断点继续才传入 `--resume-from-checkpoint <checkpoint-path>`。
+若希望用本地下载好的基座，可增加 `--model /srv/sts-agent/models/base/Qwen3-0.6B`；训练器会先校验相邻 bundle `manifest.json` 中的 JSONL SHA-256。输出目录必须是新的；断点继续才传入 `--resume-from-checkpoint <checkpoint-path>`。
 
 `run_manifest.json` 至少记录：源码 commit、训练 bundle 名和 sha256、基础模型 ID 与 revision、tokenizer revision、训练参数、随机种子、代码版本和启动时间。只将这一目录同步回本机；基础模型和 optimizer state 留在训练机。
 
@@ -184,7 +184,7 @@ NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 .venv/bin/python -m sts_agent.learning.sft \
   --dataset data/transfer/sft-v0-20260826-r2/dataset/teacher-sft.jsonl \
-  --model /data/wanghao/sts-agent/models/base/Qwen3-0.6B \
+  --model /srv/sts-agent/models/base/Qwen3-0.6B \
   --initial-adapter outputs/sft/qwen3-0.6b/sft-v0-r001 \
   --output outputs/sft/qwen3-0.6b/sft-v0-r002-e10 \
   --validation-runs 0 \

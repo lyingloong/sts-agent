@@ -30,6 +30,7 @@ data/trajectories/
 data/traces/
 data/datasets/
 data/experiments/
+data/reviews/
 data/transfer/
 data/reflections/
 data/attributions/
@@ -53,6 +54,8 @@ tmp/
 logs/
 coverage.xml
 htmlcov/
+build/
+dist/
 
 # IDE and OS files
 .idea/

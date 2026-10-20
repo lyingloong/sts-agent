@@ -6,7 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -57,6 +57,22 @@ class BaselineTests(unittest.TestCase):
         for key in ("teacher", "posthoc_feedback", "prompt_evolution"):
             self.assertFalse(self.config[key]["enabled"])
 
+    def test_prompt_format_defaults_to_original_and_reports_pending_markdown(self):
+        self.assertEqual(self.config["policy"]["api"]["prompt_format"], "plain_text")
+        for value, reason in (("markdown", "under development"), ("invalid", "unknown prompt format"),
+                              (None, "unknown prompt format")):
+            with self.subTest(value=value):
+                bad = copy.deepcopy(self.config)
+                bad["policy"]["api"]["prompt_format"] = value
+                with self.assertRaisesRegex(ConfigError, f"policy.api.prompt_format:.*{reason}"):
+                    validate_config(bad)
+
+    def test_api_rejects_pending_format_before_starting_a_session(self):
+        bad = copy.deepcopy(self.config)
+        bad["policy"]["api"]["prompt_format"] = "markdown"
+        with self.assertRaisesRegex(ValueError, "markdown.*under development"):
+            ApiPolicyClient(self.root, bad)
+
     def test_invalid_gpu_and_context_configuration(self):
         for changes in ({"devices": [0, 0, 1, 2]}, {"devices": [0, 1]}, {"max_model_len": 32}, {"backend": "invalid"}):
             bad = copy.deepcopy(self.config)
@@ -89,6 +105,22 @@ class BaselineTests(unittest.TestCase):
         self.assertFalse(body["chat_template_kwargs"]["enable_thinking"])
         self.assertEqual(body["temperature"], 0)
         self.assertNotIn("truncate_prompt_tokens", body)
+
+    def test_baseline_campfire_api_prompt_matches_sft_with_runtime_explanations(self):
+        from sts_agent.learning.export_human_sft import export_record
+        from tests.test_campfire_context import campfire_message
+
+        message = campfire_message()
+        observation, actions = controller.policy_observation(message), controller.semantic_actions(message)
+        self.client.rank(observation, actions, run_id="campfire-test")
+        request_body = next(body for path, body in self.calls if path == "/v1/chat/completions")
+        prompt = request_body["messages"][0]["content"]
+        sample, reason = export_record({"run_id": "campfire-test", "step_id": "option-1", "usable_for_sft": True,
+            "training_policy_observation": observation, "training_legal_actions": actions, "training_action": actions[1]})
+        self.assertEqual(reason, "kept")
+        self.assertEqual(prompt, sample["prompt"])
+        self.assertIn("A1：休息——回复 24 点生命。", prompt)
+        self.assertIn("本次营火只能完成一项营火活动", prompt)
 
     def test_stale_state_or_new_episode_discards_old_answer(self):
         for observation, run_id in (({**self.observation, "current_hp": 79}, "run-1"), (self.observation, "run-2")):
@@ -273,26 +305,216 @@ class BaselineTests(unittest.TestCase):
         bridge.receive.assert_not_called()
         self.assertEqual(len([x for x in self.calls if x[0] == "/v1/chat/completions"]), 1)
 
-    def _run_controller_packets(self, packets, inputs):
+    def _run_controller_packets(self, packets, inputs, channel=None, expected_exit_code=0, environment_auto=None):
         bridge = Mock()
         bridge.receive.side_effect = [{"type": "input", "text": text} for text in inputs]
         evolution = Mock(enabled=False)
         with (patch.object(controller, "PROJECT_ROOT", self.root),
+              patch.object(controller, "CommandChannel", return_value=channel or controller.CommandChannel()),
               patch.object(controller, "load_agent_config", return_value=self.config),
               patch.object(controller, "TerminalBridge", return_value=bridge),
               patch.object(controller, "PromptEvolutionManager", return_value=evolution),
               patch("sts_agent.policy.api.ApiPolicyClient", return_value=self.client),
               patch.object(controller, "TeacherClient", return_value=Mock(enabled=False, prompt_evolution=evolution)),
               patch.object(controller, "PosthocFeedbackClient", return_value=Mock(enabled=False)),
-              patch.object(controller, "environment_auto_action", return_value=None),
+              patch.object(controller, "environment_auto_action", side_effect=environment_auto, return_value=None),
               patch.object(controller.time, "sleep"),
               patch("sys.argv", ["controller"]),
               patch("sys.stdin", io.StringIO("\n".join(json.dumps(x) for x in packets) + "\n")),
-              redirect_stdout(io.StringIO()) as output):
-            self.assertEqual(controller.main(), 0)
+              redirect_stdout(io.StringIO()) as output,
+              redirect_stderr(io.StringIO()) as errors):
+            self.assertEqual(controller.main(), expected_exit_code)
+        self.controller_stderr = errors.getvalue()
         traces = list(self.client.output_dir.glob("action-trace-*.jsonl"))
         records = [json.loads(line) for path in traces for line in path.read_text(encoding="utf-8").splitlines()]
         return output.getvalue().splitlines(), records, bridge
+
+    @staticmethod
+    def _matched_channel():
+        from sts_agent.runtime.command_channel import CommandChannel
+
+        class FixtureChannel(CommandChannel):
+            def receive(self, message):
+                receipt = message.get("recorder_command")
+                if isinstance(receipt, dict) and receipt.get("id") == "CURRENT":
+                    receipt["id"] = self.inflight
+                    receipt["command"] = self.inflight_command
+                return super().receive(message)
+        return FixtureChannel()
+
+    @staticmethod
+    def _ack(message, status="accepted", **receipt):
+        return copy.deepcopy(message) | {"recorder_command": {"id": "CURRENT", "status": status, **receipt}}
+
+    @staticmethod
+    def _decoded_commands(wires):
+        import base64
+        return [base64.b64decode(wire.split()[3]).decode() if wire.startswith("AR1 ") else wire for wire in wires]
+
+    def test_environment_state_drift_refreshes_and_redecides_without_human_or_model(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        combat = {"in_game": True, "ready_for_command": True, "available_commands": ["end", "state"],
+                  "recorder_state_id": "combat", "game_state": {"screen_type": "NONE", "room_type": "MonsterRoom", "room_phase": "COMBAT",
+                  "screen_state": {}, "act": 1, "floor": 1, "combat_state": {
+                  "hand": [], "monsters": [], "player": {"energy": 0}}}}
+        rejected = self._ack({"error": "diagnostic, not a recovery string", "ready_for_command": True}, "rejected",
+                             error_code="state_changed", execution_status="not_executed")
+        fresh = copy.deepcopy(combat)
+        fresh["recorder_state_id"] = "fresh"
+        output, records, bridge = self._run_controller_packets(
+            [menu, self._ack(combat), rejected, self._ack(fresh, "query")], ["s IRONCLAD 0"],
+            channel=self._matched_channel(), environment_auto=controller.environment_auto_action)
+        self.assertEqual(self._decoded_commands(output), ["ready", "START IRONCLAD 0", "END", "STATE", "END"])
+        self.assertEqual(bridge.receive.call_count, 1)  # Only the explicit start, not a pause.
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["accepted"])
+        self.assertEqual(records[0]["recovery"]["phase"], "refresh_auto")
+        self.assertEqual(records[0]["decision"]["source"], "environment_auto")
+        self.assertEqual(self.calls, [])
+        # Re-decided END is bound to the refreshed state, never the old state.
+        self.assertEqual(output[-1].split()[2], "fresh")
+
+    def test_model_state_drift_discards_old_answer_and_generates_from_fresh_choices(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "recorder_state_id": "event", "game_state": {"screen_type": "EVENT", "choice_list": ["Take", "Leave"],
+                 "screen_state": {}, "act": 1, "floor": 0}}
+        fresh = copy.deepcopy(event)
+        fresh["recorder_state_id"] = "fresh"
+        fresh["game_state"]["choice_list"] = ["FreshOption", "AnotherFreshOption"]
+        rejected = self._ack({"error": "changed", "ready_for_command": True}, "rejected",
+                             error_code="stale_observation", execution_status="not_executed")
+        output, records, bridge = self._run_controller_packets(
+            [menu, self._ack(event), self._ack(event, "query"), rejected,
+             self._ack(fresh, "query"), self._ack(fresh, "query")],
+            ["s IRONCLAD 0"], channel=self._matched_channel())
+        self.assertEqual(self._decoded_commands(output),
+                         ["ready", "START IRONCLAD 0", "STATE", "CHOOSE 1", "STATE", "STATE", "CHOOSE 1"])
+        self.assertEqual(bridge.receive.call_count, 1)
+        requests = [body for path, body in self.calls if path == "/v1/chat/completions"]
+        self.assertEqual(len(requests), 2)
+        self.assertIn("FreshOption", requests[-1]["messages"][0]["content"])
+        self.assertEqual(output[-1].split()[2], "fresh")
+        self.assertFalse(records[0]["accepted"])
+
+    def test_read_only_refresh_resumes_from_handoff_without_human_gameplay_sample(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "game_state": {"screen_type": "EVENT", "choice_list": ["Take", "Leave"],
+                 "screen_state": {}, "act": 1, "floor": 0}}
+        error = {"error": "legacy unverified rejection", "ready_for_command": True}
+        output, records, bridge = self._run_controller_packets(
+            [menu, event, event, error, event, event, event], ["s IRONCLAD 0", "state"])
+        self.assertEqual(output, ["ready", "START IRONCLAD 0", "STATE", "CHOOSE 1", "STATE", "STATE", "STATE", "CHOOSE 1"])
+        self.assertEqual(bridge.receive.call_count, 2)
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["accepted"])
+        self.assertEqual(records[0]["command"], "CHOOSE 1")
+        self.assertEqual(len([x for x in self.calls if x[0] == "/v1/chat/completions"]), 2)
+        summary = next(iter(self.client.run_summaries.values()))
+        self.assertEqual(summary["human_actions"], 0)
+
+    def test_repeated_environment_recovery_exhausts_budget_even_if_human_refreshes(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        combat = {"in_game": True, "ready_for_command": True, "available_commands": ["end", "state"],
+                  "recorder_state_id": "combat", "game_state": {"screen_type": "NONE", "room_type": "MonsterRoom", "room_phase": "COMBAT",
+                  "screen_state": {}, "act": 1, "floor": 1, "combat_state": {
+                  "hand": [], "monsters": [], "player": {"energy": 0}}}}
+        rejected = self._ack({"error": "changed", "ready_for_command": True}, "rejected",
+                             error_code="state_changed", execution_status="not_executed")
+        packets = [menu, self._ack(combat)]
+        for _ in range(4):
+            packets.extend([copy.deepcopy(rejected), self._ack(combat, "query")])
+        # Exhausted manual STATE stays paused, then a human END is required.
+        packets.append(self._ack(combat, "query"))
+        output, records, bridge = self._run_controller_packets(
+            packets, ["s IRONCLAD 0", "state", "end"], channel=self._matched_channel(),
+            environment_auto=controller.environment_auto_action)
+        commands = self._decoded_commands(output)
+        self.assertEqual(commands.count("END"), 5)  # Four attempted auto ENDs + explicit human END.
+        self.assertEqual(bridge.receive.call_count, 3)
+        self.assertEqual(len(records), 4)
+        self.assertEqual(records[-1]["recovery"]["phase"], "refresh_exhausted")
+        views = [x.args[0] for x in bridge.send.call_args_list if x.args[0].get("type") == "view"]
+        self.assertIn("连续自动恢复", views[-1]["decision"]["assist_reason"])
+
+    def test_accepted_start_opens_new_recovery_budget_without_pending_gameplay_trace(self):
+        from sts_agent.runtime.recovery import CommandRecovery, RecoveryPhase
+
+        recovery = CommandRecovery()
+        recovery.phase = RecoveryPhase.EXHAUSTED
+        recovery.consecutive_recoveries = 3
+        recovery.reason = "previous run conflict"
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        combat = {"in_game": True, "ready_for_command": True, "available_commands": ["end", "state"],
+                  "recorder_state_id": "combat", "game_state": {"screen_type": "NONE", "room_phase": "COMBAT",
+                  "screen_state": {}, "act": 1, "floor": 1, "combat_state": {
+                  "hand": [], "monsters": [], "player": {"energy": 0}}}}
+        with patch.object(controller, "CommandRecovery", return_value=recovery):
+            output, records, bridge = self._run_controller_packets(
+                [menu, self._ack(combat)], ["s IRONCLAD 0"], channel=self._matched_channel(),
+                environment_auto=controller.environment_auto_action)
+        self.assertEqual(self._decoded_commands(output), ["ready", "START IRONCLAD 0", "END"])
+        self.assertEqual(recovery.phase, RecoveryPhase.READY)
+        self.assertEqual(recovery.consecutive_recoveries, 0)
+        self.assertEqual(records, [])  # START and the still-unconfirmed END are not action samples.
+        self.assertEqual(bridge.receive.call_count, 1)
+
+    def test_rejected_start_and_successful_query_do_not_reopen_exhausted_budget(self):
+        from sts_agent.runtime.recovery import CommandRecovery, RecoveryPhase
+
+        recovery = CommandRecovery()
+        recovery.phase = RecoveryPhase.EXHAUSTED
+        recovery.consecutive_recoveries = 3
+        recovery.reason = "previous run conflict"
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        rejected = self._ack({"error": "changed", "ready_for_command": True}, "rejected",
+                             error_code="state_changed", execution_status="not_executed")
+        with patch.object(controller, "CommandRecovery", return_value=recovery):
+            output, records, bridge = self._run_controller_packets(
+                [menu, rejected, self._ack(menu, "query")], ["s IRONCLAD 0", "s IRONCLAD 0"],
+                channel=self._matched_channel())
+        self.assertEqual(self._decoded_commands(output), ["ready", "START IRONCLAD 0", "STATE", "START IRONCLAD 0"])
+        self.assertEqual(recovery.phase, RecoveryPhase.EXHAUSTED)
+        self.assertEqual(recovery.consecutive_recoveries, 3)
+        self.assertEqual(records, [])
+        self.assertEqual(bridge.receive.call_count, 2)
+
+    def test_correlated_controller_does_not_ack_old_ready_packet_before_real_error(self):
+        import base64
+        from sts_agent.runtime.command_channel import CommandChannel
+
+        class TestChannel(CommandChannel):
+            def receive(self, message):
+                # Fixture publisher uses the actual latest generated ID, not a fixed UUID.
+                receipt = message.get("recorder_command")
+                if isinstance(receipt, dict) and receipt.get("id") == "CURRENT":
+                    receipt["id"] = self.inflight
+                    receipt["command"] = self.inflight_command
+                return super().receive(message)
+
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "recorder_state_id": "event", "game_state": {"screen_type": "EVENT",
+                 "choice_list": ["Take", "Leave"], "screen_state": {}, "act": 1, "floor": 0}}
+        def ack(message, status):
+            return copy.deepcopy(message) | {"recorder_command": {"id": "CURRENT", "status": status}}
+        error = ack({"error": "Invalid command: choose.", "ready_for_command": True}, "rejected")
+        output, records, _ = self._run_controller_packets(
+            [menu, ack(event, "accepted"), ack(event, "query"), event, error, ack(event, "query")],
+            ["s IRONCLAD 0", "0"], channel=TestChannel())
+        decoded = [base64.b64decode(wire.split()[3]).decode() if wire.startswith("AR1 ") else wire for wire in output]
+        self.assertEqual(decoded, ["ready", "START IRONCLAD 0", "STATE", "CHOOSE 1", "STATE", "CHOOSE 0"])
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["accepted"])
+        self.assertEqual(records[0]["command_confirmation"]["transport"], "correlated")
+        self.assertEqual(records[0]["command_confirmation"]["receipt"]["status"], "rejected")
 
     def test_recording_boundary_snapshots_never_acknowledge_or_revalidate(self):
         menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False}
@@ -329,6 +551,63 @@ class BaselineTests(unittest.TestCase):
         self.assertIn("Floor 1", views[-1]["overlay"]["summary"])
         self.assertIn("Fresh", views[-1]["text"])
         self.assertIn("Invalid command", views[-1]["decision"]["assist_reason"])
+
+    def test_rejected_correlated_state_stops_without_further_inference_or_command_retry(self):
+        import base64
+
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False,
+                "recorder_command_protocol": 1, "recorder_state_id": "menu"}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "recorder_state_id": "event", "game_state": {"screen_type": "EVENT",
+                 "choice_list": ["Take", "Leave"], "screen_state": {}, "act": 1, "floor": 0},
+                 "recorder_command": {"id": "start-command", "command": "START IRONCLAD 0", "status": "accepted"}}
+        # A decoder rejection can know the request ID without having decoded a command.
+        rejected = {"ready_for_command": True, "recorder_command": {
+            "id": "state-command", "status": "rejected", "error": "Input byte array has wrong 4-byte ending unit"}}
+        with patch("sts_agent.runtime.command_channel.uuid.uuid4",
+                   side_effect=[Mock(hex="start-command"), Mock(hex="state-command"), Mock(hex="unexpected-retry")]):
+            output, records, bridge = self._run_controller_packets(
+                [menu, event, rejected, rejected], ["s IRONCLAD 0"], expected_exit_code=1)
+        decoded = [base64.b64decode(wire.split()[3]).decode() if wire.startswith("AR1 ") else wire for wire in output]
+        self.assertEqual(decoded, ["ready", "START IRONCLAD 0", "STATE"])
+        self.assertEqual(records, [])
+        self.assertEqual(len([x for x in self.calls if x[0] == "/v1/chat/completions"]), 1)
+        self.assertIsNone(self.client.pending)
+        self.assertEqual(bridge.receive.call_count, 1)
+        shutdown = bridge.send.call_args_list[-1].args[0]
+        self.assertEqual(shutdown["type"], "shutdown")
+        self.assertIn("协议失败", shutdown["message"])
+        self.assertEqual(shutdown["command_confirmation"]["command_id"], "state-command")
+        self.assertIn("STATE", self.controller_stderr)
+        self.assertIn(rejected["recorder_command"]["error"], self.controller_stderr)
+        events_path = next(self.client.output_dir.glob("run-events-*.jsonl"))
+        events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+        failure = next(item for item in events if item["event"] == "controller_protocol_failure")
+        self.assertEqual(failure["command_confirmation"]["receipt"], rejected["recorder_command"])
+        raw_path = next(self.client.output_dir.glob("messages-*.jsonl"))
+        raw = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len([item for item in raw if "message" in item]), 3)
+        self.assertEqual(raw[-1]["event"], "controller_protocol_failure")
+
+    def test_failed_state_refresh_after_action_rejection_stops_without_gameplay_retry(self):
+        menu = {"available_commands": ["start", "state"], "ready_for_command": True, "in_game": False}
+        event = {"in_game": True, "ready_for_command": True, "available_commands": ["choose", "state"],
+                 "game_state": {"screen_type": "EVENT", "choice_list": ["Take", "Leave"],
+                                "screen_state": {}, "act": 1, "floor": 0}}
+        rejected_action = {"error": "Invalid command: choose.", "ready_for_command": True}
+        rejected_state = {"error": "Invalid command: state.", "ready_for_command": True}
+        output, records, bridge = self._run_controller_packets(
+            [menu, event, event, rejected_action, rejected_state, rejected_state],
+            ["s IRONCLAD 0"], expected_exit_code=1)
+        self.assertEqual(output, ["ready", "START IRONCLAD 0", "STATE", "CHOOSE 1", "STATE"])
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["accepted"])
+        self.assertEqual(records[0]["command"], "CHOOSE 1")
+        self.assertEqual(bridge.receive.call_count, 1)
+        self.assertEqual(bridge.send.call_args_list[-1].args[0]["type"], "shutdown")
+        self.assertIn("protocol failure", self.controller_stderr)
+        self.assertIn("Invalid command: state.", self.controller_stderr)
+        self.assertEqual(len([x for x in self.calls if x[0] == "/v1/chat/completions"]), 1)
 
     def test_gpu_selection_is_idle_only_and_fixed_once(self):
         candidates = [{"index": i, "free_memory_mib": 23500, "utilization_percent": i * 3} for i in range(8)]

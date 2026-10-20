@@ -38,7 +38,7 @@ def scene_key(observation: dict[str, Any]) -> str:
                 or str(observation.get("room_phase") or "").upper() == "COMBAT"):
             return "COMBAT_CARD_SELECTION"
     if screen == "GRID":
-        if state.get("confirm_screen_up") is True:
+        if any(state.get(key) is True for key in ("confirm_screen_up", "confirm_up", "just_for_confirming")):
             return "GRID_CONFIRM"
         if context.get("kind") == "RELIC_PICKUP_CARD_SELECTION":
             return "RELIC_PICKUP_CARD_SELECTION"

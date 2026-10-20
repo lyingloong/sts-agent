@@ -10,6 +10,8 @@
 | 本地 Qwen JSONL 服务 | `python -m sts_agent.policy.local_qwen` | `sts-agent-policy` |
 | 下载基座模型 | `python -m sts_agent.commands.download_model` | `sts-agent-download-model` |
 | CommunicationMod 只读探针 | `python -m sts_agent.commands.communication_probe` | 无 |
+| 官方模型固定种子批量测评 | `python -m sts_agent.commands.evaluate_baseline` | `sts-agent-evaluate-baseline` |
+| 导出已完成基线局的原始输入输出复盘 | `python -m sts_agent.commands.export_baseline_io --batch-report <批次目录>` | 无 |
 | CommunicationMod 状态/动作事务桥 | `python -m sts_agent.recording.communication_bridge --config config/agent.json` | `sts-agent-communication-bridge` |
 | 导出教师 SFT JSONL | `python -m sts_agent.learning.export_teacher_sft` | `sts-agent-export-sft` |
 | 导出 ActionRecorder 人类 SFT | `python -m sts_agent.learning.export_human_sft` | `sts-agent-export-human-sft` |

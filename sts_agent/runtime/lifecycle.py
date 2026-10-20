@@ -17,6 +17,7 @@ class GameInput:
         self.interrupt = interrupt
         self.stopped = threading.Event()
         self.reason = "CommunicationMod input closed"
+        self.poll_check: Callable[[], None] = lambda: None
         self.lines: queue.Queue[str] = queue.Queue(maxsize=128)
         # In-memory replay/test streams are finite fixtures, not game pipes.
         try:
@@ -53,6 +54,7 @@ class GameInput:
     def check(self) -> None:
         if self.stopped.is_set():
             raise GameDisconnected(self.reason)
+        self.poll_check()
 
     def __iter__(self):
         if not self.live:

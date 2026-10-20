@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +10,7 @@ from .protocol import ProtocolError, atomic_write_json, start_key, validate_epis
 
 
 def now_utc() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 class RolloutStore:

@@ -22,10 +22,11 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from sts_agent.core.action_aliases import model_action_alias
 from sts_agent.runtime import controller as communication_controller
 from sts_agent.policy import local_qwen as policy_server
 from sts_agent.paths import PROJECT_ROOT
@@ -141,7 +142,7 @@ def validate_sample(sample: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
         if not alias or alias in legal_aliases:
             continue
         legal_aliases.add(alias)
-        aliases.append({"id": alias, "label": policy_server.action_label(action)})
+        aliases.append(model_action_alias(action, alias))
     if target_alias not in legal_aliases:
         raise ValueError(f"target alias is absent from legal actions: {sample.get('sample_id', '<unknown>')}")
     sample_id = str(sample.get("sample_id") or f"{run_id}:unknown")
@@ -560,7 +561,7 @@ def train(args: argparse.Namespace) -> int:
     run_manifest: dict[str, Any] = {
         "schema_version": "sts-sft-run-0.1",
         "status": "running",
-        "started_at_utc": datetime.now(UTC).isoformat(),
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "repository": git_metadata(PROJECT_ROOT),
         "bundle": {
             "manifest_path": str(manifest_path) if manifest_path else None,
@@ -627,7 +628,7 @@ def train(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     run_manifest["status"] = "completed"
-    run_manifest["completed_at_utc"] = datetime.now(UTC).isoformat()
+    run_manifest["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     run_manifest["metrics"] = metrics
     run_manifest["epoch_loss_summary"] = epoch_loss_summary
     run_manifest_path.write_text(json.dumps(run_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

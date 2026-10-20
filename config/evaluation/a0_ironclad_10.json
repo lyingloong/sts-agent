@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "suite_id": "a0-ironclad-fixed10-v1",
+  "description": "A0 铁甲战士固定 10 种子初步基准。每个种子仅一次完整自主对局；技术中止不记为游戏死亡。",
+  "character": "IRONCLAD",
+  "ascension": 0,
+  "seed_generation": {
+    "method": "Python random.Random(20261012).getrandbits(63), then StS base-35 display encoding",
+    "selection": "first ten generated seeds; not selected using game outcomes"
+  },
+  "seeds": [
+    "RELGW3JE9KJ",
+    "4TMKCXA43924",
+    "2MRSDIADN50TR",
+    "1INPWDQ8K0I78",
+    "22MT9BY4PU0V4",
+    "1TW5TQYBT7P8A",
+    "2K0UQEUAEAUP7",
+    "12LSQ083TASTV",
+    "GB28DGZJ88K4",
+    "1I50W94Q43U17"
+  ],
+  "limits": {
+    "connection_timeout_seconds": 30,
+    "idle_timeout_seconds": 600,
+    "run_timeout_seconds": 3600,
+    "max_actions_per_run": 4000
+  },
+  "output_dir": "data/experiments/baseline_batches"
+}

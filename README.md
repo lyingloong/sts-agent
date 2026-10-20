@@ -16,20 +16,30 @@
 
 ## 安装
 
+需要 Python 3.10+ 和已安装的 Slay the Spire 1、ModTheSpire、BaseMod、CommunicationMod。
+推荐同时启用 [ActionRecorder](https://github.com/lyingloong/sts-action-recorder)，以获得运行时实体说明、
+完整选牌状态及精确动作关联。游戏和第三方 Mod/模型不随仓库分发。
+本机游戏接入与 Overlay 主要在 Windows 验证；远端模型服务与训练主要在 Linux 验证。
+
 ```powershell
 uv venv
 uv pip install --python .venv\Scripts\python.exe -e .
-uv pip install --python .venv\Scripts\python.exe -r requirements\policy.txt
 ```
 
-训练机改用 `requirements/train.txt`。CUDA 版 PyTorch 应按机器驱动单独安装，不应从普通 PyPI 镜像误装 CPU wheel。
+以上足够运行核心控制器和人工采集。本机 Candidate Assist 另装 `requirements/policy.txt`，
+训练机使用 `requirements/train.txt`；远端基线依赖见 [基线推理](doc/BASELINE_INFERENCE.md)。
+CUDA 版 PyTorch 应按机器驱动单独安装，不应从普通 PyPI 镜像误装 CPU wheel。
+首次运行前检查 `config/agent.json` 的活动模式和连接信息，替换其中的示例部署配置；
+只采集人工数据时选择 `collect_human`，不需要部署模型。
+可参考 [通用配置模板](config/agent.example.json)；首次配置时复制为 `config/agent.json` 后按需调整，
+已有可用配置不要直接覆盖。
 
 ## 启动
 
-CommunicationMod 的 `config.properties`：
+CommunicationMod 的 `config.properties`（将示例路径替换为自己的仓库绝对路径，路径中有空格时加引号）：
 
 ```properties
-command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
+command=C\:/path/to/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
 runAtGameStart=true
 maxInitializationTimeout=300
 ```
@@ -54,6 +64,18 @@ controller 必须由 CommunicationMod 启动，一次只接受一个终端类客
 通过 SSH 通道请求单一动作；不启用训练或教师模式，评测轨迹与人工采集分开。
 远端与本机使用同仓库的不同入口，准备命令和全部参数见 [基线推理](doc/BASELINE_INFERENCE.md)。
 进度分、通关率及实验比较口径见 [基线评测方案](doc/BASELINE_EVALUATION.md)。
+
+固定 10 种子批量测评：保持 `active_mode: "baseline_inference"`，准备好远端服务，重启游戏/controller，
+停在普通主菜单并关闭 Overlay/终端客户端，然后运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline --dry-run
+.\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline
+```
+
+种子与预算位于 [固定测试集配置](config/evaluation/a0_ironclad_10.json)。脚本串行完成 10 局 A0 战士，
+每局正常终局并返回主菜单后才开下一局；结果写入 `data/experiments/baseline_batches/`。
+技术故障或人工接管会停止批次，不按死亡计分、不自动重跑。详见[批量运行说明](doc/BASELINE_EVALUATION.md#固定-10-种子批量测评)。
 
 ### Codex 自动游玩采集
 
@@ -94,7 +116,7 @@ CommunicationMod 的状态通过 stdin 进入 bridge；ActionRecorder 0.5 在实
 - `legal_actions`：使用在线 agent 的目标展开规则，但保留人类操作的细粒度锻造/删牌入口，不应用策略导航过滤；
 - `action` 和 `selected_action_id`：映射到上述动作空间的人类动作；
 - `raw_action`：ActionRecorder 捕获的原始游戏内动作；
-- `post_state`：动作后稳定状态。
+- `post_state`：动作后观测；结算动画可能尚未完全结束，不应无条件作为动作效果真值。
 
 ActionRecorder 事件格式 0.5 使用 `state_published` 与
 `action_begin`/`action_accepted`/`action_rejected` 事务。Java Mod 保存并引用
@@ -138,8 +160,8 @@ sts_agent/
   policy/        本地 Qwen、远程教师和策略 Prompt
   learning/      SFT、Prompt Evolution、反馈归因和在线 RL
   ui/            Overlay 与文本客户端
-  commands/      模型下载和协议探针
-config/          唯一运行配置及远端 RL 示例
+  commands/      模型下载、协议探针和批量测评
+config/          运行模式、固定测试集及远端 RL 示例
 prompts/         角色与场景 skill
 requirements/    推理与训练依赖
 tests/           无需启动游戏的单元测试
@@ -166,9 +188,15 @@ doc/             架构、协议和实验说明
 ```
 
 完整端到端测试仍需启动 ModTheSpire。CommunicationMod 的协议约束见其[官方仓库](https://github.com/ForgottenArbiter/CommunicationMod)。
+提交前检查、问题反馈和敏感文件处理见 [贡献指南](CONTRIBUTING.md)。GitHub Actions 只运行无游戏/GPU的检查，
+不会调用真实模型、SSH 服务器或教师 API，也不能替代实机验收。
 
 ## 语义动作接口
 
 策略层默认使用细粒度游戏动作。营火升级和商店删牌按入口、选牌、确认分别决策，
 与人类采集及 SFT 数据保持同一粒度；模型输出当前合法动作编号，由控制器映射为命令。
 历史宏动作代码只在显式请求粗粒度时使用。详细约定见 [`doc/SEMANTIC_ACTIONS.md`](doc/SEMANTIC_ACTIONS.md)。
+
+## 许可证
+
+本仓库代码采用 [MIT License](LICENSE)。游戏、第三方 Mod、模型权重和数据集的许可与分发要求另行适用。

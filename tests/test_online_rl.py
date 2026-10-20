@@ -140,7 +140,10 @@ class OnlineRlTests(unittest.TestCase):
                 load_mock_worker_config(config_path)
 
     def test_reinforce_correction_has_strong_gradient_for_low_probability_action(self) -> None:
-        import torch
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("optional torch is not installed")
 
         scores = torch.tensor([-11.0, 0.0], requires_grad=True)
         loss, kind = attribution_correction_loss(
@@ -160,7 +163,10 @@ class OnlineRlTests(unittest.TestCase):
         self.assertLess(float(scores.grad[0]), -0.99)
 
     def test_weaken_unlikelihood_has_strong_gradient_for_saturated_action(self) -> None:
-        import torch
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("optional torch is not installed")
 
         scores = torch.tensor([11.0, 0.0], requires_grad=True)
         loss, kind = attribution_correction_loss(
@@ -180,7 +186,10 @@ class OnlineRlTests(unittest.TestCase):
         self.assertGreater(float(scores.grad[0]), 0.99)
 
     def test_weaken_unlikelihood_skips_a_forced_action(self) -> None:
-        import torch
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("optional torch is not installed")
 
         loss, kind = attribution_correction_loss(
             torch,

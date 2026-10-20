@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "active_mode": "collect_human",
+  "shared": {
+    "server": {"host": "127.0.0.1", "port": 8765},
+    "recording": {
+      "listen": {"host": "127.0.0.1", "port": 8766},
+      "output_dir": "data/trajectories/human"
+    },
+    "policy": {
+      "model": {
+        "base": "Qwen/Qwen3-0.6B",
+        "initial_adapter": "",
+        "initial_policy_version": "base",
+        "hub_endpoint": "https://huggingface.co"
+      },
+      "remote": {
+        "ssh_host": "gpu-server",
+        "project_root": "/srv/sts-agent",
+        "python": ".venv/bin/python"
+      }
+    }
+  }
+}

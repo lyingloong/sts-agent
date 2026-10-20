@@ -19,6 +19,7 @@
       "temperature": 0,
       "thinking": false,
       "max_output_tokens": 64,
+      "prompt_format": "plain_text",
       "prompt_template": "canonical",
       "output_dir": "data/experiments/baseline",
       "serving": {

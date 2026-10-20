@@ -28,6 +28,12 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from sts_agent.config import ConfigError, load_agent_config
+from sts_agent.core.action_aliases import model_action_alias
+from sts_agent.game.sts1.campfire import (
+    CAMPFIRE_ACTIVITY_RULE,
+    choice_label as campfire_choice_label,
+    normalize_option_details,
+)
 from sts_agent.learning.posthoc_feedback import (
     SCHEMA_VERSION as POSTHOC_SCHEMA_VERSION,
     PosthocFeedbackClient,
@@ -40,8 +46,16 @@ from sts_agent.learning.posthoc_feedback import (
 from sts_agent.learning.prompt_evolution import PromptEvolutionError, PromptEvolutionManager
 from sts_agent.policy.teacher import RemoteTeacherClient, TeacherError
 from sts_agent.policy.history import compact_history_step, enrich_history_item, room_history_summary
+from sts_agent.policy.presentation import prepare_model_context
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.runtime.lifecycle import GameDisconnected, GameInput
+from sts_agent.runtime.command_channel import CommandChannel, CommandProtocolFailure
+from sts_agent.runtime.recovery import CommandRecovery
+from sts_agent.runtime.batch_client import (
+    BatchClientGuard,
+    PROTOCOL_VERSION as BATCH_PROTOCOL_VERSION,
+    client_status as batch_client_status,
+)
 
 
 ACTION_HISTORY_LIMIT = 6
@@ -442,10 +456,12 @@ CARD_MODEL_FIELDS = (
     "name",
     "type",
     "cost",
+    "base_cost",
     "cost_for_turn",
     "upgrades",
     "is_playable",
     "description",
+    "keyword_tooltips",
     "raw_description",
     "description_source",
     "description_complete",
@@ -456,17 +472,26 @@ CARD_MODEL_FIELDS = (
     "block",
     "base_block",
     "magic_number",
+    "base_magic_number",
     "hit_count",
     "multi_damage",
     "rarity",
     "color",
     "exhaust",
+    "exhaust_on_use_once",
     "ethereal",
-    "innate",
+    "is_innate",
     "retain",
     "self_retain",
     "purge_on_use",
+    "free_to_play_once",
+    "is_cost_modified",
+    "is_cost_modified_for_turn",
+    "in_bottle_flame",
+    "in_bottle_lightning",
+    "in_bottle_tornado",
 )
+CARD_RUNTIME_ALIASES = {"is_innate": ("innate",)}
 POTION_MODEL_FIELDS = (
     "id",
     "name",
@@ -474,10 +499,11 @@ POTION_MODEL_FIELDS = (
     "raw_description",
     "description_source",
     "tooltips",
+    "keyword_tooltips",
     "target",
     "can_use",
 )
-RELIC_MODEL_FIELDS = ("id", "name", "description", "raw_description", "description_source", "counter")
+RELIC_MODEL_FIELDS = ("id", "name", "description", "raw_description", "description_source", "counter", "keyword_tooltips")
 _MISSING = object()
 
 
@@ -642,13 +668,26 @@ def visible_card(
     card: dict[str, Any],
     *,
     player_powers: Any = None,
+    include_upgrade_preview: bool = False,
 ) -> dict[str, Any]:
     """Expose game-reported card facts without a local entity database."""
-    result = merge_public_fields(card, CARD_MODEL_FIELDS)
+    result = merge_public_fields(card, CARD_MODEL_FIELDS, CARD_RUNTIME_ALIASES)
+    # An explicitly unavailable runtime field is still public information:
+    # keep it unknown rather than silently treating it as a false flag.
+    for field in CARD_MODEL_FIELDS:
+        if field not in result and any(key in card for key in (field, *CARD_RUNTIME_ALIASES.get(field, ()))):
+            result[field] = None
     for field in ("id", "name", "type", "cost", "upgrades", "is_playable", "description"):
         result.setdefault(field, None)
     if player_powers is not None:
         result.update(_calculated_card_values(card))
+    if include_upgrade_preview and "upgrade_preview" in card:
+        preview = card["upgrade_preview"]
+        result["upgrade_preview"] = visible_card(preview) if isinstance(preview, dict) else None
+    if include_upgrade_preview:
+        for field in ("upgrade_preview_source", "upgrade_preview_status"):
+            if field in card:
+                result[field] = card[field]
     return result
 
 
@@ -809,6 +848,7 @@ def powers_summary(powers: Any) -> list[dict[str, Any]] | None:
         for key in (
             "name", "id", "amount", "type", "description", "raw_description",
             "description_source", "description_complete", "unresolved_description_variables",
+            "keyword_tooltips",
         ):
             if key in power:
                 item[key] = power[key]
@@ -1150,6 +1190,7 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
     """Create the model-facing state without hidden draw order or RNG seed."""
     state = game_state(message)
     map_transition = is_map_room_transition(state)
+    raw_potions = state.get("potions")
     result: dict[str, Any] = {
         "screen_type": "TRANSITION" if map_transition else state.get("screen_type"),
         "screen_name": state.get("screen_name"),
@@ -1166,7 +1207,10 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
         "gold": state.get("gold"),
         "act_boss": state.get("act_boss"),
         "relics": [visible_relic(item) for item in state.get("relics", []) if isinstance(item, dict)],
-        "potions": [visible_potion(item) for item in state.get("potions", []) if isinstance(item, dict)],
+        "potions": [visible_potion(item) | {"slot": index}
+                    for index, item in enumerate(raw_potions) if isinstance(item, dict)]
+                   if isinstance(raw_potions, list) else None,
+        "potion_slot_count": len(raw_potions) if isinstance(raw_potions, list) else None,
     }
     keys = normalize_keys(state)
     if keys is not None:
@@ -1196,7 +1240,7 @@ def normalize_state(message: dict[str, Any]) -> dict[str, Any]:
         result["screen_state"] = (
             {"transition": "room_not_complete"}
             if map_transition
-            else normalize_screen_state(state.get("screen_type"), screen_state)
+            else normalize_screen_state(state.get("screen_type"), screen_state, choice_list=state.get("choice_list"))
         )
 
     # CommunicationMod can briefly expose the map overlay while the current
@@ -1267,7 +1311,7 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
     screen = str(normalized.get("screen_type") or "").upper()
     if screen == "MAP":
         normalized.pop("combat", None)
-        return normalized
+        return prepare_model_context(normalized)
 
     normalized.pop("map", None)
     active_combat = (
@@ -1278,16 +1322,16 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
         # CommunicationMod may briefly retain the previous combat payload on
         # a non-combat screen. Never expose that stale state to a prompt.
         normalized.pop("combat", None)
-        return normalized
+        return prepare_model_context(normalized)
 
     # Combat-time choices still require energy, hand, intents and powers.
     # Keep their selection requirements/source as well as the live battle.
     if screen in {"GRID", "HAND_SELECT", "CARD_REWARD"}:
-        return normalized
+        return prepare_model_context(normalized)
 
     # Combat runs every turn, so keep this prompt compact even though map
     # context has already been removed above.
-    return {
+    return prepare_model_context({
         key: normalized.get(key)
         for key in (
             "screen_type",
@@ -1305,12 +1349,14 @@ def route_policy_observation(normalized: dict[str, Any]) -> dict[str, Any]:
             "keys",
             "relics",
             "potions",
+            "potion_slot_count",
             "deck",
             "decision_constraints",
             "combat",
             "room_history",
+            "keyword_explanations",
         )
-    }
+    })
 
 
 def deck_summary(deck: Any) -> list[dict[str, Any]]:
@@ -1322,15 +1368,39 @@ def deck_summary(deck: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         card = visible_card(raw)
-        entry = {
-            key: card[key]
-            for key in ("id", "name", "type", "cost", "upgrades", "description")
-            if key in card
-        }
+        # Group only genuinely identical public card instances. Permanent
+        # upgrades, retained flags and bottled starting cards can differ even
+        # when their names and ordinary rules text are identical.
+        entry = {key: value for key, value in card.items() if key != "is_playable"}
         signature = json.dumps(entry, ensure_ascii=False, sort_keys=True)
         counts[signature] += 1
         entries[signature] = entry
     return [entries[key] | {"count": counts[key]} for key in sorted(entries)]
+
+
+def card_pile_summary(pile: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
+    """Expose public composition without UUIDs, pile order or target previews."""
+    if not isinstance(pile, list):
+        return None, None
+    cards: list[dict[str, Any]] = []
+    missing = 0
+    transient_values = {
+        "is_playable", "damage", "block", "multi_damage",
+        "final_single_hit_damage", "final_damage", "final_block",
+    }
+    for raw in pile:
+        # A source placeholder still contributes to the observed pile size,
+        # but cannot be turned into a fictional unnamed card in its contents.
+        if not isinstance(raw, dict) or not any(
+            isinstance(raw.get(field), str) and raw[field].strip() for field in ("id", "name")
+        ):
+            missing += 1
+            continue
+        cards.append({key: value for key, value in raw.items() if key not in transient_values})
+    # visible_card's whitelist removes UUIDs and positions; deck_summary groups
+    # identical public attributes and sorts signatures independently of source
+    # order. Never label these rows as top/bottom or assign per-card indices.
+    return deck_summary(cards), missing
 
 
 def overlay_deck_summary(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1355,7 +1425,9 @@ def overlay_deck_summary(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 PUBLIC_ITEM_SCALAR_FIELDS = {
+    "choice_index",
     "reward_id", "reward_index", "linked_reward_id",
+    "reward_ref", "linked_reward_ref",
     "reward_type",
     "name",
     "id",
@@ -1453,13 +1525,69 @@ def normalize_match_game(value: Any) -> dict[str, Any] | None:
     return result
 
 
-def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str, Any]:
+def normalize_screen_state(screen_type: Any, value: dict[str, Any], *, choice_list: Any = None) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if "source_reward_id" in value:
         result["source_reward_id"] = value["source_reward_id"]
+    if "source_reward_ref" in value:
+        result["source_reward_ref"] = value["source_reward_ref"]
+    upgrade_selection = value.get("for_upgrade") is True
+    confirmation_aliases = {
+        "confirm_screen_up": ("confirmScreenUp",),
+        "just_for_confirming": (
+            "is_just_for_confirming", "for_just_confirming", "isJustForConfirming",
+            "forJustConfirming", "justForConfirming", "for_confirm",
+        ),
+    }
+    for field, aliases in confirmation_aliases.items():
+        flag = public_value(value, field, aliases)
+        if flag is not _MISSING:
+            result[field] = flag
+        elif any(key in value for key in (field, *aliases)):
+            result[field] = None
+    # GRID keeps its full target group behind its confirmation overlay, even
+    # though CommunicationMod's choice_list is empty and CHOOSE is unavailable.
+    # Those displayed cards must not acquire executable selection positions.
+    grid_confirmation = screen_type == "GRID" and (
+        value.get("confirm_up") is True
+        or any(result.get(field) is True for field in confirmation_aliases)
+        or isinstance(choice_list, list) and not choice_list
+    )
+
+    def choice_position(card: dict[str, Any], fallback: int) -> int:
+        position = card.get("choice_index")
+        return position if type(position) is int and position >= 0 else fallback
+
+    def choice_card(card: dict[str, Any], index: int) -> dict[str, Any]:
+        projected = visible_card(card, include_upgrade_preview=upgrade_selection)
+        if not grid_confirmation:
+            projected["choice_index"] = choice_position(card, index)
+        elif type(card.get("choice_index")) is int and card["choice_index"] >= 0:
+            projected["reference_choice_index"] = card["choice_index"]
+        return projected
+
+    def selected_card(card: dict[str, Any]) -> dict[str, Any]:
+        projected = visible_card(card, include_upgrade_preview=upgrade_selection)
+        # A selected-card list has its own order. Recover a candidate position
+        # only from an explicit index or a unique UUID, never from its name.
+        position = card.get("choice_index")
+        if grid_confirmation:
+            if type(position) is int and position >= 0:
+                projected["reference_choice_index"] = position
+            return projected
+        if not isinstance(position, int) or isinstance(position, bool) or position < 0:
+            candidates = value.get("cards", value.get("hand", []))
+            matches = [choice_position(item, index) for index, item in enumerate(candidates)
+                       if isinstance(item, dict) and card.get("uuid") is not None
+                       and item.get("uuid") == card["uuid"]] if isinstance(candidates, list) else []
+            position = matches[0] if len(matches) == 1 else None
+        if position is not None:
+            projected["choice_index"] = position
+        return projected
+
     if screen_type in {"CARD_REWARD", "GRID"}:
         cards = value.get("cards", [])
-        result["cards"] = [visible_card(card) for card in cards if isinstance(card, dict)]
+        result["cards"] = [choice_card(card, index) for index, card in enumerate(cards) if isinstance(card, dict)]
         if screen_type == "GRID":
             selection_count = value.get("num_cards")
             if not isinstance(selection_count, int) or selection_count < 1:
@@ -1478,18 +1606,21 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
                 if value.get("any_number"):
                     result["selection_mode"] = "SELECT"
                     result["selection_instruction"] = "选择符合当前界面要求的牌"
-        for key in ("selected_cards", "num_cards", "for_transform", "for_upgrade", "for_purge", "any_number", "confirm_up", "confirm_screen_up", "selection_reason", "for_clarity", "skip_available"):
+        for key in ("selected_cards", "num_cards", "for_transform", "for_upgrade", "for_purge", "any_number", "confirm_up", "selection_reason", "for_clarity", "skip_available"):
             if key in value:
                 if key == "selected_cards":
-                    result[key] = [visible_card(card) for card in value[key] if isinstance(card, dict)]
+                    result[key] = ([selected_card(card) for card in value[key] if isinstance(card, dict)]
+                                   if isinstance(value[key], list) else None)
                 else:
                     result[key] = value[key]
         if value.get("selection_reason"):
             result["selection_instruction"] = value["selection_reason"]
         if isinstance(value.get("confirmation_card"), dict):
-            result["confirmation_card"] = visible_card(value["confirmation_card"])
+            result["confirmation_card"] = selected_card(value["confirmation_card"])
             if value["confirmation_card"].get("uuid") is not None:
                 result["confirmation_card"]["uuid"] = value["confirmation_card"]["uuid"]
+        elif "confirmation_card" in value:
+            result["confirmation_card"] = None
     elif screen_type == "EVENT":
         result["event_id"] = value.get("event_id")
         result["event_name"] = value.get("event_name")
@@ -1502,18 +1633,24 @@ def normalize_screen_state(screen_type: Any, value: dict[str, Any]) -> dict[str,
     elif screen_type == "REST":
         result["rest_options"] = value.get("rest_options", [])
         result["has_rested"] = value.get("has_rested")
+        result["rest_option_details"] = normalize_option_details(
+            value.get("rest_option_details"), value.get("rest_options"), choice_list)
+        result["activity_rule"] = CAMPFIRE_ACTIVITY_RULE
     elif screen_type == "SHOP_SCREEN":
-        result["cards"] = [visible_card(item) | {"price": item.get("price")} for item in value.get("cards", []) if isinstance(item, dict)]
-        result["relics"] = [visible_relic(item) | {"price": item.get("price")} for item in value.get("relics", []) if isinstance(item, dict)]
-        result["potions"] = [visible_potion(item) | {"price": item.get("price")} for item in value.get("potions", []) if isinstance(item, dict)]
+        for field, normalizer in (("cards", visible_card), ("relics", visible_relic), ("potions", visible_potion)):
+            # Shop item arrays need not have the same order as choice_list.
+            # Only an upstream command position is safe to attach here.
+            result[field] = [normalizer(item) | {"price": item.get("price")}
+                             | ({"choice_index": item["choice_index"]} if "choice_index" in item else {})
+                             for item in value.get(field, []) if isinstance(item, dict)]
         result["purge_available"] = value.get("purge_available")
         result["purge_cost"] = value.get("purge_cost")
     elif screen_type == "BOSS_REWARD":
-        result["relics"] = [visible_relic(item) | {key: item[key] for key in ("reward_id", "reward_index") if key in item}
+        result["relics"] = [visible_relic(item) | {key: item[key] for key in ("reward_id", "reward_index", "reward_ref", "choice_index") if key in item}
                             for item in value.get("relics", []) if isinstance(item, dict)]
     elif screen_type == "HAND_SELECT":
-        result["hand"] = [visible_card(item) for item in value.get("hand", []) if isinstance(item, dict)]
-        result["selected"] = [visible_card(item) for item in value.get("selected", []) if isinstance(item, dict)]
+        result["hand"] = [choice_card(item, index) for index, item in enumerate(value.get("hand", [])) if isinstance(item, dict)]
+        result["selected"] = [selected_card(item) for item in value.get("selected", []) if isinstance(item, dict)]
         for key in ("max_cards", "can_pick_zero", "up_to", "any_number", "for_upgrade", "for_transform", "selection_reason"):
             if key in value:
                 result[key] = value[key]
@@ -1543,10 +1680,11 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
     raw_monsters = combat.get("monsters")
     monster_values = raw_monsters if isinstance(raw_monsters, list) else []
     monsters: list[dict[str, Any]] = []
-    for monster in monster_values:
+    for index, monster in enumerate(monster_values):
         if not isinstance(monster, dict):
             continue
         item = {
+            "monster_index": index,
             "id": monster.get("id"),
             "name": monster.get("name"),
             "current_hp": monster.get("current_hp"),
@@ -1570,11 +1708,11 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
                 }
             )
         monsters.append(item)
-    return {
+    result = {
         "turn": combat.get("turn"),
         "hand": [
-            visible_card(card, player_powers=player_powers if player_powers is not None else [])
-            for card in combat.get("hand", [])
+            visible_card(card, player_powers=player_powers if player_powers is not None else []) | {"card_index": index}
+            for index, card in enumerate(combat.get("hand", []), 1)
             if isinstance(card, dict)
         ] if isinstance(combat.get("hand"), list) else None,
         "player": {
@@ -1582,6 +1720,11 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
             "max_hp": player.get("max_hp"),
             "block": player.get("block"),
             "energy": player.get("energy"),
+            "base_energy_per_turn": player.get("base_energy_per_turn"),
+            "energy_per_turn": player.get("energy_per_turn"),
+            "master_hand_size": player.get("master_hand_size"),
+            "game_hand_size": player.get("game_hand_size"),
+            "cards_played_this_turn": player.get("cards_played_this_turn"),
             "stance": stance,
             "powers": powers_summary(player.get("powers")),
         },
@@ -1590,6 +1733,9 @@ def normalize_combat(combat: dict[str, Any], *, hide_enemy_intents: bool = False
         "discard_count": len(combat.get("discard_pile", [])) if isinstance(combat.get("discard_pile"), list) else None,
         "exhaust_count": len(combat.get("exhaust_pile", [])) if isinstance(combat.get("exhaust_pile"), list) else None,
     }
+    for field in ("draw_pile", "discard_pile", "exhaust_pile"):
+        result[field], result[f"{field}_missing_count"] = card_pile_summary(combat.get(field))
+    return result
 
 
 def semantic_actions(
@@ -1643,7 +1789,7 @@ def semantic_actions(
                                 "kind": "play",
                                 "card_index": index,
                                 "target": target,
-                                "label": f"出牌 {card.get('name', index)} -> 敌人 {target}",
+                                "label": f"打出手牌 {index} {card.get('name', index)} -> 敌人 {target}",
                             }
                         )
                 else:
@@ -1653,7 +1799,7 @@ def semantic_actions(
                             "command": f"PLAY {index}",
                             "kind": "play",
                             "card_index": index,
-                            "label": f"出牌 {card.get('name', index)}",
+                            "label": f"打出手牌 {index} {card.get('name', index)}",
                         }
                     )
         if "end" in commands:
@@ -1788,13 +1934,17 @@ def semantic_actions(
         for index, label in enumerate(choices):
             if index in blocked_indices:
                 continue
+            choice_label = campfire_choice_label(state, index, label) if screen_type == "REST" else str(label)
+            if screen_type in {"CARD_REWARD", "GRID", "HAND_SELECT", "COMBAT_REWARD", "BOSS_REWARD", "SHOP_SCREEN"}:
+                choice_label = f"选择位置 {index}：{choice_label}"
             result.append(
                 {
                     "id": f"CHOOSE:index={index}",
                     "command": f"CHOOSE {index}",
                     "kind": "choose",
                     "index": index,
-                    "label": str(label),
+                    "choice_index": index,
+                    "label": choice_label,
                 }
             )
     if "confirm" in commands or "proceed" in commands:
@@ -1879,7 +2029,7 @@ def potion_actions(
                             "kind": "potion_use",
                             "slot": index,
                             "target": target,
-                            "label": f"使用药水 {name} -> 敌人 {target}",
+                            "label": f"使用药水栏位 {index} {name} -> 敌人 {target}",
                         }
                     )
             else:
@@ -1889,7 +2039,7 @@ def potion_actions(
                         "command": f"POTION USE {index}",
                         "kind": "potion_use",
                         "slot": index,
-                        "label": f"使用药水 {name}",
+                        "label": f"使用药水栏位 {index} {name}",
                     }
                 )
         if potion.get("can_discard", False):
@@ -1899,7 +2049,7 @@ def potion_actions(
                     "command": f"POTION DISCARD {index}",
                     "kind": "potion_discard",
                     "slot": index,
-                    "label": f"丢弃药水 {name}",
+                    "label": f"丢弃药水栏位 {index} {name}",
                 }
             )
     return result
@@ -2062,6 +2212,17 @@ def finalize_decision(
     return result
 
 
+def state_request_action(requested_by: str = "human") -> dict[str, Any]:
+    """Describe a control query without creating a gameplay/training action."""
+    return {"id": "STATE", "kind": "state_request", "command": "STATE", "requested_by": requested_by}
+
+
+def discard_model_candidates(policy: PolicyClient | None) -> None:
+    """Invalidate cached baseline answers at a recovery or human refresh boundary."""
+    if policy is not None and getattr(policy, "runtime", None) == "remote_api":
+        policy.api.pending = None
+
+
 def parse_human_input(
     text: str,
     message: dict[str, Any],
@@ -2106,7 +2267,7 @@ def parse_human_input(
     if candidate_command is not None or candidate_error is not None:
         return candidate_command, candidate_action, candidate_error
     if op == "state" or (op == "s" and message.get("in_game")):
-        return "STATE", None, None
+        return "STATE", state_request_action(), None
     if op in {"p", "play"}:
         if len(parts) not in {2, 3}:
             return None, None, "出牌格式：p <手牌序号> [敌人序号]，手牌从 1 开始，敌人从 0 开始。"
@@ -2342,7 +2503,7 @@ def overlay_view_data(
         "summary": summary,
         "deck": overlay_deck_summary(message),
         # Same room-local entries as the model, only a smaller display window.
-        "recent_actions": room_history_summary(normalize_state(message), action_history)["steps"][-ACTION_HISTORY_LIMIT:],
+        "recent_actions": policy_observation(message, action_history=action_history)["room_history"]["steps"][-ACTION_HISTORY_LIMIT:],
         "legal_actions": [overlay_action_row(message, action) for action in actions],
     }
 
@@ -2557,6 +2718,7 @@ class TerminalBridge:
         self.output_lock = threading.Lock()
         self.connection: socket.socket | None = None
         self.input_buffer = bytearray()
+        self.batch_guard = BatchClientGuard()
 
     def accept(self) -> None:
         self.check_connected()
@@ -2625,6 +2787,7 @@ class TerminalBridge:
 
     def close_client(self) -> None:
         # No makefile/readline lock: even a partial message is cancellable.
+        self.batch_guard.disconnected()
         if self.connection is not None:
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
@@ -3032,7 +3195,7 @@ class PolicyClient:
         for index, action in enumerate(legal_actions, start=1):
             alias = f"A{index}"
             alias_to_action[alias] = action
-            model_actions.append({"id": alias, "label": str(action.get("label") or action.get("command") or alias)})
+            model_actions.append(model_action_alias(action, alias))
         request = {
             "type": "sample" if self.runtime == "remote_online_rl" else ("score" if self.confidence_auto else "rank"),
             "request_id": self.request_id,
@@ -3370,7 +3533,7 @@ def online_episode_from_trace(
             elif group_id != current_group_id or policy_version != current_version:
                 raise ValueError("one episode cannot mix online RL groups or policy versions")
             model_actions = [
-                {"id": f"A{index}", "label": str(action.get("label") or action.get("command") or f"A{index}")}
+                model_action_alias(action, f"A{index}")
                 for index, action in enumerate(actions, start=1)
                 if isinstance(action, dict)
             ]
@@ -3550,7 +3713,7 @@ class TeacherClient:
         for index, action in enumerate(legal_actions, start=1):
             alias = f"A{index}"
             alias_to_action[alias] = action
-            model_actions.append({"id": alias, "label": str(action.get("label") or action.get("command") or alias)})
+            model_actions.append(model_action_alias(action, alias))
         def forward_update(update: dict[str, Any]) -> None:
             if on_update is None:
                 return
@@ -3902,6 +4065,25 @@ def ask_action(
     config: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None] | None:
     actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
+    candidate_guard = getattr(bridge, "batch_guard", None)
+    batch_guard = candidate_guard if isinstance(candidate_guard, BatchClientGuard) else None
+
+    def supervision_error() -> str | None:
+        return batch_guard.error(getattr(bridge, "connection", None)) if batch_guard is not None else None
+
+    def with_baseline_status(packet: dict[str, Any]) -> dict[str, Any]:
+        if getattr(policy, "runtime", None) == "remote_api":
+            packet["baseline"] = batch_client_status(policy.api, message, command_set(message), run_id, batch_guard)
+            packet["baseline"]["controller_error"] = error or message.get("error")
+        return packet
+
+    def paused_by_supervisor(reason: str, current: dict[str, Any] | None = None) -> dict[str, Any]:
+        discard_model_candidates(policy)
+        return {**(current or {}), "model_action": None, "model_candidates": [],
+                "assist_status": "暂停，需人工处理", "assist_reason": reason,
+                "executed_action": None, "source": None}
+
+    error = error or supervision_error()
 
     def send_model_update(
         decision_update: dict[str, Any],
@@ -3925,7 +4107,7 @@ def ask_action(
         if evolution is not None and evolution.enabled:
             packet["prompt_evolution"] = evolution.status()
         try:
-            bridge.send(packet)
+            bridge.send(with_baseline_status(packet))
         except OSError:
             # The game action can still be executed if the optional UI closes
             # during a long streaming request.
@@ -3939,13 +4121,17 @@ def ask_action(
             action, detail = environment_action
             decision = environment_auto_decision(action, detail)
             send_model_update(decision, auto_execute=True)
-            time.sleep(AUTOMATIC_ACTION_DELAY_SECONDS)
-            print(
-                f"environment auto: {action.get('id')} rule={detail.get('rule')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return str(action["command"]), action, decision
+            error = supervision_error()
+            if not error:
+                time.sleep(AUTOMATIC_ACTION_DELAY_SECONDS)
+                error = supervision_error()
+            if not error:
+                print(
+                    f"environment auto: {action.get('id')} rule={detail.get('rule')}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return str(action["command"]), action, decision
 
     teacher_active = (
         teacher is not None
@@ -3985,7 +4171,13 @@ def ask_action(
             # during a long streaming request.
             return
 
-    if teacher_active:
+    if error:
+        discard_model_candidates(policy)
+        assistant = teacher if teacher_active else policy
+        status = assistant.status_decision() if assistant is not None else {}
+        decision = {**(status or {}), "model_action": None, "model_candidates": [],
+                    "assist_status": "暂停，需人工处理", "assist_reason": error}
+    elif teacher_active:
         send_teacher_update(
             {
                 "mode": getattr(teacher, "mode", "teacher_collection"),
@@ -4014,9 +4206,6 @@ def ask_action(
         )
     elif policy is None:
         decision = None
-    elif error and getattr(policy, "runtime", "local") == "remote_api":
-        policy.api.pending = None
-        decision = {**policy.status_decision(), "assist_status": "暂停，需人工处理", "assist_reason": error}
     elif candidate_assist_allowed(message, policy.screens):
         observation = policy_observation(message, visited_shop_rooms, action_history, declined_card_reward_keys)
         requesting_decision = getattr(policy, "requesting_decision", None)
@@ -4028,14 +4217,21 @@ def ask_action(
             decision = policy.rank(observation, actions)
     else:
         decision = policy.status_decision()
+    batch_error = supervision_error()
+    if batch_error:
+        error = batch_error
+        decision = paused_by_supervisor(error, decision)
     if (not error and isinstance(decision, dict) and decision.get("mode") == "baseline_inference"
             and decision.get("model_action") and not decision.get("api", {}).get("revalidated")):
         send_model_update(decision, model_pending=True)
         # STATE is a protocol query, not a game action or training example.
-        return "STATE", {"id": "STATE", "kind": "state_request", "command": "STATE"}, None
-    # Error responses are a hard human handoff. Repeating an otherwise
-    # high-confidence action after the protocol rejects it can create a tight
-    # automatic loop and should never be treated as a new policy decision.
+        batch_error = supervision_error()
+        if not batch_error:
+            return "STATE", state_request_action("model_revalidation"), None
+        error = batch_error
+        decision = paused_by_supervisor(error, decision)
+    # Recovery owns whether this observation permits another automatic
+    # decision. A paused observation exposes only explicit human controls.
     automatic = None
     automatic_source = "model_auto"
     if not error:
@@ -4085,7 +4281,11 @@ def ask_action(
             # instead of leaving the Model/Action panel blank.
             send_model_update(automatic_decision, auto_execute=True)
         time.sleep(AUTOMATIC_ACTION_DELAY_SECONDS)
-        return str(automatic["command"]), automatic, automatic_decision
+        batch_error = supervision_error()
+        if not batch_error:
+            return str(automatic["command"]), automatic, automatic_decision
+        error = batch_error
+        decision = paused_by_supervisor(error, automatic_decision)
     while True:
         packet = {
                 "type": "view",
@@ -4113,7 +4313,7 @@ def ask_action(
         if evolution is not None and evolution.enabled:
             packet["prompt_evolution"] = evolution.status()
         try:
-            bridge.send(packet)
+            bridge.send(with_baseline_status(packet))
             response = bridge.receive()
         except OSError:
             # Re-publish this decision after a client reconnects. Never replay
@@ -4121,6 +4321,23 @@ def ask_action(
             bridge.close_client()
             continue
         if response is None:
+            continue
+        if response.get("type") in {"baseline_batch_attach", "baseline_batch_detach"}:
+            allowed = (getattr(policy, "runtime", None) == "remote_api" and batch_guard is not None
+                       and message.get("in_game") is False and message.get("ready_for_command") is True
+                       and "start" in command_set(message))
+            if not allowed:
+                error = "批量测评只能在 baseline_inference 的可开局主菜单连接或正常退出。"
+            elif response.get("type") == "baseline_batch_attach":
+                if type(response.get("protocol_version")) is not int or response["protocol_version"] != BATCH_PROTOCOL_VERSION:
+                    error = "批量测评协议版本不匹配，请更新脚本和 controller 并重启游戏。"
+                elif error or batch_guard.failure:
+                    # Attaching another client must not silently bypass a pause.
+                    error = "控制器处于暂停状态，请先手动检查并恢复，再开始批量测评。"
+                else:
+                    batch_guard.attach()
+            else:
+                batch_guard.detach()
             continue
         text = str(response.get("text", ""))
         command, action, parse_error = parse_human_input(
@@ -4140,11 +4357,16 @@ def ask_action(
         if command == "__HELP__":
             error = help_text()
             continue
+        if command == "STATE" and not parse_error:
+            if batch_guard is not None and not batch_guard.attached:
+                batch_guard.detach()
+            return command, action or state_request_action(), None
         if parse_error or command is None or action is None:
             error = parse_error or "无效动作。"
             continue
-        if command == "STATE":
-            return command, {"id": "STATE", "kind": "state_request", "command": command}, None
+        if batch_guard is not None and not batch_guard.attached:
+            # An explicit valid human command after reconnect is the recovery boundary.
+            batch_guard.detach()
         codex_control = config is not None and config["framework"]["control_mode"] == "codex"
         source = "codex" if codex_control else candidate_source_for_input(text, decision)
         if codex_control:
@@ -4204,8 +4426,12 @@ def main() -> int:
     teacher = TeacherClient(project_root, config, prompt_evolution)
     posthoc = PosthocFeedbackClient(project_root, config["posthoc_feedback"])
     pending: dict[str, Any] | None = None
-    protocol_error: str | None = None
+    recovery = CommandRecovery()
     current_message: dict[str, Any] | None = None
+    command_channel = CommandChannel()
+
+    def send_command(command: str) -> None:
+        print(command_channel.encode(command, message), flush=True)
     run_id: str | None = None
     run_config: dict[str, Any] | None = None
     run_index = 0
@@ -4314,6 +4540,7 @@ def main() -> int:
         return str(action["command"])
 
     game_input = GameInput(sys.stdin, bridge.interrupt)
+    game_input.poll_check = command_channel.check_deadline
     try:
         # Setup can also block on a model or network; game exit must cancel it.
         game_input.call(teacher.prewarm)
@@ -4356,7 +4583,21 @@ def main() -> int:
                     # but must never acknowledge pending commands or trigger
                     # inference, even when CM's readiness flag is still true.
                     continue
+                try:
+                    if not command_channel.receive(message):
+                        continue
+                except CommandProtocolFailure as exc:
+                    # Persist the failure even before a run has opened an
+                    # event log. A failed query must never enter recovery.
+                    write_jsonl(raw_output, {
+                        "event": "controller_protocol_failure", "message_index": message_index,
+                        "at": now_iso(), "reason": str(exc),
+                        "command_confirmation": command_channel.confirmation(),
+                    })
+                    raise
                 if "error" in message:
+                    recovery.command_failed(command_channel.confirmation(), str(message.get("error")))
+                    discard_model_candidates(policy)
                     if pending is not None:
                         write_trace(
                             {
@@ -4372,22 +4613,31 @@ def main() -> int:
                                 "command": pending.get("command"),
                                 "post_state": None,
                                 "accepted": False,
+                                "command_confirmation": command_channel.confirmation(),
                                 "error": message.get("error"),
+                                "recovery": recovery.snapshot(),
                             },
                         )
                         pending = None
-                    # Error packets contain no observation. Refresh before
-                    # offering any recovery action; the previous screen can
-                    # already have closed. All commands have one writer here.
-                    protocol_error = str(message.get("error"))
+                    # Every failure refreshes once. Recovery decides whether
+                    # the new observation resumes decisions or requires a
+                    # human; STATE failure stops in CommandChannel above.
+                    write_event({"event": "command_recovery", "run_id": run_id, "at": now_iso(),
+                                 "command_confirmation": command_channel.confirmation(),
+                                 "recovery": recovery.snapshot()})
                     current_message = None
-                    if policy.runtime == "remote_api":
-                        policy.api.pending = None
-                    print("STATE", flush=True)
+                    send_command("STATE")
                     continue
 
                 if not message.get("ready_for_command"):
                     continue
+                if command_channel.accepted_command is not None:
+                    # Success belongs to the transport acknowledgment, not
+                    # to a pending trace. START and internal continuations
+                    # also reopen the budget; queries and submission do not.
+                    recovery.gameplay_accepted()
+                else:
+                    recovery.observation_refreshed()
 
                 if run_config is not None and message.get("in_game") and str(game_state(message).get("screen_type")) == "SHOP_SCREEN":
                     key = shop_visit_key(message)
@@ -4410,7 +4660,7 @@ def main() -> int:
                 if pending is not None and pending.get("action", {}).get("execution"):
                     continuation = advance_semantic_execution(pending, message)
                     if continuation is not None:
-                        print(continuation, flush=True)
+                        send_command(continuation)
                         continue
 
                 if pending is not None:
@@ -4442,6 +4692,7 @@ def main() -> int:
                         "command": pending.get("command"),
                         "post_state": trace_state(message),
                         "accepted": True,
+                        "command_confirmation": command_channel.confirmation(),
                         "stable_after_action": not smoke_bomb_used,
                         "terminal": game_state(message).get("screen_type") in {"GAME_OVER", "VICTORY"},
                     }
@@ -4727,7 +4978,7 @@ def main() -> int:
                         # Do not ask the model about the acknowledgement
                         # state: it can still be the pre-escape combat screen.
                         current_message = None
-                        print("STATE", flush=True)
+                        send_command("STATE")
                         continue
                     if smoke_bomb_escape_in_progress(message):
                         remaining = float(smoke_bomb_transition["deadline"]) - time.monotonic()
@@ -4740,7 +4991,7 @@ def main() -> int:
                             )
                             time.sleep(delay)
                             current_message = None
-                            print("STATE", flush=True)
+                            send_command("STATE")
                             continue
                         smoke_bomb_timeout_error = (
                             "烟雾弹逃跑动画在 15 秒后仍停留在原战斗；已暂停自动执行，请确认游戏界面后手动操作。"
@@ -4773,7 +5024,7 @@ def main() -> int:
                     # not leak the previous run's action history into it.
                     action_history.clear()
                     declined_card_reward_keys.clear()
-                if online_restart_config is not None:
+                if online_restart_config is not None and recovery.decision_error is None:
                     if message.get("in_game"):
                         exit_actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
                         exit_action = next(
@@ -4793,10 +5044,10 @@ def main() -> int:
                                 declined_card_reward_keys,
                             )
                             step_id += 1
-                            print(str(exit_action["command"]), flush=True)
+                            send_command(str(exit_action["command"]))
                             continue
                         print("online RL waiting for terminal transition", file=sys.stderr, flush=True)
-                        print("STATE", flush=True)
+                        send_command("STATE")
                         continue
                     restart_action = {
                         "id": "START_RUN",
@@ -4812,9 +5063,9 @@ def main() -> int:
                     online_restart_config = None
                     command = begin_run(restart_action, "remote_online_rl")
                     write_event({"event": "online_rl_auto_restart", "run_id": run_id, "at": now_iso()})
-                    print(command, flush=True)
+                    send_command(command)
                     continue
-                if prompt_evolution_restart_config is not None:
+                if prompt_evolution_restart_config is not None and recovery.decision_error is None:
                     if message.get("in_game"):
                         exit_actions = semantic_actions(message, visited_shop_rooms, declined_card_reward_keys)
                         exit_action = next(
@@ -4834,10 +5085,10 @@ def main() -> int:
                                 declined_card_reward_keys,
                             )
                             step_id += 1
-                            print(str(exit_action["command"]), flush=True)
+                            send_command(str(exit_action["command"]))
                             continue
                         print("prompt evolution waiting for terminal transition", file=sys.stderr, flush=True)
-                        print("STATE", flush=True)
+                        send_command("STATE")
                         continue
                     restart_action = {
                         "id": "START_RUN",
@@ -4853,7 +5104,7 @@ def main() -> int:
                     prompt_evolution_restart_config = None
                     command = begin_run(restart_action, "prompt_evolution")
                     write_event({"event": "prompt_evolution_auto_restart", "run_id": run_id, "at": now_iso()})
-                    print(command, flush=True)
+                    send_command(command)
                     continue
                 if policy.runtime == "remote_api" and run_id is None and message.get("in_game"):
                     # Attaching mid-run is allowed, but is explicitly partial
@@ -4891,7 +5142,7 @@ def main() -> int:
                     bridge,
                     message,
                     run_id,
-                    error=smoke_bomb_timeout_error or protocol_error,
+                    error=smoke_bomb_timeout_error or recovery.decision_error,
                     policy=policy,
                     teacher=teacher,
                     run_config=run_config,
@@ -4902,7 +5153,6 @@ def main() -> int:
                 )
                 if result is None:
                     return 0
-                protocol_error = None
                 command, action, decision = result
                 if action.get("kind") == "start_run":
                     collection_mode = "codex" if config["framework"]["control_mode"] == "codex" else (
@@ -4912,11 +5162,14 @@ def main() -> int:
                             )
                         ))
                     )
-                    print(begin_run(action, collection_mode), flush=True)
+                    send_command(begin_run(action, collection_mode))
                     pending = None
                 elif command == "STATE":
+                    if action.get("requested_by") == "human":
+                        recovery.request_read_only_refresh()
+                        discard_model_candidates(policy)
                     pending = None
-                    print(command, flush=True)
+                    send_command(command)
                 else:
                     pending = make_pending(
                         message,
@@ -4930,11 +5183,30 @@ def main() -> int:
                         declined_card_reward_keys,
                     )
                     step_id += 1
-                    print(command, flush=True)
+                    send_command(command)
     except GameDisconnected as exc:
+        if pending is not None:
+            write_trace(dict(pending, session_id=session_id, post_state=None, accepted=None,
+                             error=str(exc), command_confirmation=command_channel.confirmation(),
+                             execution_status="unknown"))
         print(f"controller stopped: {exc}", file=sys.stderr, flush=True)
-        write_event({"event": "controller_disconnected", "run_id": run_id, "at": now_iso(), "reason": str(exc)})
-        return 0
+        protocol_failed = isinstance(exc, CommandProtocolFailure)
+        write_event({"event": "controller_protocol_failure" if protocol_failed else "controller_disconnected",
+                     "run_id": run_id, "at": now_iso(), "reason": str(exc),
+                     "command_confirmation": command_channel.confirmation()})
+        if protocol_failed:
+            if policy.runtime == "remote_api":
+                policy.api.pending = None
+            # Never wait for a new client while shutting down. Existing UI
+            # clients already understand shutdown; the failure prefix also
+            # keeps the Overlay's close handler from hiding the reason.
+            if bridge.connection is not None:
+                try:
+                    bridge.send({"type": "shutdown", "message": f"连接失败：通信协议失败，controller 已停止。{exc}",
+                                 "error": str(exc), "command_confirmation": command_channel.confirmation()})
+                except (OSError, GameDisconnected):
+                    pass
+        return 1 if protocol_failed else 0
     except KeyboardInterrupt:
         print("controller interrupted", file=sys.stderr, flush=True)
         return 0

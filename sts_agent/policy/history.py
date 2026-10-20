@@ -29,7 +29,7 @@ def _entity(value: Any) -> dict[str, Any] | None:
     # Stable public identity/effect, not transient choice aliases or Java UUIDs.
     fields = ("id", "name", "upgrades", "type", "cost", "cost_for_turn", "description", "price",
               "final_single_hit_damage", "final_block", "damage", "block", "hit_count",
-              "reward_id", "reward_type", "gold", "amount", "x", "y")
+              "reward_id", "reward_ref", "reward_type", "gold", "amount", "x", "y")
     result = {key: value[key] for key in fields if key in value}
     for key in ("card", "relic", "potion"):
         child = _entity(value.get(key))
@@ -54,7 +54,7 @@ def _identity(value: Any) -> dict[str, Any]:
     """Historical identity, not an entity's attributes or effect description."""
     if not isinstance(value, dict):
         return {}
-    result = {key: value[key] for key in ("id", "name", "upgrades", "reward_id", "reward_type")
+    result = {key: value[key] for key in ("id", "name", "upgrades", "reward_id", "reward_ref", "reward_type")
               if value.get(key) is not None}
     for key in ("card", "relic", "potion"):
         if child := _identity(value.get(key)):
@@ -70,7 +70,7 @@ def compact_history_step(item: dict[str, Any]) -> dict[str, Any]:
     ) if key in item}
     raw = item.get("details") or {}
     details = {key: copy.deepcopy(raw[key]) for key in (
-        "choice_text", "selection_mode", "source_reward_id", "board_position",
+        "choice_text", "selection_mode", "source_reward_id", "source_reward_ref", "board_position",
     ) if raw.get(key) is not None}
     for key in ("object", "confirmation_card", "known_card_at_position"):
         if entity := _identity(raw.get(key)):
@@ -177,9 +177,6 @@ def history_step_text(item: dict[str, Any]) -> str:
         action += f" → 敌人{index if index is not None else '?'}" + (f"（{name}）" if name else "")
     if origin := _name(context.get("source")):
         notes.append(f"由{origin}触发")
-    reward = details.get("source_reward_id") or (details.get("object") or {}).get("reward_id")
-    if reward is not None:
-        notes.append(f"奖励ID={reward}")
     if step.get("role"):
         notes.append(step["role"])
     before, after = step.get("screen_before"), step.get("screen_after")
@@ -238,7 +235,7 @@ def action_details(pre: dict[str, Any], action: dict[str, Any], raw: dict[str, A
     if target is not None:
         monster = _entity(_at(combat.get("monsters"), target)) or {}
         details["target"] = {"index": target, **monster}
-    for key in ("selection_mode", "selection_instruction", "selection_reason", "source_reward_id"):
+    for key in ("selection_mode", "selection_instruction", "selection_reason", "source_reward_id", "source_reward_ref"):
         if content.get(key) is not None:
             details[key] = copy.deepcopy(content[key])
     if not details.get("selection_mode"):

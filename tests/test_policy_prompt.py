@@ -10,6 +10,21 @@ from tests.test_trajectory_assembler import combat_state
 
 
 class PolicyPromptTests(unittest.TestCase):
+    def test_plain_text_option_preserves_existing_prompts_for_each_layout(self) -> None:
+        observation = {"screen_type": "EVENT", "current_hp": 60,
+                       "screen_state": {"event_name": "示例事件", "body_text": "选择一个选项。"}}
+        actions = [{"id": "A1", "label": "离开"}]
+        for template in policy_server.PROMPT_TEMPLATES:
+            with self.subTest(template=template):
+                self.assertEqual(
+                    policy_server.build_scoring_prompt(observation, actions, template),
+                    policy_server.build_scoring_prompt(observation, actions, template, prompt_format="plain_text"),
+                )
+
+    def test_markdown_draft_cannot_silently_render_as_plain_text(self) -> None:
+        with self.assertRaisesRegex(ValueError, "markdown.*under development"):
+            policy_server.build_scoring_prompt({}, [{"id": "A1", "label": "继续"}], prompt_format="markdown")
+
     def test_checked_in_preview_is_the_real_assembled_prompt(self) -> None:
         path = Path(__file__).resolve().parents[1] / "doc" / "POLICY_PROMPT_PREVIEW.md"
         self.assertEqual(path.read_text(encoding="utf-8").rstrip(), preview_markdown().rstrip())
@@ -88,7 +103,7 @@ class PolicyPromptTests(unittest.TestCase):
         )
         self.assertIn("当前牌组", rendered)
         self.assertIn("数量=5", rendered)
-        self.assertIn("最终格挡=5", rendered)
+        self.assertIn("当前牌面格挡=5", rendered)
         self.assertIn("最近动作", rendered)
         self.assertNotIn('"deck"', rendered)
 

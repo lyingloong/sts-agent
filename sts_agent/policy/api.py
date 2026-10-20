@@ -20,8 +20,10 @@ from typing import Any
 from urllib import error, request
 
 from sts_agent.config import load_agent_config
+from sts_agent.core.action_aliases import model_action_alias
 from sts_agent.evaluation.progress import METRIC_VERSION, ProgressTracker, aggregate_summaries
 from sts_agent.paths import PROJECT_ROOT
+from sts_agent.policy.formats import require_prompt_format
 from sts_agent.policy.local_qwen import build_scoring_prompt
 from sts_agent.policy.ssh_tunnel import SshTunnel
 
@@ -38,6 +40,7 @@ class ApiPolicyClient:
         self.root, self.config = root, config
         policy = config["policy"]
         self.settings = policy["api"]
+        self.prompt_format = require_prompt_format(self.settings["prompt_format"])
         self.model = policy["model"]["base"]
         self.screens = tuple(policy["request"]["screens"])
         self.enabled = policy["enabled"]
@@ -149,8 +152,9 @@ class ApiPolicyClient:
             self._log("stale_action_discarded", old_state_key=previous_key, new_state_key=state_key,
                       request_id=previous["api"]["request_id"])
         aliases = {f"A{i}": action for i, action in enumerate(actions, 1)}
-        model_actions = [{"id": alias, "label": str(action.get("label") or action.get("command") or alias)} for alias, action in aliases.items()]
-        prompt = build_scoring_prompt(observation, model_actions, self.settings["prompt_template"])
+        model_actions = [model_action_alias(action, alias) for alias, action in aliases.items()]
+        prompt = build_scoring_prompt(observation, model_actions, self.settings["prompt_template"],
+                                      prompt_format=self.prompt_format)
         messages = [{"role": "user", "content": prompt}]
         template = {"enable_thinking": self.settings["thinking"]}
         self.request_id += 1

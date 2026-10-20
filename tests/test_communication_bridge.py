@@ -86,7 +86,8 @@ class CommunicationBridgeTests(unittest.TestCase):
             self.assertTrue(row["usable_for_sft"])
             self.assertEqual(row["selected_action_id"], "CHOOSE:index=1")
             self.assertEqual(row["raw_message_before"]["recorder_segment_id"], "a")
-            self.assertEqual(row["training_policy_observation"]["screen_state"]["rewards"][1]["reward_id"], "b")
+            self.assertEqual(row["training_policy_observation"]["screen_state"]["rewards"][1]["reward_id"], "R2")
+            self.assertEqual(row["training_pre_state"]["screen_state"]["rewards"][1]["reward_id"], "b")
 
     def test_explicit_state_id_from_other_segment_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

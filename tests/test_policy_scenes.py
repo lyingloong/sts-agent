@@ -64,6 +64,12 @@ class PolicySceneTests(unittest.TestCase):
             prompt = local_qwen.build_scoring_prompt(obs, self.actions)
             self.assertIn("选牌后的确认界面", prompt)
 
+    def test_grid_communication_confirmation_flags_override_selection_purpose(self):
+        for flag in ("confirm_up", "confirm_screen_up", "just_for_confirming"):
+            observation = {"screen_type": "GRID", "screen_state": {"selection_mode": "UPGRADE", flag: True}}
+            with self.subTest(flag=flag):
+                self.assertEqual(scene_key(observation), "GRID_CONFIRM")
+
     def test_relic_selection_is_not_regular_reward_or_purge(self):
         for screen in ("GRID", "CARD_REWARD"):
             obs = {"screen_type": screen, "room_phase": "COMBAT",
@@ -75,10 +81,10 @@ class PolicySceneTests(unittest.TestCase):
         obs = {"screen_type": "NONE", "room_phase": "COMBAT"}
         ranked = local_qwen.build_prompt(obs, self.actions, 3)
         self.assertIn('"ranked_action_ids"', ranked)
-        self.assertNotIn("不要输出 JSON", ranked)
+        self.assertNotIn("不要输出JSON", ranked)
         self.assertNotIn("只能从合法动作中选择一个", ranked)
         single = local_qwen.build_scoring_prompt(obs, self.actions)
-        self.assertIn("不要输出 JSON", single)
+        self.assertIn("不要输出JSON", single)
         self.assertNotIn("ranked_action_ids", single)
 
     def test_combat_choices_keep_battle_but_not_map(self):

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +126,7 @@ def build_bundle(input_path: Path, output_path: Path, include_traces: bool = Fal
 
     manifest: dict[str, Any] = {
         "schema_version": "sts-training-bundle-0.1",
-        "created_at_utc": datetime.now(UTC).isoformat(),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "repository": git_metadata(PROJECT_ROOT),
         "export": {
             "tool": "sts_agent.learning.training_bundle",

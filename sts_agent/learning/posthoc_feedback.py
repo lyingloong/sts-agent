@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +51,7 @@ class PosthocFeedbackError(RuntimeError):
 
 
 def now_utc() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def compact_text(value: Any, limit: int) -> str:

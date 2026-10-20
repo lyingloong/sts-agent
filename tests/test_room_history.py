@@ -195,7 +195,7 @@ class RoomHistoryTests(unittest.TestCase):
         self.assertEqual(context["event_opening"]["body_text"], "两张相同牌配对后加入牌组。")
         self.assertEqual(observation["screen_state"]["match_game"]["board"][0]["card"]["name"], "痛击")
         prompt = build_scoring_prompt(observation, [{"id": "A1", "label": "翻牌"}])
-        self.assertIn("更早的10步未在本次房间历史窗口中显示", prompt)
+        self.assertIn("已省略更早的10步", prompt)
         self.assertIn("痛击", prompt)
 
     def test_history_has_no_recursive_observation_or_map_graph(self):
@@ -304,7 +304,7 @@ class RoomHistoryTests(unittest.TestCase):
             (message("SHOP_SCREEN", room="ShopRoom", choice_list=["金刚杵"],
                      screen_state={"relics": [{"id": "Vajra", "name": "金刚杵", "price": 150}]}), "购买金刚杵"),
             (message("BOSS_REWARD", choice_list=["星盘"], screen_state={"relics": [{"id": "Astrolabe", "name": "星盘"}]}), "选择Boss遗物：星盘"),
-            (message("COMBAT_REWARD", choice_list=["card"], screen_state={"rewards": [{"reward_type": "CARD", "reward_id": "r1"}]}), "打开卡牌奖励（奖励ID=r1）"),
+            (message("COMBAT_REWARD", choice_list=["card"], screen_state={"rewards": [{"reward_type": "CARD", "reward_id": "r1"}]}), "打开卡牌奖励"),
         ]
         for pre, expected in cases:
             with self.subTest(expected=expected):

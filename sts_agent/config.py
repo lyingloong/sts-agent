@@ -11,6 +11,7 @@ from typing import Any
 
 from sts_agent.core.modes import MODE_FRAMEWORKS, resolve_framework_mode
 from sts_agent.paths import PROJECT_ROOT
+from sts_agent.policy.formats import DEFAULT_PROMPT_FORMAT, require_prompt_format
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -61,8 +62,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "python": "auto",
         },
         "remote": {
-            "ssh_host": "linke84090",
-            "project_root": "/data/wanghao/sts-agent",
+            "ssh_host": "gpu-server",
+            "project_root": "/srv/sts-agent",
             "python": ".venv/bin/python",
             "online_rl_config": "config/online_rl.json",
             "connect_timeout_seconds": 30.0,
@@ -90,6 +91,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "temperature": 0.0,
             "thinking": False,
             "max_output_tokens": 64,
+            "prompt_format": DEFAULT_PROMPT_FORMAT,
             "prompt_template": "canonical",
             "output_dir": "data/experiments/baseline",
             "serving": {
@@ -434,6 +436,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("policy.api.max_retries must be an integer from 0 to 5")
     if api["prompt_template"] not in {"canonical", "state_first", "decision_first"}:
         raise ConfigError("policy.api.prompt_template is invalid")
+    try:
+        require_prompt_format(api["prompt_format"])
+    except ValueError as exc:
+        raise ConfigError(f"policy.api.prompt_format: {exc}") from exc
     serving = api["serving"]
     if serving["backend"] not in {"vllm", "transformers"}:
         raise ConfigError("policy.api.serving.backend must be 'vllm' or 'transformers'")

@@ -21,7 +21,7 @@ Commit and push the code, then on the training machine pull it and create the
 machine-local online config:
 
 ```bash
-cd /data/wanghao/sts-agent
+cd /srv/sts-agent
 cp config/online_rl.example.json config/online_rl.json
 ```
 
@@ -54,14 +54,14 @@ the relevant mode:
   "enabled": true,
   "runtime": "remote_inference",
   "model": {
-    "base": "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
-    "initial_adapter": "/data/wanghao/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
+    "base": "/srv/sts-agent/models/base/Qwen3-0.6B",
+    "initial_adapter": "/srv/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
     "initial_policy_version": "sft-v0-r001",
     "hub_endpoint": "https://huggingface.co"
   },
   "remote": {
-    "ssh_host": "linke84090",
-    "project_root": "/data/wanghao/sts-agent",
+    "ssh_host": "gpu-server",
+    "project_root": "/srv/sts-agent",
     "python": ".venv/bin/python",
     "online_rl_config": "config/online_rl.json",
     "connect_timeout_seconds": 30.0,
@@ -71,7 +71,7 @@ the relevant mode:
 ```
 
 The controller launches the SSH worker during its pre-game handshake. It must
-therefore be possible to run `ssh linke84090` without an interactive password
+therefore be possible to run `ssh gpu-server` without an interactive password
 prompt. SSH agent/key setup belongs to the local machine; no private key path
 is stored in this repository.
 
@@ -187,7 +187,7 @@ Before using a real model, test the remote command and JSONL protocol without
 allocating a GPU:
 
 ```bash
-cd /data/wanghao/sts-agent
+cd /srv/sts-agent
 cp config/online_rl.example.json /tmp/sts-online-mock.json
 .venv/bin/python -m sts_agent.learning.online_rl.worker \
   --config /tmp/sts-online-mock.json \
