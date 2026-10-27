@@ -180,6 +180,7 @@ doc/             架构、协议和实验说明
 - [教师 SFT 与 GRPO](doc/TEACHER_SFT_GRPO.md)
 - [Prompt Evolution](doc/PROMPT_EVOLUTION.md)
 - [研究计划（工作稿）](doc/PAPER_PLAN.md)
+- [实验执行交接](doc/EXPERIMENT_HANDOFF.md)
 - [变更记录](CHANGELOG.md)
 - [Agent 协作约定](AGENTS.md)
 

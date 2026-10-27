@@ -68,7 +68,8 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 
 入口为 `sts_agent.commands.evaluate_baseline`。它只是本机测评协调客户端，
 不选择局内动作、不训练、不部署或重载远端模型。局内仍由现有 controller、
-同一模型和同一套环境自动规则处理。
+同一模型和同一套环境自动规则处理。把批次交给其他人或另一个 agent 执行时，
+按 [实验执行交接](EXPERIMENT_HANDOFF.md) 的检查清单和异常表操作。
 
 测试集位于 [`config/evaluation/a0_ironclad_10.json`](../config/evaluation/a0_ironclad_10.json)：
 `a0-ironclad-fixed10-v1`，A0 铁甲战士，10 个不同的固定种子，各跑一次。
