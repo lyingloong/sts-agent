@@ -40,8 +40,8 @@ class CloudPolicyTests(unittest.TestCase):
     def test_profile_selects_hosted_provider_without_tunnel(self):
         api = self.config["policy"]["api"]
         self.assertEqual(api["provider"], "openai_compatible")
-        self.assertEqual(api["rpm_limit"], 20)
-        self.assertAlmostEqual(self.client.min_interval, 3.0)
+        self.assertEqual(api["rpm_limit"], 18)
+        self.assertAlmostEqual(self.client.min_interval, 60.0 / 18.0)
         self.assertIsNone(self.client.tunnel)
         self.assertEqual(self.client.base_url, "https://api.llm.ustc.edu.cn/v1")
 

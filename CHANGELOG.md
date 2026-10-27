@@ -24,6 +24,8 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 - Config validation is provider-aware: hosted profiles no longer need local ports or serving
   settings, and `policy.api.max_retries` accepts up to 10 attempts.
+- Hosted runs pace at 18 RPM to stay inside USTC's fixed 60-second window of 20 requests, and the
+  fixed suites allow two hours per run so a slow hosted game is not aborted.
 - The paper plan targets a full-game benchmark plus an inference-time study instead of human
   trajectory collection and SFT, which are no longer on the critical path.
 

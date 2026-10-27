@@ -14,7 +14,7 @@
   "limits": {
     "connection_timeout_seconds": 30,
     "idle_timeout_seconds": 600,
-    "run_timeout_seconds": 3600,
+    "run_timeout_seconds": 7200,
     "max_actions_per_run": 4000
   },
   "output_dir": "data/experiments/baseline_batches"

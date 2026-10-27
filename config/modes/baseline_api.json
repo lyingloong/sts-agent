@@ -13,7 +13,7 @@
       "provider": "openai_compatible",
       "base_url": "https://api.llm.ustc.edu.cn/v1",
       "api_key_file": "ustc_api.txt",
-      "rpm_limit": 20,
+      "rpm_limit": 18,
       "timeout_seconds": 120,
       "max_retries": 5,
       "retry_backoff_seconds": 5,

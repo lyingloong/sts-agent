@@ -230,7 +230,7 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 | `policy.api.provider` | `vllm`（默认）或 `openai_compatible` |
 | `policy.api.base_url` | 含版本前缀的根地址，如 `https://api.llm.ustc.edu.cn/v1`；请求路径为 `/chat/completions` 与 `/models` |
 | `policy.api.api_key_file` | 项目根下被忽略的 key 文件，支持 `key: ...` 或裸 key |
-| `policy.api.rpm_limit` | 每分钟请求上限；20 表示相邻请求起点至少间隔 3 秒（推理耗时计入其中），0 表示不限速 |
+| `policy.api.rpm_limit` | 每分钟请求上限；当前 profile 为 18（约 3.3 秒），给 USTC 的固定 60 秒窗口留边界余量；0 表示不限速 |
 | `policy.api.extra_body` | 原样并入请求体，用于厂商参数，如 `{"enable_thinking": false}` |
 | `policy.api.retry_backoff_seconds` / `retry_max_backoff_seconds` | 429/5xx 的指数退避与上限，存在 `Retry-After` 时优先遵守 |
 
@@ -242,9 +242,9 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 - 每次请求前按 `rpm_limit` 限速；429/5xx 自动重试，连续失败才暂停整局。
 
 实测（USTC，2026-10-27）：`qwen3.8-chat`、`deepseek-flash`、`glm-5.3-flash` 可用；
-`qwen3.8-chat` 在 3.4k token 输入下 p50 约 1.4 秒。首个请求可能是冷启动（数十秒），
-`timeout_seconds` 默认 120 秒。`smart/default`、`smart/reasoning` 是网关路由别名，
-响应不暴露实际后端，不能用于可复现测评。
+`qwen3.8-chat` 在 3.4k token 输入下空闲时 p50 约 1.4 秒，但整局负载下实测 p50 4.1 秒、
+p95 24.7 秒，且有逐步变慢的趋势。首个请求可能是冷启动（数十秒），`timeout_seconds` 默认 120 秒。
+`smart/default`、`smart/reasoning` 是网关路由别名，响应不暴露实际后端，不能用于可复现测评。
 
 接口自检：
 
