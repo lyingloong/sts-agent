@@ -17,6 +17,8 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 - Hosted OpenAI-compatible baseline (`baseline_api`): `ApiPolicyClient` gains a `provider` switch,
   bearer auth, `extra_body` passthrough, RPM throttling, `Retry-After`-aware retries and tolerant
   alias parsing; the USTC profile ships as `config/modes/baseline_api.json`.
+- Single-seed smoke suite (`config/evaluation/a0_ironclad_smoke.json`) for validating the hosted
+  path before a full batch.
 
 ### Changed
 

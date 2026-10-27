@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "suite_id": "a0-ironclad-smoke-v1",
+  "description": "单种子冒烟：先验证整局链路、云端重试与评测落盘，再跑完整 10 种子。",
+  "character": "IRONCLAD",
+  "ascension": 0,
+  "seed_generation": {
+    "method": "first seed of a0-ironclad-fixed10-v1",
+    "selection": "not selected using game outcomes"
+  },
+  "seeds": [
+    "RELGW3JE9KJ"
+  ],
+  "limits": {
+    "connection_timeout_seconds": 30,
+    "idle_timeout_seconds": 600,
+    "run_timeout_seconds": 3600,
+    "max_actions_per_run": 4000
+  },
+  "output_dir": "data/experiments/baseline_batches"
+}

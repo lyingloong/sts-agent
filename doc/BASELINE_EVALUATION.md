@@ -84,8 +84,9 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 
 ### 运行
 
-1. 准备远端常驻模型服务，本机 `agent.json.active_mode` 设为 `baseline_inference`。
-   模型与 API 参数仍只在该模式配置中维护，测试集不重复定义它们。
+1. 准备模型后端：远端 vLLM 用 `baseline_inference`，没有 GPU 时用托管的 `baseline_api`；
+   本机 `agent.json.active_mode` 必须与之一致。模型与 API 参数仍只在对应模式配置中维护，
+   测试集不重复定义它们。
 2. 重启游戏/controller，使新增批量协议生效，停在普通主菜单。
 3. 关闭 Overlay 和终端客户端。controller 只接一个客户端，批量脚本占用该连接；
    不要另开一个 controller，也不要在测评期间点击游戏。
@@ -95,9 +96,16 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 # 只校验并显示计划：不联网、不写结果、不开局
 .\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline --dry-run
 
+# 单种子冒烟（先用它验证链路，约 20 分钟）
+.\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline --suite config/evaluation/a0_ironclad_smoke.json
+
 # 完整运行 10 局
 .\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline
 ```
+
+托管 API 受请求频率限制（USTC 为 20 RPM，客户端按 3 秒间隔排队），单局约 17–20 分钟，
+10 种子约 3.5–4.5 小时；远端 vLLM 的实测则约为 12 分钟/局。首次调用可能是冷启动，
+可先运行 `python -m sts_agent.policy.api --mode baseline_api` 预热。
 
 可用 `--config`、`--suite` 指定其他配置文件，`--host/--port` 覆盖 controller 连接地址。
 已经在局内时脚本直接拒绝接管，不放弃/重置现有游戏。
@@ -195,6 +203,6 @@ Recorder 在动作入口、队列执行前、效果结算时主动调用 CM 发�
 CM 没有完整的命令 request ID，因此这个修复也不是事务锁；模型运行期间仍不要手动点击游戏。
 
 本地回归测试覆盖采集消息插入、单一 STATE 写出、错误后最新界面接管、恢复命令及终局胜负；
-Java smoke 覆盖标记作用域和实际补丁签名/编译。后续已实测第一幕自然死亡终局；
-批量协议另覆盖多局串行、重复消息、失联/超时/暂停、种子与终局校验、正常解除连接，
-但完整 10 种子批次尚未实际执行。
+Java smoke 覆盖标记作用域和实际补丁签名/编译。批量协议另覆盖多局串行、重复消息、失联/超时/暂停、
+种子与终局校验、正常解除连接。固定 10 种子批次已于 2026-10-12 完整执行（10/10 终局，
+平均进度分 27.33，通关率 0）；托管 API 模式的单局与批次链路尚待实机验证。
