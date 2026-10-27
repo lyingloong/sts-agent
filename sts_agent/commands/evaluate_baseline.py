@@ -26,6 +26,7 @@ from typing import Any, Callable
 from sts_agent.config import ConfigError, load_agent_config
 from sts_agent.core.modes import MODE_FRAMEWORKS
 from sts_agent.evaluation.progress import aggregate_summaries
+from sts_agent.evaluation.reuse import expected_fingerprint, find_reusable_runs
 from sts_agent.paths import PROJECT_ROOT
 from sts_agent.runtime.batch_client import PROTOCOL_VERSION
 
@@ -213,7 +214,7 @@ class BatchReport:
 
     def __init__(self, root: Path, suite: dict, suite_path: Path, config_path: Path,
                  host: str, port: int, clock: Callable[[], float] = time.monotonic,
-                 expected_policy: dict | None = None):
+                 expected_policy: dict | None = None, reused: dict[str, dict] | None = None):
         self.clock = clock
         self.started = clock()
         self.suite = copy.deepcopy(suite)
@@ -230,10 +231,27 @@ class BatchReport:
                          "controller": {"host": host, "port": port}, "model_manifest": None,
                          "experiment_dir": None, "status": "in_progress", "failure": None,
                          "suite_sha256": hashlib.sha256(json.dumps(suite, sort_keys=True).encode()).hexdigest()}
-        self.rows = [{"index": i + 1, "seed": seed, "status": "pending", "run_id": None,
-                      "internal_seed": None, "attempted_at": None, "started_at": None, "finished_at": None,
-                      "elapsed_seconds": None, "summary": None, "api_performance": None,
-                      "artifacts": None, "failure": None} for i, seed in enumerate(suite["seeds"])]
+        self.rows = []
+        reused = reused or {}
+        for i, seed in enumerate(suite["seeds"]):
+            row = {"index": i + 1, "seed": seed, "status": "pending", "run_id": None,
+                   "internal_seed": None, "attempted_at": None, "started_at": None, "finished_at": None,
+                   "elapsed_seconds": None, "summary": None, "api_performance": None,
+                   "artifacts": None, "failure": None}
+            item = reused.get(seed)
+            if item is not None:
+                summary = item["summary"]
+                row.update(status="completed", run_id=item.get("run_id"),
+                           internal_seed=(summary.get("run_config") or {}).get("internal_seed"),
+                           attempted_at=item.get("finished_at"), started_at=item.get("finished_at"),
+                           finished_at=item.get("finished_at"), summary=summary,
+                           api_performance=item.get("api_performance"), artifacts=item.get("artifacts"),
+                           reused_from={"batch": item.get("batch"), "suite_id": item.get("suite_id"),
+                                        "run_id": item.get("run_id")})
+            self.rows.append(row)
+        self.manifest["reused_runs"] = [{"seed": row["seed"], "run_id": row["run_id"],
+                                         **(row.get("reused_from") or {})}
+                                        for row in self.rows if row.get("reused_from")]
         self._write_json("suite.json", self.suite)
         self.save()
 
@@ -291,6 +309,7 @@ class BatchReport:
     def save(self) -> None:
         completed = {row["run_id"]: row["summary"] for row in self.rows if row["status"] == "completed"}
         evaluation = aggregate_summaries(completed)
+        reused_rows = [row for row in self.rows if row.get("reused_from")]
         evaluation.update(planned_runs=len(self.rows), completed_runs=len(completed),
                           runs_attempted=sum(row["attempted_at"] is not None for row in self.rows),
                           runs_started=sum(row["started_at"] is not None for row in self.rows),
@@ -298,12 +317,18 @@ class BatchReport:
                           unfinished_runs=sum(row["started_at"] is not None and row["status"] != "completed" for row in self.rows),
                           pending_runs=sum(row["status"] == "pending" for row in self.rows),
                           technical_aborts=sum(row["status"] == "technical_abort" for row in self.rows),
+                          reused_runs=len(reused_rows),
+                          new_runs=sum(row["status"] == "completed" for row in self.rows) - len(reused_rows),
                           batch_status=self.manifest["status"],
                           elapsed_seconds=round(self.clock() - self.started, 3))
         # Full prompts make requests.jsonl large. Never rescan it for every
         # progress packet; update the cached aggregate only at run boundaries.
         if self.completed_performance is not None:
             evaluation["api_performance"] = self.completed_performance
+            if reused_rows:
+                evaluation["api_performance"]["scope"] = "new runs in this batch; reused rows keep their own api_performance"
+        elif reused_rows:
+            evaluation["api_performance"] = {"scope": "reused rows only; see each row in results.json"}
         self._write_json("manifest.json", self.manifest)
         self._write_json("results.json", {"schema_version": 1, "suite_id": self.suite["suite_id"],
                                           "status": self.manifest["status"], "results": self.rows})
@@ -348,12 +373,21 @@ class BatchStateMachine:
                  clock: Callable[[], float] = time.monotonic):
         self.suite, self.report, self.expected_model, self.clock = suite, report, expected_model, clock
         self.phase = "initial"
-        self.index = 0
+        self.order = [i for i, row in enumerate(report.rows) if row.get("status") != "completed"]
+        self.position = 0
         self.run_id: str | None = None
         self.previous_run_id: str | None = None
         self.started: float | None = None
         self.last_packet = clock()
         self.seen_run_ids: set[str] = set()
+
+    @property
+    def index(self) -> int:
+        """Row index of the current pending seed (absolute in the full suite)."""
+
+        if not self.order:
+            raise BatchError("batch has no pending runs")
+        return self.order[min(self.position, len(self.order) - 1)]
 
     @property
     def done(self) -> bool:
@@ -546,14 +580,15 @@ class BatchStateMachine:
         row.update(status="completed", finished_at=utc_now(), elapsed_seconds=round(self.clock() - self.started, 3),
                    artifacts=self.report.artifacts(self.run_id),
                    api_performance=api_performance(self.report.experiment_dir / "requests.jsonl", {self.run_id}))
-        self.index += 1
+        self.position += 1
         self.started = None
         self.report.completed_performance = api_performance(
             self.report.experiment_dir / "requests.jsonl",
-            {completed["run_id"] for completed in self.report.rows if completed["status"] == "completed"},
+            {completed["run_id"] for completed in self.report.rows if completed["status"] == "completed"
+             and not completed.get("reused_from")},
         )
         self.report.save()
-        if self.index == len(self.suite["seeds"]):
+        if self.position == len(self.order):
             self.phase = "detaching"
             return [{"type": "baseline_batch_detach", "protocol_version": PROTOCOL_VERSION}]
         return self._start(baseline)
@@ -667,6 +702,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--dry-run", action="store_true", help="validate/print the complete plan without connecting or writing files")
+    parser.add_argument("--no-reuse", action="store_true",
+                        help="re-run seeds that already have a completed matching run instead of reusing them")
     args = parser.parse_args(argv)
     try:
         root = PROJECT_ROOT
@@ -682,15 +719,39 @@ def main(argv: list[str] | None = None) -> int:
         port = args.port if args.port is not None else config["server"]["port"]
         if not isinstance(host, str) or not host.strip() or type(port) is not int or not 1 <= port <= 65535:
             raise BatchError("host must be non-empty and port must be an integer from 1 to 65535")
+        prompt_code_sha256 = hashlib.sha256(
+            (Path(__file__).resolve().parents[1] / "policy" / "local_qwen.py").read_bytes()).hexdigest()
+        reused: dict[str, dict] = {}
+        reuse_notes: list[dict] = []
+        if not args.no_reuse:
+            reused, reuse_notes = find_reusable_runs(
+                (root / suite["output_dir"]).resolve(), suite,
+                expected_fingerprint(config, prompt_code_sha256))
+        missing = [seed for seed in suite["seeds"] if seed not in reused]
         plan = {"suite_id": suite["suite_id"], "character": "IRONCLAD", "ascension": 0,
                 "seeds": suite["seeds"], "internal_seeds": [seed_to_internal(seed) for seed in suite["seeds"]],
                 "limits": suite["limits"], "controller": {"host": host, "port": port},
                 "model": config["policy"]["model"]["base"], "output_dir": str((root / suite["output_dir"]).resolve()),
-                "commands": [f"s IRONCLAD 0 {seed}" for seed in suite["seeds"]]}
+                "reused": [{"seed": seed, "batch": reused[seed]["batch"], "run_id": reused[seed]["run_id"],
+                            "progress_score": ((reused[seed]["summary"].get("evaluation") or {})
+                                               .get("progress_score"))}
+                           for seed in suite["seeds"] if seed in reused],
+                "to_run": missing,
+                "commands": [f"s IRONCLAD 0 {seed}" for seed in missing]}
+        if reuse_notes:
+            plan["ignored_batches"] = reuse_notes
         print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
         if args.dry_run:
             return 0
-        report = BatchReport(root, suite, suite_path, config_file, host, port, expected_policy=config["policy"])
+        report = BatchReport(root, suite, suite_path, config_file, host, port,
+                             expected_policy=config["policy"], reused=reused)
+        if not missing:
+            report.manifest.update(status="completed", finished_at=utc_now())
+            report.save()
+            print(f"Cohort already complete: {report.output_dir}")
+            print(json.dumps(aggregate_summaries({row["run_id"]: row["summary"] for row in report.rows
+                                                  if row["status"] == "completed"}), ensure_ascii=False))
+            return 0
         print(f"Batch report: {report.output_dir}\nController owns all game decisions. Use this as the only TCP client.", flush=True)
         return run_batch(suite, report, config["policy"]["model"]["base"], host, port, emit=lambda message: print(message, flush=True))
     except (BatchError, ConfigError, OSError) as exc:

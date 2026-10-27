@@ -82,9 +82,14 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 30 局在夜间实测约 6 小时（11.6 分钟/局），傍晚服务高峰可慢到 45 分钟/局；两个测试集共用
 7200 秒的单局预算。
 
-已经跑过前 10 个种子时，可以只补后 20 个：
+批次默认复用已完成的种子：运行 `a0_ironclad_30.json` 时，脚本会扫描 `output_dir` 下
+模型、revision、prompt 代码哈希和请求参数一致的历史批次，按种子复用终局且合格的对局，
+只启动缺失的种子；dry-run 会列出 `reused` 和 `to_run`，模型或提示词不同的批次会进入
+`ignored_batches` 并在计划中说明。需要强制重跑全部种子时加 `--no-reuse`。
+
+历史数据已经拆成 10 + 20 两批时，也可以用
 [`config/evaluation/a0_ironclad_20_cont.json`](../config/evaluation/a0_ironclad_20_cont.json)
-是 `a0-ironclad-fixed30-v1` 的第 11–30 个种子，跑完用下面的命令合并成一个 30 局 cohort：
+只补后 20 个，再手动合并：
 
 ```powershell
 .\.venv\Scripts\python.exe -m sts_agent.commands.merge_batches `
@@ -93,8 +98,7 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 ```
 
 合并要求两批模型一致、完成种子不重复；结果写到第一个批次目录的 `merged-evaluation.json`，
-同时保留每局的分数、最高层和胜负。这个拆分只用于已经跑过前 10 个种子的那一批
-`qwen3.8-chat`；后续模型一律直接跑 `a0_ironclad_30.json` 的 30 局全集，不再拆分合并。
+同时保留每局的分数、最高层和胜负。新模型直接跑 30 种子集即可，不需要拆分。
 
 普通固定种子游戏提供完整涅奥祝福，不受上一局是否到达第一幕 Boss 影响。
 这个结论已核查本机游戏/CommunicationMod 的实际逻辑；脚本不会改动角色历史或存档。

@@ -27,6 +27,9 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Changed
 
+- Baseline batches reuse completed seeds by default: a new run of the 30-seed suite detects rows
+  from earlier batches with the same model, revision, prompt-code hash and request settings and
+  only starts the missing seeds. `--no-reuse` forces a full replay.
 - Config validation is provider-aware: hosted profiles no longer need local ports or serving
   settings, and `policy.api.max_retries` accepts up to 10 attempts.
 - Hosted runs pace at 18 RPM to stay inside USTC's fixed 60-second window of 20 requests, and the
