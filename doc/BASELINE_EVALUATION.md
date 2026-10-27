@@ -82,6 +82,19 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 30 局在夜间实测约 6 小时（11.6 分钟/局），傍晚服务高峰可慢到 45 分钟/局；两个测试集共用
 7200 秒的单局预算。
 
+已经跑过前 10 个种子时，可以只补后 20 个：
+[`config/evaluation/a0_ironclad_20_cont.json`](../config/evaluation/a0_ironclad_20_cont.json)
+是 `a0-ironclad-fixed30-v1` 的第 11–30 个种子，跑完用下面的命令合并成一个 30 局 cohort：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.commands.merge_batches `
+  "data\experiments\baseline_batches\a0-ironclad-fixed10-v1-20261027-094011-62df426b" `
+  "data\experiments\baseline_batches\a0-ironclad-fixed20-cont-v1-<时间戳>-<后缀>"
+```
+
+合并要求两批模型一致、完成种子不重复；结果写到第一个批次目录的 `merged-evaluation.json`，
+同时保留每局的分数、最高层和胜负。
+
 普通固定种子游戏提供完整涅奥祝福，不受上一局是否到达第一幕 Boss 影响。
 这个结论已核查本机游戏/CommunicationMod 的实际逻辑；脚本不会改动角色历史或存档。
 但种子不会统一解锁进度或心脏开放条件：测试前应确认普通主菜单，保持相同游戏存档、

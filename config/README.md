@@ -38,7 +38,7 @@ python -c "from sts_agent.config import load_agent_config; c=load_agent_config()
 
 - `agent.json`：活动模式选择，以及所有模式共享的 controller 地址、录制接收地址、模型/API 连接信息和 Overlay 布局。Qwen 的 `policy.model.initial_adapter` 只维护一次；Teacher API key 只写在被 Git 忽略的 key 文件中。
 - `modes/*.json`：所选模式需要额外修改的参数。没有覆盖的字段使用 `sts_agent.config` 中经过校验的默认值。
-- `evaluation/a0_ironclad_10.json` / `evaluation/a0_ironclad_30.json`：独立的固定测试集，分别包含 10 和 30 个种子、角色/进阶、超时与动作预算、批次结果目录；30 种子集的前 10 个与 10 种子集相同。它们不是运行模式，也不重复定义模型或 prompt；批量脚本必须连接已经运行在 `baseline_inference` 或 `baseline_api` 的 controller。
+- `evaluation/a0_ironclad_10.json` / `evaluation/a0_ironclad_20_cont.json` / `evaluation/a0_ironclad_30.json`：独立的固定测试集，分别包含前 10 个、第 11–30 个、全部 30 个种子，另有 smoke 单种子集；它们不是运行模式，也不重复定义模型或 prompt。批量脚本必须连接已经运行在 `baseline_inference` 或 `baseline_api` 的 controller；10 + 20 两批可用 `sts_agent.commands.merge_batches` 合并。
 - `online_rl.json`：仅训练机上的在线 RL 实验参数，被 Git 忽略；结构见 [`online_rl.example.json`](online_rl.example.json) 和 [远端在线 RL 文档](../doc/REMOTE_ONLINE_RL.md)。
 
 模式加载后，内部仍生成统一的运行配置供 controller、Overlay、MCP 和训练组件使用；该运行时配置不需要手动编辑。JSON 有严格字段校验，未知字段会在启动时明确报错。

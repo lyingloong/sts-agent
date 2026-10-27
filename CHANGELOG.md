@@ -21,6 +21,9 @@ When the first tag is created, move the `[Unreleased]` section under that versio
   path before a full batch.
 - Fixed 30-seed suite (`config/evaluation/a0_ironclad_30.json`); its first ten seeds are exactly
   the fixed-10 suite, and the remaining twenty continue the same deterministic generator.
+- `sts_agent.commands.merge_batches` and `config/evaluation/a0_ironclad_20_cont.json`, so a
+  completed 10-seed batch plus the 20-seed continuation forms one 30-seed cohort without
+  re-running the first ten games.
 
 ### Changed
 

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "suite_id": "a0-ironclad-fixed20-cont-v1",
+  "description": "a0-ironclad-fixed30-v1 的后 20 个种子（第 11–30 个）。与前 10 个种子批次条件相同，可合并为 30 局汇总；技术中止不记为游戏死亡。",
+  "character": "IRONCLAD",
+  "ascension": 0,
+  "seed_generation": {
+    "method": "Python random.Random(20261012).getrandbits(63), then StS base-35 display encoding (charset without O)",
+    "selection": "eleventh through thirtieth seeds of a0-ironclad-fixed30-v1"
+  },
+  "seeds": [
+    "2E68S0D9KAXX4",
+    "M913JBX8FR7K",
+    "1N0KPJUVKJM5Q",
+    "2GGS60E605UQB",
+    "V5TPGQ11DUT9",
+    "AY7GMKKVYLX6",
+    "1GJ8GIWW57Y1U",
+    "7Y4FWYR4Y92G",
+    "XRAFCMS29670",
+    "RE1K9CLJ5Q0C",
+    "1JY1PH5ZVC3TN",
+    "1SDQP95CLDFLT",
+    "1P73NS16QEZNC",
+    "STBV404U0I27",
+    "1ZZHPDRBWB6IS",
+    "8DYZXXYHK5UQ",
+    "29AVPZJF9X2RH",
+    "1HF1TPS8NNVH0",
+    "2KXL2KPX6MXHH",
+    "6V2F8BXZ379G"
+  ],
+  "limits": {
+    "connection_timeout_seconds": 30,
+    "idle_timeout_seconds": 600,
+    "run_timeout_seconds": 7200,
+    "max_actions_per_run": 4000
+  },
+  "output_dir": "data/experiments/baseline_batches"
+}
