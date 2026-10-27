@@ -14,10 +14,15 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 - `AGENTS.md`, a short agent guide covering commands, invariants and the changelog/commit/push
   workflow, and this changelog.
 - `doc/PAPER_PLAN.md`, the research plan.
+- Hosted OpenAI-compatible baseline (`baseline_api`): `ApiPolicyClient` gains a `provider` switch,
+  bearer auth, `extra_body` passthrough, RPM throttling, `Retry-After`-aware retries and tolerant
+  alias parsing; the USTC profile ships as `config/modes/baseline_api.json`.
 
 ### Changed
 
-- The paper plan now targets a full-game benchmark plus an inference-time study instead of human
+- Config validation is provider-aware: hosted profiles no longer need local ports or serving
+  settings, and `policy.api.max_retries` accepts up to 10 attempts.
+- The paper plan targets a full-game benchmark plus an inference-time study instead of human
   trajectory collection and SFT, which are no longer on the critical path.
 
 ### Removed

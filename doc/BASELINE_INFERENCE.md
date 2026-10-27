@@ -206,9 +206,48 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 固定 SHA 校验、同模板 token 计数和单动作生成：253 输入 token，输出 `A1`，请求约 2.8 秒。
 该短请求仅是接口检查。之后已实测 A0 战士的正常死亡终局；最近一次完整自主局
 停在第一幕 Guardian（Floor 16），进度分 15，尚无通关证据。
-固定 10 种子批量入口已准备，尚未实际执行这整批测评；它将记录到达幕/楼层、进度分、
-通关与心脏结果、动作来源、请求延迟及技术故障。
+固定 10 种子批量入口已实际执行（2026-10-12）：10/10 正常终局、无人工接管，平均进度分
+27.33（σ 13.07），第一幕通过率 50%，第二/三幕 0%，通关率 0，p50 延迟约 2.0 秒。
+结果目录见 `data/experiments/baseline_batches/`。
 
 后续采用 Orak-style 进度分作为主指标，通关率作为辅助指标；具体公式、实验边界和
 论文/公开实现的区别见 [BASELINE_EVALUATION.md](BASELINE_EVALUATION.md)。计分器已接入 baseline 汇总，
 不改 RL 奖励；旧会话文件不自动回写。
+
+## 托管 API 模式（baseline_api）
+
+没有可用 GPU 时，用 `baseline_api` 连接任意 OpenAI 兼容网关：游戏、提示词、动作契约和评测链路
+都不变，只把后端从本机 vLLM 换成 HTTPS。
+
+```json
+"active_mode": "baseline_api"
+```
+
+参数在 [`config/modes/baseline_api.json`](../config/modes/baseline_api.json)。
+
+| 字段 | 说明 |
+| --- | --- |
+| `policy.api.provider` | `vllm`（默认）或 `openai_compatible` |
+| `policy.api.base_url` | 含版本前缀的根地址，如 `https://api.llm.ustc.edu.cn/v1`；请求路径为 `/chat/completions` 与 `/models` |
+| `policy.api.api_key_file` | 项目根下被忽略的 key 文件，支持 `key: ...` 或裸 key |
+| `policy.api.rpm_limit` | 每分钟请求上限；20 表示相邻请求至少间隔 3 秒，0 表示不限速 |
+| `policy.api.extra_body` | 原样并入请求体，用于厂商参数，如 `{"enable_thinking": false}` |
+| `policy.api.retry_backoff_seconds` / `retry_max_backoff_seconds` | 429/5xx 的指数退避与上限，存在 `Retry-After` 时优先遵守 |
+
+行为差异：
+
+- 不建 SSH 隧道，不调用 `/tokenize`；上下文超限由厂商返回 400，客户端将其视为硬失败而不是截断。
+- 不发送 `chat_template_kwargs`；思考开关通过 `extra_body` 传递。
+- 输出仍必须是一个当前合法别名；容忍引号或句末标点，但拒绝散文和 JSON 包装。
+- 每次请求前按 `rpm_limit` 限速；429/5xx 自动重试，连续失败才暂停整局。
+
+实测（USTC，2026-10-27）：`qwen3.8-chat`、`deepseek-flash`、`glm-5.3-flash` 可用；
+`qwen3.8-chat` 在 3.4k token 输入下 p50 约 1.4 秒。首个请求可能是冷启动（数十秒），
+`timeout_seconds` 默认 120 秒。`smart/default`、`smart/reasoning` 是网关路由别名，
+响应不暴露实际后端，不能用于可复现测评。
+
+接口自检：
+
+```powershell
+.\.venv\Scripts\python.exe -m sts_agent.policy.api --mode baseline_api
+```

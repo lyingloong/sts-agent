@@ -26,6 +26,7 @@ from sts_agent.paths import PROJECT_ROOT
 from sts_agent.policy.formats import require_prompt_format
 from sts_agent.policy.local_qwen import build_scoring_prompt
 from sts_agent.policy.ssh_tunnel import SshTunnel
+from sts_agent.policy.teacher import read_api_key
 
 
 def fingerprint(observation: dict, actions: list[dict], run_id: str | None) -> str:
@@ -40,6 +41,7 @@ class ApiPolicyClient:
         self.root, self.config = root, config
         policy = config["policy"]
         self.settings = policy["api"]
+        self.provider = str(self.settings.get("provider") or "vllm")
         self.prompt_format = require_prompt_format(self.settings["prompt_format"])
         self.model = policy["model"]["base"]
         self.screens = tuple(policy["request"]["screens"])
@@ -48,11 +50,20 @@ class ApiPolicyClient:
         self.output_dir = root / self.settings["output_dir"] / session
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.output_dir / "requests.jsonl"
-        self.base_url = f"http://127.0.0.1:{self.settings['local_port']}"
         self.opener = request.build_opener(request.ProxyHandler({}))
-        remote = policy["remote"]
-        self.tunnel = SshTunnel(remote["ssh_host"], self.settings["local_port"], self.settings["remote_port"],
-                                remote["connect_timeout_seconds"], self.output_dir / "ssh.log") if self.settings["ssh_tunnel"] else None
+        self.api_key: str | None = None
+        self._last_request_at = 0.0
+        if self.provider == "openai_compatible":
+            self.base_url = str(self.settings["base_url"]).rstrip("/")
+            self.tunnel = None
+            rpm_limit = int(self.settings.get("rpm_limit") or 0)
+            self.min_interval = 60.0 / rpm_limit if rpm_limit > 0 else 0.0
+        else:
+            self.base_url = f"http://127.0.0.1:{self.settings['local_port']}"
+            remote = policy["remote"]
+            self.tunnel = SshTunnel(remote["ssh_host"], self.settings["local_port"], self.settings["remote_port"],
+                                    remote["connect_timeout_seconds"], self.output_dir / "ssh.log") if self.settings["ssh_tunnel"] else None
+            self.min_interval = 0.0
         self.ready = False
         self.pending: tuple[str, dict] | None = None
         self.request_id = 0
@@ -69,6 +80,7 @@ class ApiPolicyClient:
         self.manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(), "mode": "baseline_inference",
             "actor": "model", "model": self.model, "requested_revision": policy["model"]["revision"],
+            "provider": self.provider, "endpoint": self.base_url if self.provider == "openai_compatible" else None,
             "adapter": None, "code_revision": code_revision, "dirty_worktree": dirty,
             "settings": self.settings, "prompt_builder": "build_scoring_prompt",
             "prompt_code_sha256": hashlib.sha256(Path(__file__).with_name("local_qwen.py").read_bytes()).hexdigest(),
@@ -84,48 +96,113 @@ class ApiPolicyClient:
         with self.log_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"event": event, "at": datetime.now(timezone.utc).isoformat(), **data}, ensure_ascii=False) + "\n")
 
+    def _load_api_key(self) -> str:
+        if self.api_key is None:
+            path = self.root / str(self.settings["api_key_file"])
+            try:
+                self.api_key = read_api_key(path)
+            except Exception as exc:
+                raise RuntimeError(f"cannot read policy.api.api_key_file: {path}") from exc
+        return self.api_key
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.provider == "openai_compatible":
+            headers["Authorization"] = f"Bearer {self._load_api_key()}"
+        return headers
+
+    def _throttle(self) -> None:
+        """Keep hosted requests under the configured requests-per-minute cap."""
+
+        if self.min_interval <= 0:
+            return
+        wait = self._last_request_at + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request_at = time.monotonic()
+
+    def _retry_delay(self, attempt: int, retry_after: str | None) -> float:
+        cap = float(self.settings["retry_max_backoff_seconds"])
+        if retry_after:
+            try:
+                return max(0.0, min(float(retry_after), cap))
+            except ValueError:
+                pass
+        base = float(self.settings["retry_backoff_seconds"])
+        return min(base * (2 ** attempt), max(base, cap))
+
     def _http(self, path: str, body: dict | None = None) -> dict:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-        req = request.Request(self.base_url + path, data=payload, headers={"Content-Type": "application/json"})
+        req = request.Request(self.base_url + path, data=payload, headers=self._headers())
         for attempt in range(self.settings["max_retries"] + 1):
+            self._throttle()
             try:
                 with self.opener.open(req, timeout=self.settings["timeout_seconds"]) as response:
                     value = json.loads(response.read().decode("utf-8"))
                 if not isinstance(value, dict):
                     raise ValueError("API response must be an object")
                 return value
-            except (error.URLError, TimeoutError, ConnectionError) as exc:
-                retryable = not isinstance(exc, error.HTTPError) or exc.code in {429, 500, 502, 503, 504}
-                detail = exc.read().decode("utf-8", errors="replace") if isinstance(exc, error.HTTPError) else str(exc)
-                self._log("transport_error", path=path, attempt=attempt, error=detail, retryable=retryable)
+            except error.HTTPError as exc:
+                retryable = exc.code in {429, 500, 502, 503, 504}
+                detail = exc.read().decode("utf-8", errors="replace")
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                self._log("transport_error", path=path, attempt=attempt, status=exc.code,
+                          error=detail, retryable=retryable)
                 if not retryable or attempt == self.settings["max_retries"]:
-                    raise RuntimeError(f"API request failed: {detail}") from exc
-                time.sleep(self.settings["retry_backoff_seconds"] * (attempt + 1))
+                    raise RuntimeError(f"API request failed ({exc.code}): {detail}") from exc
+                time.sleep(self._retry_delay(attempt, retry_after))
+            except (error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                self._log("transport_error", path=path, attempt=attempt, error=str(exc), retryable=True)
+                if attempt == self.settings["max_retries"]:
+                    raise RuntimeError(f"API request failed: {exc}") from exc
+                time.sleep(self._retry_delay(attempt, None))
         raise AssertionError("unreachable")
 
     def connect(self) -> None:
         if self.tunnel is not None:
             self.tunnel.start()
-        if not self.ready:
-            models = self._http("/v1/models")
-            data = models.get("data")
-            if not isinstance(data, list):
-                raise ValueError("/v1/models did not return a model list")
-            match = next((m for m in data if isinstance(m, dict) and m.get("id") == self.model), None)
-            if match is None:
-                raise RuntimeError(f"service does not expose configured model {self.model}")
-            self.manifest["server_model_metadata"] = match
-            root = str(match.get("root") or "")
-            resolved = re.search(r"(?:^|/)snapshots/([0-9a-f]{40})(?:/|$)", root)
-            self.manifest["resolved_model_revision"] = resolved.group(1) if resolved else None
-            expected = self.config["policy"]["model"]["revision"]
-            if re.fullmatch(r"[0-9a-f]{40}", expected) and (resolved is None or resolved.group(1) != expected):
-                raise ValueError("service snapshot revision does not match the configured pinned SHA")
-            server_limit = match.get("max_model_len")
-            if isinstance(server_limit, int) and self.settings["serving"]["max_model_len"] > server_limit:
-                raise ValueError(f"configured context exceeds server max_model_len={server_limit}")
+        if self.ready:
+            return
+        if self.provider == "openai_compatible":
+            self._load_api_key()
+            try:
+                models = self._http("/models")
+            except RuntimeError as exc:
+                if "(401)" in str(exc) or "(403)" in str(exc):
+                    raise
+                # Some gateways do not implement /models. The first decision
+                # still validates the endpoint, so this is advisory only.
+                self._log("endpoint_probe_skipped", base_url=self.base_url, error=str(exc))
+            else:
+                data = models.get("data")
+                if isinstance(data, list):
+                    ids = {item.get("id") for item in data if isinstance(item, dict)}
+                    self.manifest["advertised_model_count"] = len(ids)
+                    if ids and self.model not in ids:
+                        self._log("model_not_listed", model=self.model, advertised=sorted(ids)[:20])
+            self.manifest["endpoint_checked_at"] = datetime.now(timezone.utc).isoformat()
             self._save_manifest()
             self.ready = True
+            return
+        models = self._http("/v1/models")
+        data = models.get("data")
+        if not isinstance(data, list):
+            raise ValueError("/v1/models did not return a model list")
+        match = next((m for m in data if isinstance(m, dict) and m.get("id") == self.model), None)
+        if match is None:
+            raise RuntimeError(f"service does not expose configured model {self.model}")
+        self.manifest["server_model_metadata"] = match
+        root = str(match.get("root") or "")
+        resolved = re.search(r"(?:^|/)snapshots/([0-9a-f]{40})(?:/|$)", root)
+        self.manifest["resolved_model_revision"] = resolved.group(1) if resolved else None
+        expected = self.config["policy"]["model"]["revision"]
+        if re.fullmatch(r"[0-9a-f]{40}", expected) and (resolved is None or resolved.group(1) != expected):
+            raise ValueError("service snapshot revision does not match the configured pinned SHA")
+        server_limit = match.get("max_model_len")
+        if isinstance(server_limit, int) and self.settings["serving"]["max_model_len"] > server_limit:
+            raise ValueError(f"configured context exceeds server max_model_len={server_limit}")
+        self._save_manifest()
+        self.ready = True
 
     def status_decision(self) -> dict:
         return {"mode": "baseline_inference", "model_id": self.model, "candidate_source": "remote_api",
@@ -156,26 +233,47 @@ class ApiPolicyClient:
         prompt = build_scoring_prompt(observation, model_actions, self.settings["prompt_template"],
                                       prompt_format=self.prompt_format)
         messages = [{"role": "user", "content": prompt}]
-        template = {"enable_thinking": self.settings["thinking"]}
         self.request_id += 1
         req_id = self.request_id
         started = time.monotonic()
-        body = {"model": self.model, "messages": messages, "temperature": self.settings["temperature"],
-                "max_tokens": self.settings["max_output_tokens"], "stream": False, "chat_template_kwargs": template}
+        if self.provider == "openai_compatible":
+            body = {"model": self.model, "messages": messages, "temperature": self.settings["temperature"],
+                    "max_tokens": self.settings["max_output_tokens"], "stream": False}
+            extra = self.settings.get("extra_body") or {}
+            if isinstance(extra, dict):
+                body.update(extra)
+            template = None
+        else:
+            template = {"enable_thinking": self.settings["thinking"]}
+            body = {"model": self.model, "messages": messages, "temperature": self.settings["temperature"],
+                    "max_tokens": self.settings["max_output_tokens"], "stream": False,
+                    "chat_template_kwargs": template}
         self._log("request", request_id=req_id, run_id=run_id, run_config=run_config, state_key=state_key,
                   prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(), request=body, aliases=aliases)
         try:
             self.connect()
-            tokenized = self._http("/tokenize", {"model": self.model, "messages": messages,
-                                   "add_generation_prompt": True, "chat_template_kwargs": template})
-            count = tokenized.get("count")
-            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                raise ValueError("/tokenize did not return a valid token count")
-            limit = self.settings["serving"]["max_model_len"]
-            if count + self.settings["max_output_tokens"] > limit:
-                raise ValueError(f"context overflow: {count} input + {self.settings['max_output_tokens']} output > {limit}; no truncation")
-            response = self._http("/v1/chat/completions", body)
+            count = None
+            if self.provider != "openai_compatible":
+                tokenized = self._http("/tokenize", {"model": self.model, "messages": messages,
+                                       "add_generation_prompt": True, "chat_template_kwargs": template})
+                count = tokenized.get("count")
+                if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                    raise ValueError("/tokenize did not return a valid token count")
+                limit = self.settings["serving"]["max_model_len"]
+                if count + self.settings["max_output_tokens"] > limit:
+                    raise ValueError(f"context overflow: {count} input + {self.settings['max_output_tokens']} output > {limit}; no truncation")
+                generation_path = "/v1/chat/completions"
+            else:
+                # base_url already carries the provider's version prefix
+                # (for example /v1 or /compatible-mode/v1).
+                generation_path = "/chat/completions"
+            response = self._http(generation_path, body)
             latency = round((time.monotonic() - started) * 1000)
+            usage = response.get("usage")
+            if count is None and isinstance(usage, dict):
+                reported = usage.get("prompt_tokens")
+                if isinstance(reported, int) and not isinstance(reported, bool):
+                    count = reported
             self._log("response", request_id=req_id, response=response, input_tokens=count, latency_ms=latency)
             choices = response.get("choices")
             if not isinstance(choices, list) or len(choices) != 1:
@@ -186,14 +284,17 @@ class ApiPolicyClient:
             if choice.get("finish_reason") != "stop":
                 raise ValueError(f"incomplete completion: finish_reason={choice.get('finish_reason')}")
             content = choice.get("message", {}).get("content")
-            if not isinstance(content, str) or content.strip() not in aliases:
+            if not isinstance(content, str):
                 raise ValueError("model must output exactly one current legal alias, such as A1")
-            alias = content.strip()
+            alias = self._normalise_alias(content, aliases)
+            if alias is None:
+                raise ValueError("model must output exactly one current legal alias, such as A1")
             action = aliases[alias]
             decision = {**self.status_decision(), "model_action": action["id"],
                         "model_candidates": [{"action_id": action["id"], "label": action.get("label"), "rank": 1}],
                         "assist_status": "等待状态复核", "assist_reason": None,
-                        "api": {"request_id": req_id, "state_key": state_key, "alias": alias, "revalidated": False,
+                        "api": {"request_id": req_id, "state_key": state_key, "alias": alias,
+                                "normalised": content.strip() != alias, "revalidated": False,
                                 "latency_ms": latency, "input_tokens": count, "usage": response.get("usage"),
                                 "output": content, "thinking": choice.get("message", {}).get("reasoning_content")}}
             self.pending = (state_key, decision)
@@ -201,6 +302,20 @@ class ApiPolicyClient:
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
             self._log("decision_error", request_id=req_id, error=str(exc), latency_ms=round((time.monotonic() - started) * 1000))
             return {**self.status_decision(), "assist_status": "暂停，需人工处理", "assist_reason": str(exc)}
+
+    @staticmethod
+    def _normalise_alias(content: str, aliases: dict[str, Any]) -> str | None:
+        """Accept one alias, tolerating quotes or a trailing sentence mark.
+
+        Prose that merely mentions an alias ("I choose A2") and JSON wrappers are
+        still rejected: the model must answer with the action itself.
+        """
+
+        text = content.strip()
+        if text in aliases:
+            return text
+        candidate = text.strip("\"'`").strip().rstrip(".。,，;；:：")
+        return candidate if candidate in aliases else None
 
     def record_result(self, record: dict) -> None:
         self._log("execution_result", run_id=record.get("run_id"), step_id=record.get("step_id"),
@@ -261,12 +376,14 @@ class ApiPolicyClient:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check the remote baseline API without starting a game")
     parser.add_argument("--config", default="config/agent.json")
+    parser.add_argument("--mode", default="baseline_inference",
+                        help="baseline_inference (local vLLM) or baseline_api (hosted provider)")
     parser.add_argument("--replay", type=Path, help="offline inference on a sts-agent human trajectory; never sends game commands")
     parser.add_argument("--max-states", type=int, default=20)
     args = parser.parse_args()
     if args.max_states < 1:
         parser.error("--max-states must be positive")
-    client = ApiPolicyClient(PROJECT_ROOT, load_agent_config(config_file=args.config, mode="baseline_inference"))
+    client = ApiPolicyClient(PROJECT_ROOT, load_agent_config(config_file=args.config, mode=args.mode))
     try:
         if args.replay is not None:
             from sts_agent.runtime.controller import route_policy_observation

@@ -1,0 +1,30 @@
+{
+  "policy": {
+    "model": {
+      "base": "qwen3.8-chat",
+      "revision": "ustc-2026-10-27",
+      "hub_endpoint": "https://api.llm.ustc.edu.cn",
+      "initial_adapter": "",
+      "initial_policy_version": "official-baseline"
+    },
+    "confidence_auto": {"enabled": false},
+    "request": {"screens": ["ALL"]},
+    "api": {
+      "provider": "openai_compatible",
+      "base_url": "https://api.llm.ustc.edu.cn/v1",
+      "api_key_file": "ustc_api.txt",
+      "rpm_limit": 20,
+      "timeout_seconds": 120,
+      "max_retries": 5,
+      "retry_backoff_seconds": 5,
+      "retry_max_backoff_seconds": 60,
+      "temperature": 0,
+      "thinking": false,
+      "max_output_tokens": 32,
+      "prompt_format": "plain_text",
+      "prompt_template": "canonical",
+      "output_dir": "data/experiments/baseline-ustc",
+      "extra_body": {}
+    }
+  }
+}

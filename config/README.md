@@ -18,6 +18,7 @@
 | --- | --- | --- |
 | `collect_human` | 人类在游戏内游玩并采集轨迹 | [collect_human.json](modes/collect_human.json) |
 | `baseline_inference` | 官方 27B BF16 基线；本机控制、远端常驻模型、自动 SSH 隧道，不训练 | [baseline_inference.json](modes/baseline_inference.json) |
+| `baseline_api` | 托管 OpenAI 兼容 API 基线（USTC / 阿里云）；客户端限流与重试，不需要 GPU | [baseline_api.json](modes/baseline_api.json) |
 | `candidate_assist_local` | 本机 Qwen 给出候选，由玩家选择或修正 | [candidate_assist_local.json](modes/candidate_assist_local.json) |
 | `candidate_assist_remote` | 远端 Qwen 候选辅助 | [candidate_assist_remote.json](modes/candidate_assist_remote.json) |
 | `teacher_sft` | 远端教师自动游玩并生成 SFT 数据 | [teacher_sft.json](modes/teacher_sft.json) |

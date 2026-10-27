@@ -82,12 +82,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "min_probability": 0.85,
         },
         "api": {
+            # "vllm" keeps the local vLLM/SSH-tunnel baseline; "openai_compatible"
+            # talks to a hosted OpenAI-compatible endpoint such as USTC or Aliyun.
+            "provider": "vllm",
+            "base_url": "",
+            "api_key_file": "",
+            "rpm_limit": 0,
+            "extra_body": {},
             "local_port": 18080,
             "remote_port": 8000,
             "ssh_tunnel": True,
             "timeout_seconds": 120.0,
             "max_retries": 2,
             "retry_backoff_seconds": 5.0,
+            "retry_max_backoff_seconds": 30.0,
             "temperature": 0.0,
             "thinking": False,
             "max_output_tokens": 64,
@@ -214,6 +222,13 @@ def _merge(default: dict[str, Any], provided: dict[str, Any], location: str = ""
         path = f"{location}.{key}" if location else key
         if key not in default:
             raise ConfigError(f"unknown config field: {path}")
+        if key == "extra_body":
+            # Provider-specific request fields are opaque: they are forwarded
+            # verbatim and cannot be validated against a fixed schema.
+            if not isinstance(value, dict):
+                raise ConfigError(f"{path} must be an object")
+            result[key] = copy.deepcopy(value)
+            continue
         default_value = default[key]
         if isinstance(default_value, dict):
             if not isinstance(value, dict):
@@ -423,43 +438,69 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if model["initial_adapter"] or development["mock"]:
             raise ConfigError("baseline remote_api requires an unmodified model (no adapter/mock)")
     api = policy["api"]
-    for key in ("local_port", "remote_port", "max_output_tokens"):
-        value = api[key]
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
-            raise ConfigError(f"policy.api.{key} must be an integer from 1 to 65535")
+    provider = api["provider"]
+    if provider not in {"vllm", "openai_compatible"}:
+        raise ConfigError("policy.api.provider must be 'vllm' or 'openai_compatible'")
+    max_output_tokens = api["max_output_tokens"]
+    if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or not 1 <= max_output_tokens <= 65535:
+        raise ConfigError("policy.api.max_output_tokens must be an integer from 1 to 65535")
     for key in ("ssh_tunnel", "thinking"):
         _require_bool(api[key], f"policy.api.{key}")
     _require_number(api["timeout_seconds"], "policy.api.timeout_seconds", 1, 600)
     _require_number(api["retry_backoff_seconds"], "policy.api.retry_backoff_seconds", 1, 60)
+    _require_number(api["retry_max_backoff_seconds"], "policy.api.retry_max_backoff_seconds", 0, 300)
+    if api["retry_max_backoff_seconds"] < api["retry_backoff_seconds"]:
+        raise ConfigError("policy.api.retry_max_backoff_seconds must be >= policy.api.retry_backoff_seconds")
     _require_number(api["temperature"], "policy.api.temperature", 0, 2)
-    if isinstance(api["max_retries"], bool) or not isinstance(api["max_retries"], int) or not 0 <= api["max_retries"] <= 5:
-        raise ConfigError("policy.api.max_retries must be an integer from 0 to 5")
+    if isinstance(api["max_retries"], bool) or not isinstance(api["max_retries"], int) or not 0 <= api["max_retries"] <= 10:
+        raise ConfigError("policy.api.max_retries must be an integer from 0 to 10")
     if api["prompt_template"] not in {"canonical", "state_first", "decision_first"}:
         raise ConfigError("policy.api.prompt_template is invalid")
     try:
         require_prompt_format(api["prompt_format"])
     except ValueError as exc:
         raise ConfigError(f"policy.api.prompt_format: {exc}") from exc
-    serving = api["serving"]
-    if serving["backend"] not in {"vllm", "transformers"}:
-        raise ConfigError("policy.api.serving.backend must be 'vllm' or 'transformers'")
-    for key in ("tensor_parallel_size", "minimum_free_memory_mib", "max_model_len"):
-        if isinstance(serving[key], bool) or not isinstance(serving[key], int) or serving[key] < 1:
-            raise ConfigError(f"policy.api.serving.{key} must be a positive integer")
-    devices = serving["devices"]
-    if devices != "auto" and (not isinstance(devices, list) or len(devices) != serving["tensor_parallel_size"] or
-            any(isinstance(d, bool) or not isinstance(d, int) or d < 0 for d in devices) or len(set(devices)) != len(devices)):
-        raise ConfigError("policy.api.serving.devices must be 'auto' or distinct GPU indices matching tensor_parallel_size")
-    _require_number(serving["maximum_gpu_utilization_percent"], "policy.api.serving.maximum_gpu_utilization_percent", 0, 100)
-    _require_number(serving["gpu_memory_utilization"], "policy.api.serving.gpu_memory_utilization", 0.1, 0.95)
-    for key in ("enforce_eager", "disable_nccl_p2p", "disable_nccl_ib"):
-        _require_bool(serving[key], f"policy.api.serving.{key}")
-    for name, value in (("output_dir", api["output_dir"]), ("serving.deployment_file", serving["deployment_file"])):
-        _require_string(value, f"policy.api.{name}")
-        if Path(value).is_absolute() or ".." in Path(value).parts:
-            raise ConfigError(f"policy.api.{name} must be project-relative")
-    if api["max_output_tokens"] >= serving["max_model_len"]:
-        raise ConfigError("policy.api.max_output_tokens must be smaller than max_model_len")
+    _require_string(api["output_dir"], "policy.api.output_dir")
+    if Path(api["output_dir"]).is_absolute() or ".." in Path(api["output_dir"]).parts:
+        raise ConfigError("policy.api.output_dir must be project-relative")
+
+    if provider == "vllm":
+        for key in ("local_port", "remote_port"):
+            value = api[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+                raise ConfigError(f"policy.api.{key} must be an integer from 1 to 65535")
+        serving = api["serving"]
+        if serving["backend"] not in {"vllm", "transformers"}:
+            raise ConfigError("policy.api.serving.backend must be 'vllm' or 'transformers'")
+        for key in ("tensor_parallel_size", "minimum_free_memory_mib", "max_model_len"):
+            if isinstance(serving[key], bool) or not isinstance(serving[key], int) or serving[key] < 1:
+                raise ConfigError(f"policy.api.serving.{key} must be a positive integer")
+        devices = serving["devices"]
+        if devices != "auto" and (not isinstance(devices, list) or len(devices) != serving["tensor_parallel_size"] or
+                any(isinstance(d, bool) or not isinstance(d, int) or d < 0 for d in devices) or len(set(devices)) != len(devices)):
+            raise ConfigError("policy.api.serving.devices must be 'auto' or distinct GPU indices matching tensor_parallel_size")
+        _require_number(serving["maximum_gpu_utilization_percent"], "policy.api.serving.maximum_gpu_utilization_percent", 0, 100)
+        _require_number(serving["gpu_memory_utilization"], "policy.api.serving.gpu_memory_utilization", 0.1, 0.95)
+        for key in ("enforce_eager", "disable_nccl_p2p", "disable_nccl_ib"):
+            _require_bool(serving[key], f"policy.api.serving.{key}")
+        _require_string(serving["deployment_file"], "policy.api.serving.deployment_file")
+        if Path(serving["deployment_file"]).is_absolute() or ".." in Path(serving["deployment_file"]).parts:
+            raise ConfigError("policy.api.serving.deployment_file must be project-relative")
+        if max_output_tokens >= serving["max_model_len"]:
+            raise ConfigError("policy.api.max_output_tokens must be smaller than max_model_len")
+    else:
+        _require_string(api["base_url"], "policy.api.base_url")
+        if not str(api["base_url"]).startswith(("https://", "http://")):
+            raise ConfigError("policy.api.base_url must start with http:// or https://")
+        _require_string(api["api_key_file"], "policy.api.api_key_file")
+        key_path = Path(str(api["api_key_file"]))
+        if key_path.is_absolute() or ".." in key_path.parts:
+            raise ConfigError("policy.api.api_key_file must be a project-relative path")
+        rpm_limit = api["rpm_limit"]
+        if isinstance(rpm_limit, bool) or not isinstance(rpm_limit, int) or not 0 <= rpm_limit <= 600:
+            raise ConfigError("policy.api.rpm_limit must be an integer from 0 to 600")
+        if not isinstance(api["extra_body"], dict):
+            raise ConfigError("policy.api.extra_body must be an object")
 
     _require_bool(teacher["enabled"], "teacher.enabled")
     _require_string(teacher["base_url"], "teacher.base_url")
