@@ -11,7 +11,14 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Added
 
-- `AGENTS.md` and this changelog.
+- `AGENTS.md`, a short agent guide covering commands, invariants and the changelog/commit/push
+  workflow, and this changelog.
+- `doc/PAPER_PLAN.md`, the research plan.
+
+### Changed
+
+- The paper plan now targets a full-game benchmark plus an inference-time study instead of human
+  trajectory collection and SFT, which are no longer on the critical path.
 
 ### Removed
 
