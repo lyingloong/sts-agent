@@ -103,9 +103,9 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 .\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline
 ```
 
-托管 API 受请求频率限制（USTC 为 20 RPM，客户端按 3 秒间隔排队），单局约 17–20 分钟，
-10 种子约 3.5–4.5 小时；远端 vLLM 的实测则约为 12 分钟/局。首次调用可能是冷启动，
-可先运行 `python -m sts_agent.policy.api --mode baseline_api` 预热。
+托管 API 受请求频率限制（USTC 为 20 RPM）。客户端按请求起点计间隔，推理耗时计入其中，
+只有响应快于 3 秒时才补足差额；实测单局 15–20 分钟，10 种子约 3 小时，远端 vLLM 约 12 分钟/局。
+首次调用可能是冷启动，可先运行 `python -m sts_agent.policy.api --mode baseline_api` 预热。
 
 可用 `--config`、`--suite` 指定其他配置文件，`--host/--port` 覆盖 controller 连接地址。
 已经在局内时脚本直接拒绝接管，不放弃/重置现有游戏。

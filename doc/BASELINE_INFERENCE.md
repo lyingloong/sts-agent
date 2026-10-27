@@ -230,7 +230,7 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 | `policy.api.provider` | `vllm`（默认）或 `openai_compatible` |
 | `policy.api.base_url` | 含版本前缀的根地址，如 `https://api.llm.ustc.edu.cn/v1`；请求路径为 `/chat/completions` 与 `/models` |
 | `policy.api.api_key_file` | 项目根下被忽略的 key 文件，支持 `key: ...` 或裸 key |
-| `policy.api.rpm_limit` | 每分钟请求上限；20 表示相邻请求至少间隔 3 秒，0 表示不限速 |
+| `policy.api.rpm_limit` | 每分钟请求上限；20 表示相邻请求起点至少间隔 3 秒（推理耗时计入其中），0 表示不限速 |
 | `policy.api.extra_body` | 原样并入请求体，用于厂商参数，如 `{"enable_thinking": false}` |
 | `policy.api.retry_backoff_seconds` / `retry_max_backoff_seconds` | 429/5xx 的指数退避与上限，存在 `Retry-After` 时优先遵守 |
 
