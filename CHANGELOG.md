@@ -19,6 +19,8 @@ When the first tag is created, move the `[Unreleased]` section under that versio
   alias parsing; the USTC profile ships as `config/modes/baseline_api.json`.
 - Single-seed smoke suite (`config/evaluation/a0_ironclad_smoke.json`) for validating the hosted
   path before a full batch.
+- Fixed 30-seed suite (`config/evaluation/a0_ironclad_30.json`); its first ten seeds are exactly
+  the fixed-10 suite, and the remaining twenty continue the same deterministic generator.
 
 ### Changed
 
