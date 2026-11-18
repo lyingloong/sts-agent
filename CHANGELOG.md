@@ -43,6 +43,11 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 - The paper plan targets a full-game benchmark plus an inference-time study instead of human
   trajectory collection and SFT, which are no longer on the critical path.
 
+### Fixed
+
+- Offline tests can import their shared fixtures when another installed package also provides
+  a top-level `tests` module.
+
 ### Removed
 
 - Stale machine-local `CODEX_HANDOFF.md` (untracked); repository guidance now lives in
