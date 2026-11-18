@@ -7,16 +7,12 @@ CommunicationMod 启动外部进程，进程 stdout 只能用于协议。control
 写入 stderr 和项目日志。
 
 ```properties
-command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
+command=C\:/path/to/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
 runAtGameStart=true
 ```
 
-人类直接在游戏内采集时，统一controller入口会根据collect_human模式自动转入bridge；也可直接指定：
-
-```properties
-command=D\:/Code/spire-mod/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.recording.communication_bridge --config D\:/Code/spire-mod/sts-agent/config/agent.json
-runAtGameStart=true
-```
+将示例路径替换为本机虚拟环境的绝对路径，`command` 中的路径需避开空格。
+在 `collect_human` 模式下，同一入口会启动 `sts_agent.recording.communication_bridge`。
 
 此 bridge 只发送一次 `ready` 握手，不提交游戏命令或轮询 `WAIT`；CommunicationMod 的状态是唯一 observation 来源；
 ActionRecorder 0.5 通过 `recording.listen` 端口发送完整状态及动作事务副本。

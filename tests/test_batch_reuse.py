@@ -9,7 +9,8 @@ from sts_agent.commands import evaluate_baseline as batch
 from sts_agent.evaluation.reuse import expected_fingerprint, find_reusable_runs, model_fingerprint
 
 CONFIG = {"policy": {"model": {"base": "model-x", "revision": "rev-1", "initial_adapter": ""},
-                     "api": {"provider": "openai_compatible", "temperature": 0, "max_output_tokens": 32,
+                     "api": {"provider": "openai_compatible", "base_url": "https://gateway.example/v1",
+                             "temperature": 0, "max_output_tokens": 32,
                              "thinking": False, "prompt_format": "plain_text",
                              "prompt_template": "canonical", "extra_body": {}}}}
 PROMPT_SHA = "a" * 64
@@ -85,6 +86,16 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(found["A"]["run_id"], "run-A")
         self.assertEqual(found["A"]["batch"], str(newer))
         self.assertEqual(found["A"]["summary"]["evaluation"]["progress_score"], 20.0)
+
+    def test_alias_reuse_is_scoped_to_the_hosted_endpoint(self) -> None:
+        previous = _manifest()
+        previous["model_manifest"]["settings"]["base_url"] += "/"
+        _write_batch(self.output, "same", [_row("A", 10)], manifest=previous)
+        previous["model_manifest"]["settings"]["base_url"] = "https://other.example/v1"
+        _write_batch(self.output, "different", [_row("B", 10)], manifest=previous)
+        found, notes = find_reusable_runs(self.output, _suite(["A", "B"]), expected_fingerprint(CONFIG, PROMPT_SHA))
+        self.assertEqual(list(found), ["A"])
+        self.assertEqual(len(notes), 1)
 
 
 class ReusedReportTests(unittest.TestCase):

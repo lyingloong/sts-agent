@@ -388,8 +388,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("codex mode uses Codex as the external policy; disable policy and teacher backends")
 
     _require_bool(policy["enabled"], "policy.enabled")
-    if policy["runtime"] not in {"local", "remote_inference", "remote_online_rl", "remote_api"}:
-        raise ConfigError("policy.runtime must be local, remote_inference, or remote_online_rl")
+    if policy["runtime"] not in ("local", "remote_inference", "remote_online_rl", "remote_api"):
+        raise ConfigError("policy.runtime must be local, remote_inference, remote_online_rl, or remote_api")
     _require_string(model["base"], "policy.model.base")
     _require_string(model["revision"], "policy.model.revision")
     if not isinstance(model["initial_adapter"], str):
@@ -440,7 +440,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError("baseline remote_api requires an unmodified model (no adapter/mock)")
     api = policy["api"]
     provider = api["provider"]
-    if provider not in {"vllm", "openai_compatible"}:
+    if provider not in ("vllm", "openai_compatible"):
         raise ConfigError("policy.api.provider must be 'vllm' or 'openai_compatible'")
     max_output_tokens = api["max_output_tokens"]
     if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or not 1 <= max_output_tokens <= 65535:
@@ -455,7 +455,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     _require_number(api["temperature"], "policy.api.temperature", 0, 2)
     if isinstance(api["max_retries"], bool) or not isinstance(api["max_retries"], int) or not 0 <= api["max_retries"] <= 10:
         raise ConfigError("policy.api.max_retries must be an integer from 0 to 10")
-    if api["prompt_template"] not in {"canonical", "state_first", "decision_first"}:
+    if api["prompt_template"] not in ("canonical", "state_first", "decision_first"):
         raise ConfigError("policy.api.prompt_template is invalid")
     try:
         require_prompt_format(api["prompt_format"])
@@ -471,7 +471,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
                 raise ConfigError(f"policy.api.{key} must be an integer from 1 to 65535")
         serving = api["serving"]
-        if serving["backend"] not in {"vllm", "transformers"}:
+        if serving["backend"] not in ("vllm", "transformers"):
             raise ConfigError("policy.api.serving.backend must be 'vllm' or 'transformers'")
         for key in ("tensor_parallel_size", "minimum_free_memory_mib", "max_model_len"):
             if isinstance(serving[key], bool) or not isinstance(serving[key], int) or serving[key] < 1:
@@ -502,6 +502,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError("policy.api.rpm_limit must be an integer from 0 to 600")
         if not isinstance(api["extra_body"], dict):
             raise ConfigError("policy.api.extra_body must be an object")
+        conflicts = {"model", "messages", "temperature", "max_tokens", "stream"} & api["extra_body"].keys()
+        if conflicts:
+            raise ConfigError("policy.api.extra_body cannot override request fields: " + ", ".join(sorted(conflicts)))
 
     _require_bool(teacher["enabled"], "teacher.enabled")
     _require_string(teacher["base_url"], "teacher.base_url")
@@ -627,23 +630,29 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def load_agent_config(root: Path | None = None, config_file: str | Path | None = None, *, mode: str | None = None) -> dict[str, Any]:
-    """Load the active named mode plus shared settings into runtime config."""
-    path = config_path(root, config_file)
+def _read_config_object(path: Path, description: str) -> dict[str, Any]:
     try:
-        raw = path.read_text(encoding="utf-8")
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as exc:
-        raise ConfigError(f"missing configuration file: {path}") from exc
-    try:
-        provided = json.loads(raw)
+        raise ConfigError(f"missing {description}: {path}") from exc
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"cannot read {description} {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid JSON in {path}: {exc.msg} (line {exc.lineno})") from exc
-    if not isinstance(provided, dict):
+    if not isinstance(value, dict):
         raise ConfigError(f"{path} must contain one JSON object")
-    unknown_keys = set(provided) - {"schema_version", "active_mode", "shared"}
+    return value
+
+
+def load_named_agent_config(root: Path | None = None, config_file: str | Path | None = None, *,
+                            mode: str | None = None) -> tuple[str, dict[str, Any]]:
+    """Resolve a named mode and return its name alongside its validated runtime config."""
+    path = config_path(root, config_file)
+    provided = _read_config_object(path, "configuration file")
+    unknown_keys = set(provided) - {"schema_version", "active_mode", "shared", "mode_overrides"}
     if unknown_keys:
         unknown = ", ".join(sorted(str(key) for key in unknown_keys))
-        raise ConfigError(f"unknown config field(s) in {path}: {unknown}; mode-specific settings belong in config/modes/<mode>.json")
+        raise ConfigError(f"unknown config field(s) in {path}: {unknown}; use shared or mode_overrides.<mode>")
     if provided.get("schema_version") != 2:
         raise ConfigError("config/agent.json schema_version must be 2")
     mode_name = mode if mode is not None else provided.get("active_mode")
@@ -658,20 +667,33 @@ def load_agent_config(root: Path | None = None, config_file: str | Path | None =
         raise ConfigError("shared.framework is not allowed; choose one active_mode instead")
     merged = _merge(DEFAULT_CONFIG, shared, "shared")
 
-    profile_path = path.parent / "modes" / f"{mode_name}.json"
-    try:
-        profile_raw = profile_path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise ConfigError(f"missing mode profile for {mode_name}: {profile_path}") from exc
-    try:
-        profile = json.loads(profile_raw)
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"invalid JSON in {profile_path}: {exc.msg} (line {exc.lineno})") from exc
-    if not isinstance(profile, dict):
-        raise ConfigError(f"{profile_path} must contain one JSON object")
+    modes_dir = path.parent / "modes"
+    if not modes_dir.exists():
+        modes_dir = (root or project_root()) / "config" / "modes"
+    profile_path = modes_dir / f"{mode_name}.json"
+    profile = _read_config_object(profile_path, f"mode profile for {mode_name}")
     if "framework" in profile:
         raise ConfigError(f"{profile_path} must not define framework; mode combinations are fixed in sts_agent.core.modes")
     merged = _merge(merged, profile, f"mode.{mode_name}")
+
+    overrides = provided.get("mode_overrides", {})
+    if not isinstance(overrides, dict):
+        raise ConfigError("mode_overrides must be an object keyed by mode name")
+    unknown_modes = overrides.keys() - MODE_FRAMEWORKS.keys()
+    if unknown_modes:
+        raise ConfigError("unknown mode(s) in mode_overrides: " + ", ".join(sorted(unknown_modes)))
+    selected = overrides.get(mode_name, {})
+    if not isinstance(selected, dict):
+        raise ConfigError(f"mode_overrides.{mode_name} must be an object")
+    if "framework" in selected or "schema_version" in selected:
+        raise ConfigError(f"mode_overrides.{mode_name} cannot redefine framework or schema_version")
+    if selected:
+        merged = _merge(merged, selected, f"mode_overrides.{mode_name}")
     merged["schema_version"] = DEFAULT_CONFIG["schema_version"]
     merged["framework"] = MODE_FRAMEWORKS[mode_name]
-    return validate_config(merged)
+    return mode_name, validate_config(merged)
+
+
+def load_agent_config(root: Path | None = None, config_file: str | Path | None = None, *, mode: str | None = None) -> dict[str, Any]:
+    """Load settings for the selected mode using the shared configuration resolver."""
+    return load_named_agent_config(root, config_file, mode=mode)[1]

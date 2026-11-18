@@ -8,17 +8,17 @@ aliases to one GPU on the training machine. No public inference port is opened.
 
 Select one `active_mode` in `config/agent.json`; the mode profile chooses the matching runtime:
 
-| Runtime | Remote command | Behavior |
+| Active mode | Remote command | Behavior |
 | --- | --- | --- |
 | `remote_inference` | `sts_agent.policy.local_qwen` | Loads one fixed SFT LoRA adapter. Existing confidence-auto behavior is unchanged. |
-| `online_rl` | `sts_agent.learning.online_rl.worker` | Samples every action from a frozen adapter, collects `K=4` complete local episodes, then updates the resident LoRA adapter on the same remote GPU. |
+| `online_rl` | `sts_agent.learning.online_rl.worker` | Samples every action from a frozen adapter, collects a group of complete local episodes, then updates the resident LoRA adapter on the same remote GPU. |
 
 `local_inference` runs the fixed policy on the game machine; `candidate_assist_local` keeps the player in the action-confirmation loop.
 
 ## Preparation
 
-Commit and push the code, then on the training machine pull it and create the
-machine-local online config:
+Check out the same source revision on the game machine and the training machine. For online
+training, create a machine-local worker config on the training machine before its first run.
 
 ```bash
 cd /srv/sts-agent
@@ -27,7 +27,7 @@ cp config/online_rl.example.json config/online_rl.json
 
 `config/online_rl.json` is ignored by Git and now contains only remote rollout,
 GPU, reward and update parameters. Do not add `model`, `initial_adapter` or
-`initial_policy_version`: they have one source of truth in the local tracked
+`initial_policy_version`: they have one source of truth in the game machine's
 `config/agent.json`, and the controller passes them to the worker over SSH.
 `policy.model.initial_adapter` must point at a completed SFT adapter directory,
 not a `checkpoint-*` directory. A fresh `output_root` starts at
@@ -46,26 +46,27 @@ The remote Python environment needs the training dependencies:
 .venv/bin/pip install -r requirements/train.txt
 ```
 
-On Windows, set `policy.enabled` to `true`, disable `teacher.enabled`, and set
-the relevant mode:
+On the game machine, create or edit `config/agent.json`. For fixed inference, use the
+following settings and replace the SSH alias and model paths with values on your remote host.
 
 ```json
-"policy": {
-  "enabled": true,
-  "runtime": "remote_inference",
-  "model": {
-    "base": "/srv/sts-agent/models/base/Qwen3-0.6B",
-    "initial_adapter": "/srv/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
-    "initial_policy_version": "sft-v0-r001",
-    "hub_endpoint": "https://huggingface.co"
-  },
-  "remote": {
-    "ssh_host": "gpu-server",
-    "project_root": "/srv/sts-agent",
-    "python": ".venv/bin/python",
-    "online_rl_config": "config/online_rl.json",
-    "connect_timeout_seconds": 30.0,
-    "update_timeout_seconds": 1800.0
+{
+  "schema_version": 2,
+  "active_mode": "remote_inference",
+  "shared": {
+    "policy": {
+      "model": {
+        "base": "/srv/sts-agent/models/base/Qwen3-0.6B",
+        "initial_adapter": "/srv/sts-agent/outputs/sft/qwen3-0.6b/sft-v0-r001",
+        "initial_policy_version": "sft-v0-r001"
+      },
+      "remote": {
+        "ssh_host": "gpu-server",
+        "project_root": "/srv/sts-agent",
+        "python": ".venv/bin/python",
+        "online_rl_config": "config/online_rl.json"
+      }
+    }
   }
 }
 ```
@@ -77,7 +78,7 @@ is stored in this repository.
 
 ## Remote inference
 
-Set `runtime` to `remote_inference`. This uses the existing `rank` or `score`
+Select `"active_mode": "remote_inference"`. This uses the existing `rank` or `score`
 request types, so setting `confidence_auto.enabled` keeps its normal meaning.
 The remote process only loads the base model and specified adapter; it never
 writes model weights and it cannot update the policy.
@@ -91,7 +92,7 @@ map a small inference model across busy cards.
 
 ## Online RL execution
 
-Set `runtime` to `remote_online_rl`. This mode always samples and auto-executes
+Select `"active_mode": "online_rl"`. This mode always samples and auto-executes
 the remote action; human overrides invalidate the episode for online update.
 After a valid terminal upload, the controller automatically confirms the end
 screen, returns to the main menu, and starts the next run with the same
@@ -113,17 +114,15 @@ rollout: a human-overridden action invalidates that episode for the update.
 
 Use a fixed character, ascension and display seed. The worker admits the first
 episode to an active group and requires every next episode in that group to
-share those three values and the same frozen policy version. It refuses a
-different seed until the group is complete.
+share those three values and the same frozen policy version. The worker config sets the group
+size. The supplied `config/online_rl.example.json` uses `group_size: 2`.
 
 ```text
 adapter sft-v0-r001
   -> local game episode 1  -- sampled actions --> group g-000001
-  -> local game episode 2  -- sampled actions --> group g-000001
-  -> local game episode 3  -- sampled actions --> group g-000001
-  -> local game episode 4  -- sampled actions --> update on remote GPU
+  -> local game episode 2  -- sampled actions --> update on remote GPU
   -> saved adapter v000001
-  -> next four local episodes use v000001
+  -> next group uses v000001
 ```
 
 Each action trace is flushed locally before terminal upload. The local trace
@@ -134,7 +133,7 @@ complete episode. The remote worker persists it under
 `output_root/groups/<group-id>/`; a repeated completed upload is idempotent.
 
 The current update is action-level episode-group-relative PPO: it computes a
-scalar reward for each complete episode, z-scores those four group rewards,
+scalar reward for each complete episode, standardizes the rewards within that group,
 and applies clipped policy-gradient loss to every sampled action. This is not
 TRL's one-prompt/multiple-text-completions GRPO abstraction, because game state
 changes after every action. Reward components are versioned and written to each
@@ -164,11 +163,11 @@ term is deliberately comparable to the Act term over a normal run, while HP
 is only a tie-breaker. Sampling uses temperature `T=1.2`: legal-action scores
 are divided by `T` before softmax, creating more rollout diversity than
 `T=1.0`. The same temperature is used when recomputing PPO ratios during the
-update. If a completed K=4 group has near-zero reward standard deviation,
+update. If a completed group has near-zero reward standard deviation,
 raise it to `1.4`; if rollouts become uniformly destructive, lower it toward
 `1.0`.
 
-The fourth upload can take longer because it performs the update. The
+The final upload in a group can take longer because it performs the update. The
 controller waits up to `update_timeout_seconds` (default 30 minutes) before
 allowing another policy request. It holds one remote GPU for both sampling and
 updating, so adapter changes are synchronous and no cross-GPU reload is needed.

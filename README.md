@@ -4,41 +4,53 @@ StS Agent 通过 CommunicationMod 连接《Slay the Spire 1》，支持采集玩
 
 仓库继续维护游戏接入、录制和评测工具。论文计划及配套跑批已于 2026-11-18 停止。
 
-## 当前能力
-
-人类数据流程：先在 ActionRecorder 提取通用轨迹数据集，再用本仓库构建细粒度 SFT。
-完整命令、筛选职责和 prompt 预览说明见 [人类 SFT 数据集](doc/HUMAN_SFT_DATASET.md)。
-
-- 支持原版四角色、A0-A20、随机或指定种子，以及同一游戏进程连续运行多局。
-- 从 CommunicationMod 构建公开状态、合法动作、地图、战斗数值、牌组和历史动作；卡牌、药水、遗物和 Power 的效果说明优先取 ActionRecorder 扩展后的游戏运行时对象，敌人状态/意图取当前游戏状态。
-- 支持人工控制、Candidate Assist、置信度自动执行、远程教师、Prompt Evolution、固定远端 Qwen 和在线 RL。
-- 每局独立保存轨迹；可导出教师 SFT 数据和带校验和的迁移 bundle。
-- 可接收独立 ActionRecorder Mod 的人类游戏动作，并用在线 agent 同一套适配器生成完整训练轨迹。
-- 可通过本地 MCP 将 Codex 接入 controller，以 A0 战士配置单独采集 AI 游玩轨迹。
+| 目标 | 从这里开始 |
+| --- | --- |
+| 记录自己的对局，保留每一步的合法动作和所选动作 | 按下面的安装与启动步骤使用默认的 `collect_human` 模式 |
+| 让模型给建议、自动打牌，或连接 Codex | [选运行模式](doc/MODES.md) · [配置说明](config/README.md) |
+| 在固定种子上比较模型表现 | [自建或托管模型服务](doc/BASELINE_INFERENCE.md) · [运行与计分](doc/BASELINE_EVALUATION.md) |
+| 使用已有数据训练模型 | [导出人类 SFT 数据](doc/HUMAN_SFT_DATASET.md) · [训练环境](doc/TRAINING_ON_4090.md) |
 
 ## 安装
 
-需要 Python 3.10+ 和已安装的 Slay the Spire 1、ModTheSpire、BaseMod、CommunicationMod。
-录制玩家操作时还需启用 [ActionRecorder](https://github.com/lyingloong/sts-action-recorder)，
-由它提供运行时实体说明、选牌状态与动作关联。游戏和第三方 Mod/模型不随仓库分发。
-本机游戏接入与 Overlay 主要在 Windows 验证；远端模型服务与训练主要在 Linux 验证。
+离线工具需要 Git 和 Python 3.10+。请保留源码目录并使用可编辑安装，程序会从这份检出读取
+`config/`、`prompts/` 并在 `data/` 下写入输出。可以从游戏安装目录以外的位置克隆项目。
+
+Windows PowerShell：
 
 ```powershell
-uv venv
-uv pip install --python .venv\Scripts\python.exe -e .
+git clone https://github.com/lyingloong/sts-agent.git
+cd sts-agent
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\sts-agent-config.exe
 ```
 
-以上足够运行核心控制器和人工采集。本机 Candidate Assist 另装 `requirements/policy.txt`，
-训练机使用 `requirements/train.txt`；远端基线依赖见 [基线推理](doc/BASELINE_INFERENCE.md)。
-CUDA 版 PyTorch 应按机器驱动单独安装，不应从普通 PyPI 镜像误装 CPU wheel。
-全新检出默认读取[通用配置模板](config/agent.example.json)，以 `collect_human` 模式录制玩家操作。
-如需切换模式或修改连接参数，在 `config/` 下将模板复制为 `agent.json` 后编辑。
-程序优先使用这份本机配置，Git 会忽略它。由旧版本升级且需沿用原配置时，请先备份自己的
-`config/agent.json`，更新后将备份放回原路径。
+Linux 或 macOS 可在克隆后的仓库根目录运行：
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/sts-agent-config
+```
+
+全新检出的配置摘要应显示 `collect_human`。离线检查及人工采集使用 Python 标准库。
+使用本机 Candidate Assist 时再安装 [策略依赖](requirements/policy.txt) 和适合显卡的 PyTorch。
+训练机依赖见[训练机指南](doc/TRAINING_ON_4090.md)。本机游戏接入与 Overlay 主要在 Windows 验证，远端服务和训练主要在 Linux 验证。
+
+需要切换模式时，将 [agent.example.json](config/agent.example.json) 复制为同目录的
+`agent.json`，在副本中修改 `active_mode`。Git 会忽略本机配置。如果从仍跟踪
+`config/agent.json` 的旧提交升级，请先备份该文件，更新后放回原路径。
 
 ## 启动
 
-CommunicationMod 的 `config.properties`（将示例路径替换为自己的仓库绝对路径，路径中有空格时加引号）：
+在游戏端安装《Slay the Spire 1》、ModTheSpire、BaseMod 和 [CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod)。
+要录制玩家操作，还要启用 [ActionRecorder](https://github.com/lyingloong/sts-action-recorder)。它提供卡牌等实体的运行时说明及动作与状态的对应关系。通过 ModTheSpire 启用这些 Mod。
+
+Windows 上首次载入 CommunicationMod 后，退出游戏，编辑
+`%LOCALAPPDATA%\ModTheSpire\CommunicationMod\config.properties`。把下面的
+`C\:/path/to/sts-agent` 换成虚拟环境所在仓库的绝对路径。CommunicationMod 按空白拆分
+`command`，请将示例中的虚拟环境放在无空格路径下。路径中的目录分隔符使用正斜杠。
 
 ```properties
 command=C\:/path/to/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
@@ -46,7 +58,10 @@ runAtGameStart=true
 maxInitializationTimeout=300
 ```
 
-默认的 `collect_human` 模式下，启动游戏后直接游玩即可，数据写入 `data/trajectories/human/`。
+保存配置后通过 ModTheSpire 启动游戏，在默认模式下直接游玩。在项目的 `data/trajectories/human/`
+可以看到桥接进程的 `communication-bridge-*.jsonl`，开始录制对局后会出现 `human-*.jsonl`。
+若只有桥接日志，请检查 ActionRecorder 是否启用，以及两端的录制端口是否一致（默认 `127.0.0.1:8766`）。
+ActionRecorder 的原始日志位于游戏工作目录的 `data/actionrecorder/`。
 切换到需要交互控制的模式后，可在项目根目录打开 Overlay：
 
 ```powershell
@@ -68,8 +83,8 @@ controller 由 CommunicationMod 启动，一次只接受一个终端类客户端
 远端与本机使用同仓库的不同入口，准备命令和全部参数见 [基线推理](doc/BASELINE_INFERENCE.md)。
 进度分、通关率及实验比较口径见 [基线评测方案](doc/BASELINE_EVALUATION.md)。
 
-已有托管 API 账户时，也可选择 `baseline_api`，在[模式配置](config/modes/baseline_api.json)中设置模型名、
-API 地址和本机密钥文件路径。示例使用中国科大网关；个人密钥保存在 Git 忽略的文件中。
+已有托管 API 账户时，可选择 `baseline_api`，按[运行配置](config/README.md)设置模型名、
+API 地址和本机密钥文件路径。示例使用中国科大网关，个人密钥保存在 Git 忽略的文件中。
 
 选好模式后，在仓库根目录用下面的命令预览种子、复用结果和待跑列表。这一步可离线执行。
 
@@ -99,21 +114,8 @@ controller 会在向 MCP 提供决策状态前完成已有的环境自动动作�
 完整输入示例见 [Prompt Preview](doc/POLICY_PROMPT_PREVIEW.md)。所有房间统一显示最近 30 步历史，
 二级选牌不清空历史，翻牌的已公开牌面还保留在当前棋盘记忆中。
 
-人类直接在游戏界面操作、并采集轨迹时，将 `config/agent.json` 中的活动模式设为：
-
-```json
-"active_mode": "collect_human"
-```
-
-此模式使用 CommunicationMod 启动状态桥；不要再分别启动一个只收 ActionRecorder
-事件的进程。CommunicationMod 的 `command` 使用统一入口（模式切换无需改它）：
-
-```powershell
-.\.venv\Scripts\pythonw.exe -m sts_agent.runtime.controller --config config/agent.json
-```
-
-并设置 `runAtGameStart=true`。同时启用 ActionRecorder 和 CommunicationMod。
-CommunicationMod 的状态通过 stdin 进入 bridge；ActionRecorder 0.5 在实际发布处
+在默认的 `collect_human` 模式下，controller 会自行启动状态桥。
+CommunicationMod 的状态通过 stdin 进入 bridge；ActionRecorder 事件协议 0.5 在实际发布处
 编号，同步把完整状态和动作事务保存到本地并通过 `recording.listen` 的 TCP 端口
 发送副本。bridge 按 `before_state_id` 精确匹配，动作接受后等待可决策状态或下一
 动作入口状态，不按时间戳猜测。人类采集保留细粒度入口/选牌/确认动作，未匹配
@@ -202,8 +204,7 @@ doc/             架构、协议和实验说明
 ```
 
 完整端到端测试仍需启动 ModTheSpire。CommunicationMod 的协议约束见其[官方仓库](https://github.com/ForgottenArbiter/CommunicationMod)。
-提交前检查、问题反馈和敏感文件处理见 [贡献指南](CONTRIBUTING.md)。GitHub Actions 只运行无游戏/GPU的检查，
-不会调用真实模型、SSH 服务器或教师 API，也不能替代实机验收。
+常规问题可提交到 [GitHub Issues](https://github.com/lyingloong/sts-agent/issues)。参与开发见[贡献指南](CONTRIBUTING.md)，安全问题请按[私密报告流程](SECURITY.md)处理。
 
 ## 语义动作接口
 

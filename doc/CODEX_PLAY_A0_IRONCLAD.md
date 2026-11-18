@@ -6,7 +6,7 @@
 
 1. 在 `config/agent.json` 中设置 `"active_mode": "collect_codex"`。Codex 专属选项在 `config/modes/collect_codex.json`；共享 controller/Overlay 设置仍放在 `agent.json`。
 
-2. `config/modes/collect_codex.json` 默认使用 `IRONCLAD`、A0 和随机种子；如需固定种子，只改该 profile 的 `codex.seed`。Codex 模式不启用内部教师的实体经验问答。
+2. `config/modes/collect_codex.json` 默认使用 `IRONCLAD`、A0 和随机种子。需要固定种子时，在本机 `agent.json` 设置 `mode_overrides.collect_codex.codex.seed`。可用 `sts-agent-config --mode collect_codex` 验证配置。
 3. 安装可选 MCP 依赖：
 
    ```powershell

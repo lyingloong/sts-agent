@@ -30,8 +30,9 @@ Windows 下，自建 SSH 加入独立的 kill-on-close Job；controller 被强�
 
 ## 默认设置
 
-所有实验参数位于 [`config/modes/baseline_inference.json`](../config/modes/baseline_inference.json)。
-SSH 主机来自 `agent.json.shared.policy.remote.ssh_host`。模型只在 `policy.model.base` 定义一次。
+模式默认值位于 [`config/modes/baseline_inference.json`](../config/modes/baseline_inference.json)。
+在本机 `config/agent.json` 中用 `shared.policy.remote.ssh_host` 指定 SSH 主机。
+要单独更改本模式的默认值，将下表中相应字段放在 `mode_overrides.baseline_inference` 下。
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
@@ -223,7 +224,8 @@ ActionRecorder 仍可能独立记录 AI 操作到原始 run 日志，它尚不�
 "active_mode": "baseline_api"
 ```
 
-参数在 [`config/modes/baseline_api.json`](../config/modes/baseline_api.json)。
+默认参数见 [`config/modes/baseline_api.json`](../config/modes/baseline_api.json)。
+更换提供方时，在本机 `config/agent.json` 的 `mode_overrides.baseline_api` 下设置模型名、服务地址和密钥文件路径。完整示例见[托管 API 配置](../config/README.md#托管-api)。
 
 | 字段 | 说明 |
 | --- | --- |

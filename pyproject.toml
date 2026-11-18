@@ -16,6 +16,7 @@ Repository = "https://github.com/lyingloong/sts-agent"
 Issues = "https://github.com/lyingloong/sts-agent/issues"
 
 [project.scripts]
+sts-agent-config = "sts_agent.commands.check_config:main"
 sts-agent-controller = "sts_agent.runtime.controller:main"
 sts-agent-overlay = "sts_agent.ui.overlay:main"
 sts-agent-terminal = "sts_agent.ui.terminal:main"

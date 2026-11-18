@@ -11,7 +11,7 @@ controller + Overlay                     基础模型下载与 LoRA checkpoint �
 action-trace 采集                        数据校验、训练日志和 run manifest
 ```
 
-当前 controller 可通过持久 `ssh -T` 启动远程 Qwen policy，也可启动单 GPU online RL worker 进行冻结策略的 K=4 episode-level 在线更新。配置和操作见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。8 张 4090 不能自动产生 8 路游戏 rollout；每一路 rollout 仍需要一个真实、可控制的 StS 游戏进程。
+当前 controller 可通过持久 `ssh -T` 启动远程 Qwen policy，也可启动单 GPU online RL worker 进行冻结策略的 分组在线更新。配置和操作见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。8 张 4090 不能自动产生 8 路游戏 rollout；每一路 rollout 仍需要一个真实、可控制的 StS 游戏进程。
 
 截至 2026-08-26，第一批数据为 30 条完整终局轨迹、6,417 条可导出教师 SFT 样本。它们全部是 Ironclad A0 且均以死亡结束，适合验证 SFT 管线和接口学习，不适合作为最终策略质量结论。
 
@@ -45,7 +45,8 @@ bundle 包含：
 
 这个目录不可覆盖，避免把一个已有 release 悄悄替换为不同数据。新的采集批次或导出代码使用新的版本名，例如 `sft-v1-20260903-r1`。
 
-准备源代码前，应将当前变更提交为一个可识别的 Git commit。训练记录只引用 commit hash，不引用“当前工作区”。`config/agent.json` 可由 Git 同步，但训练机不应放置教师 API 文件，也不需要复制 Overlay 的本地布局。
+训练记录保存源码的 commit hash。两端可通过 Git 同步代码、公开配置模板和模式默认值。
+`config/agent.json` 属于各机器自己的设置，Git 会忽略此文件；如训练机需要自定义配置，请在训练机上根据模板创建。
 
 ## 2. 传输与校验
 
@@ -206,4 +207,4 @@ rsync -aP --checksum <user>@<host>:/data/sts-agent/outputs/sft/qwen3-0.6b/sft-v0
 
 在未见种子上先检查合法动作率、卡死率、平均层数、Act 进度和推理延迟，而不是只比较 training loss。当前 30 局全败的教师数据只能产生 `sft_base_v0`；在继续 GRPO 前，应补充更深层、不同角色和人工纠正的数据。
 
-在线更新原型在 4090 机器中常驻 base + LoRA：本地游戏经 SSH 请求动作，按同一冻结版本和同一初始条件收集 K=4 局，终局后上传完整 trace 并在同一 GPU 更新 adapter。不要在一局游戏中更新权重。固定种子验证仍应独立于用于更新的种子。
+在线更新原型在 4090 机器中常驻 base + LoRA：本地游戏经 SSH 请求动作，按同一冻结版本和同一初始条件收集一组完整对局（局数取决于远端 `group_size`），终局后上传完整 trace 并在同一 GPU 更新 adapter。不要在一局游戏中更新权重。固定种子验证仍应独立于用于更新的种子。

@@ -27,7 +27,7 @@
 ## 2. 启动前检查（逐条打勾）
 
 ```powershell
-cd D:\Code\spire-mod\sts-agent
+# 在仓库根目录执行
 
 # 1) controller 在监听
 Get-NetTCPConnection -LocalPort 8765 -State Listen

@@ -29,6 +29,14 @@ def _read_json(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _semantic_settings(settings: dict) -> dict:
+    result = {key: settings.get(key) for key in SEMANTIC_SETTINGS}
+    if settings.get("provider") == "openai_compatible":
+        # Identical model aliases can resolve to different weights at different endpoints.
+        result["base_url"] = str(settings.get("base_url") or "").rstrip("/")
+    return result
+
+
 def model_fingerprint(manifest: dict) -> dict:
     """The part of a controller manifest that makes two runs comparable."""
 
@@ -40,7 +48,7 @@ def model_fingerprint(manifest: dict) -> dict:
             "prompt_builder": manifest.get("prompt_builder"),
             "prompt_code_sha256": manifest.get("prompt_code_sha256"),
             "evaluation_metric": manifest.get("evaluation_metric"),
-            "settings": {key: settings.get(key) for key in SEMANTIC_SETTINGS}}
+            "settings": _semantic_settings(settings)}
 
 
 def expected_fingerprint(config: dict, prompt_code_sha256: str) -> dict:
@@ -55,7 +63,7 @@ def expected_fingerprint(config: dict, prompt_code_sha256: str) -> dict:
             "prompt_builder": "build_scoring_prompt",
             "prompt_code_sha256": prompt_code_sha256,
             "evaluation_metric": METRIC_VERSION,
-            "settings": {key: api.get(key) for key in SEMANTIC_SETTINGS}}
+            "settings": _semantic_settings(api)}
 
 
 def _eligible(row: dict, suite: dict) -> bool:

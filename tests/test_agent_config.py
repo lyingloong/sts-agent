@@ -38,6 +38,49 @@ class AgentConfigTests(unittest.TestCase):
         self.assertFalse(config["teacher"]["enabled"])
         self.assertEqual(config["policy"]["remote"]["ssh_host"], "gpu-server")
 
+    def test_private_descriptor_can_reuse_profiles_and_override_one_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "personal.json"
+            descriptor = {
+                "schema_version": 2, "active_mode": "baseline_api",
+                "shared": {"policy": {"model": {"base": "shared-model"}},
+                           "recording": {"listen": {"port": 9876}}},
+                "mode_overrides": {"baseline_api": {"policy": {
+                    "model": {"base": "private-alias"},
+                    "api": {"base_url": "https://gateway.example/v1"},
+                }}},
+            }
+            path.write_text(json.dumps(descriptor), encoding="utf-8-sig")
+            name, hosted = agent_config.load_named_agent_config(PROJECT_ROOT, path)
+            self.assertEqual(name, "baseline_api")
+            self.assertEqual(hosted["policy"]["model"]["base"], "private-alias")
+            self.assertEqual(hosted["policy"]["api"]["base_url"], "https://gateway.example/v1")
+            self.assertEqual(hosted["policy"]["api"]["api_key_file"], "ustc_api.txt")
+            self.assertEqual(hosted["policy"]["api"]["provider"], "openai_compatible")
+            name, human = agent_config.load_named_agent_config(PROJECT_ROOT, path, mode="collect_human")
+            self.assertEqual(name, "collect_human")
+            self.assertEqual(human["policy"]["model"]["base"], "shared-model")
+            self.assertEqual(human["recording"]["listen"]["port"], 9876)
+
+    def test_invalid_private_overrides_name_the_offending_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agent.json"
+            cases = [
+                ([], "mode_overrides must be an object"),
+                ({"bad_mode": {}}, "unknown mode.*bad_mode"),
+                ({"baseline_api": []}, "mode_overrides.baseline_api must be an object"),
+                ({"baseline_api": {"framework": {}}}, "cannot redefine framework"),
+                ({"baseline_api": {"policy": {"unknown": 42}}}, "mode_overrides.baseline_api.policy.unknown"),
+                ({"baseline_api": {"policy": {"api": {"extra_body": {"model": "other"}}}}},
+                 "extra_body cannot override request fields: model"),
+            ]
+            for overrides, error in cases:
+                with self.subTest(overrides=overrides):
+                    path.write_text(json.dumps({"schema_version": 2, "active_mode": "baseline_api",
+                                                "mode_overrides": overrides}), encoding="utf-8")
+                    with self.assertRaisesRegex(agent_config.ConfigError, error):
+                        agent_config.load_agent_config(PROJECT_ROOT, path)
+
     def test_default_framework_is_direct(self) -> None:
         config = agent_config.validate_config(agent_config.DEFAULT_CONFIG)
         self.assertEqual(config["framework"]["game"], "sts1")

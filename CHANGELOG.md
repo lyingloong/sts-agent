@@ -11,6 +11,9 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Added
 
+- `sts-agent-config` lists the 13 supported modes and checks the active profile, a named profile,
+  or all profiles offline. A summary shows the resolved control, policy and learning modes.
+- Contributors can use a bug report form and GitHub private vulnerability reporting.
 - `AGENTS.md`, a short agent guide covering commands, invariants and the changelog/commit/push
   workflow, and this changelog.
 - `doc/PAPER_PLAN.md`, the research plan.
@@ -27,6 +30,8 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Changed
 
+- Personal settings can override a single mode through `mode_overrides` in the local config.
+  The configuration, game startup, and training guides describe the inputs each workflow needs.
 - A fresh checkout uses the human recording profile. Personal settings in `config/agent.json`
   take precedence and are ignored by Git. Users upgrading an old checkout should back up that
   file before pulling and restore it at the same path afterward.
@@ -45,6 +50,8 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Fixed
 
+- The human recording profile now honors shared recorder settings. Hosted batch reuse checks
+  the provider endpoint, and hosted request options reject conflicting core fields.
 - Offline tests can import their shared fixtures when another installed package also provides
   a top-level `tests` module.
 

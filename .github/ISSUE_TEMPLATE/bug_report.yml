@@ -1,0 +1,29 @@
+name: Bug report
+description: Report a reproducible problem with configuration, game control, recording, or evaluation.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security issue, use [private reporting](https://github.com/lyingloong/sts-agent/security/advisories/new).
+        Redact API keys, account details, and local paths from examples and logs.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the commit, OS, Python version and active mode. For game issues, also include game and mod versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the shortest command or sequence of game actions that shows the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected and observed behavior
+      description: Include a short redacted error or relevant step ID if available.
+    validations:
+      required: true

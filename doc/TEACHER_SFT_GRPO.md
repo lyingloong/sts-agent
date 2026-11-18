@@ -1,6 +1,6 @@
 # 教师 SFT 与 GRPO 路线
 
-更新时间：2026-08-26
+2026-08-26 的训练路线与实验记录。当前的模式选择与参数配置见[运行配置](../config/README.md)。
 
 ## 目标
 
@@ -24,9 +24,9 @@
 
 教师只能看到 `normalize_state` 产生的公开状态；种子、抽牌顺序、对象 UUID 和 API 密钥不进入 prompt。教师使用 `sts_agent.policy.teacher_prompts` 中的中文场景化策略提示词：地图、战斗、卡牌奖励、战斗奖励、删牌、升级、变化、商店、事件、营火、首领遗物和过渡态分别采用不同决策框架。策略提示词只发送给远程教师，不进入本地 Qwen prompt、SFT observation 或 target。每条已接受 trace 额外记录教师模型 ID、prompt 版本、请求延迟、尝试次数、finish reason 和 token 用量。默认开启 thinking；Overlay 的 `MODEL / ACTION` 窗口会在教师模式下显示有界的思考内容和最终输出，本地 Qwen 模式仍使用候选/置信度界面。教师回复原文及 reasoning 只存在于当前内存中的 UI 决策，不写入 action trace 或 SFT 数据。
 
-单步 API 失败、超时、解析失败或返回未知别名时，该步进入人工 fallback；不能自动重试或猜测游戏命令。教师使用 `screens=["ALL"]` 时覆盖地图、战斗、事件、商店、奖励、休息和牌组选择等全局动作，不按游戏部分筛选。
+教师客户端按 `teacher.max_retries` 对临时失败进行有限重试；未得到可用合法动作时交由玩家处理。教师使用 `screens=["ALL"]` 时覆盖地图、战斗、事件、商店、奖励、休息和牌组选择等全局动作，不按游戏部分筛选。
 
-密钥文件默认为项目根目录的 `deepseek_api.txt`，仅接受 `key: ...` 或一行裸 key，且已被 Git 忽略。密钥轮换后才可启用此模式。`max_tokens` 默认 512，因为思考内容也会消耗生成预算，过小会在输出动作 JSON 前截断；它不控制输入状态。`max_input_chars` 默认 32000，控制公开 observation JSON 的字符上限，设为 `0` 可关闭该截断。提供方代理是否支持 `deepseek-v4-pro`、thinking 和 JSON mode 需要通过一次真实请求确认。当前 USTC 网关在 `thinking=true` 时会因 `response_format=json_object` 不返回 `reasoning_content`，因此客户端会自动优先 thinking，改为依赖提示词和本地解析器验证 JSON 动作；若关闭 thinking，才会发送 JSON response format。思考字段的具体名称可能是 `reasoning_content`、`reasoning` 或 `thinking`，客户端兼容这三种形式，解析器仍只接受唯一合法别名。
+密钥文件默认为项目根目录的 `deepseek_api.txt`，仅接受 `key: ...` 或一行裸 key，且已被 Git 忽略。需要使用其他服务时，在本机 `shared.teacher` 中设置自己的 `base_url`、`model` 与 `api_key_file`。`max_tokens` 默认 512，因为思考内容也会消耗生成预算，过小会在输出动作 JSON 前截断；它不控制输入状态。`max_input_chars` 默认 32000，控制公开 observation JSON 的字符上限，设为 `0` 可关闭该截断。提供方代理是否支持 `deepseek-v4-pro`、thinking 和 JSON mode 需要通过一次真实请求确认。当前 USTC 网关在 `thinking=true` 时会因 `response_format=json_object` 不返回 `reasoning_content`，因此客户端会自动优先 thinking，改为依赖提示词和本地解析器验证 JSON 动作；若关闭 thinking，才会发送 JSON response format。思考字段的具体名称可能是 `reasoning_content`、`reasoning` 或 `thinking`，客户端兼容这三种形式，解析器仍只接受唯一合法别名。
 
 实时教师运行可以将 `teacher.thinking` 设为 `false`，并将 `timeout_seconds` / `max_retries` 调低；这会取消深层推理阶段，而不是保证模型把思考压缩成更短文本。复杂地图决策可能有质量损失，离线 SFT 采集再使用 thinking 模式更合适。
 
@@ -118,4 +118,4 @@ R = 100 * victory
 
 3050 只承担游戏、CommunicationMod、controller、远程教师请求和 trace 写盘；教师 API 不占本地模型显存。Qwen SFT、离线评测和 GRPO 更新放在远程 8x 4090。对当前 Qwen3-0.6B 和 6,417 条样本，第一轮使用单张 4090 QLoRA；其余 GPU 用于并行消融和评测，而不是强行 DDP。游戏仍在本机，因此 rollout 要先把冻结 adapter 取回本机运行，再把新轨迹 bundle 回传训练机。
 
-当前仓库已实现教师采集、SFT 导出、训练 bundle 和 `sts_agent.learning.sft` 的 QLoRA alias-action SFT，也实现了远程固定 adapter 推理与单 GPU、K=4 的 episode-level 在线更新原型。固定种子自动评测、数据质量门槛和更完整的研究级 GRPO 对照尚未实现。训练逻辑保持在独立模块中，不放进 controller。远程协议和运行方式见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。
+当前仓库已实现教师采集、SFT 导出、训练 bundle 和 `sts_agent.learning.sft` 的 QLoRA alias-action SFT，也实现了远程固定 adapter 推理与单 GPU、K=4 的 episode-level 在线更新原型。固定种子自动评测已可独立使用，见[基线评测](BASELINE_EVALUATION.md)。数据质量门槛和研究级 GRPO 对照属于历史计划。训练逻辑保持在独立模块中，不放进 controller。远程协议和运行方式见 [REMOTE_ONLINE_RL.md](REMOTE_ONLINE_RL.md)。

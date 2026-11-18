@@ -1,6 +1,8 @@
 # 运行模式
 
-日常通过 `config/agent.json` 的单一字段 `active_mode` 切换运行方式。具体模式参数在 `config/modes/<mode>.json`；Qwen adapter、远端连接、教师 API、游戏连接和 Overlay 等共享配置只需维护一次。所有 profile 名称和它们对应的内部控制/后端/学习组合列在 [配置说明](../config/README.md)。
+全新检出使用 `collect_human`。要更改设置，将[公开模板](../config/agent.example.json)复制为
+`config/agent.json`。在 `active_mode` 里填写下表中的模式名，跨模式共用的连接参数放在 `shared`。
+需要为某个模式单独换模型、API 地址等时，写在 `mode_overrides.<模式名>` 中。合并顺序与示例见[配置说明](../config/README.md)。
 
 | 模式 | 作用 |
 | --- | --- |
@@ -15,4 +17,5 @@
 | `online_rl` | 远端 Qwen 采样完整 rollout，并按组结果更新 adapter。 |
 | `collect_codex` | 通过 Codex MCP 操作游戏，单独保存 Codex 轨迹。 |
 
-模式组合集中在 `sts_agent.core.modes` 固定定义，配置文件不再要求用户同时编辑 `control_mode`、`policy_backend` 和 `learning_method`。`load_agent_config()` 将活动 profile 与共享设置合成为内部运行配置；改动后重启 controller 和 UI。
+运行 `sts-agent-config` 检查当前配置，或用 `sts-agent-config --mode online_rl` 在切换前单独检查某个模式。
+改动生效需要重启游戏启动的 controller 和正在使用的 UI。

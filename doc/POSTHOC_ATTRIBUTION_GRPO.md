@@ -6,7 +6,7 @@
 
 常规 episode-level GRPO 会把一局的同一个组相对优势分配给全轨迹的每个动作。对于 StS 这种长程决策，这会把明显错误的操作与正常操作一起更新。
 
-本模式保留 K=4 的同起点、同冻结策略 rollout 组和终局奖励，但让人类给出两个互补的字段：
+本模式使用同起点、同冻结策略的 rollout 组和终局奖励，但让人类给出两个互补的字段：
 
 - `可强化之处`：本局哪些关键操作值得保留。
 - `应弱化之处`：本局哪些关键操作应降低概率。
@@ -17,7 +17,7 @@
 
 必须同时打开本机和训练机两个开关。若本机开启而远端未开启，controller 会在启动时停用 online RL，防止新的 attribution 被旧 worker 静默当成全轨迹更新。
 
-在本机 `config/modes/online_rl.json` 配置 `posthoc_feedback`。API key 文件仍使用被忽略的本地文件；可复用共享配置中的兼容端点与 key 文件。
+要修改公开示例中的归因服务，在本机 `config/agent.json` 的 `mode_overrides.online_rl` 下设置以下 `posthoc_feedback` 字段。API key 文件仍使用被忽略的本地文件；可复用共享配置中的兼容端点与 key 文件。
 
 ```json
 "posthoc_feedback": {
@@ -57,7 +57,7 @@
 3. `mode="human"` 时，`GAME_OVER` 或 `VICTORY` 后 Overlay 弹出 `ROLLOUT REFLECTION`，其中按时间顺序显示本局全部已确认动作（`step_id`、Act-Floor、场景、模型/自动来源和动作语义）。两栏均可留空；点击“跳过本局”也可继续。`mode="auto"` 时不弹窗，教师直接根据终局状态、完整动作账本和各步骤公开动态状态独立生成双向归因。
 4. controller 保存人工文字或自动复盘标记，然后使用 DeepSeek 生成每个方向至多 10 个候选归因。
 5. 本地校验 `step_id`、方向、置信度、严重度和冲突；仅保留每方向最高置信度的 8 个、且 `confidence >= 0.75` 的动作。
-6. 完整 episode 与筛选后的归因上传。第 4 局结束时，同一远端 GPU 进行一次 QLoRA 更新并保存新版本。
+6. 完整 episode 与筛选后的归因上传。当有效局数达到训练机 `group_size`（公开示例为 2）且有可用归因时，远端 GPU 更新 QLoRA 并保存新版本。
 
 教师返回后，Overlay 会显示一个非阻塞的 `TEACHER ATTRIBUTION` 窗口，其中列出实际通过校验、会参与更新的动作（`step_id`、动作、置信度、严重度和简短证据），以及过滤数量和原因摘要。它不显示教师思考或原始响应。
 

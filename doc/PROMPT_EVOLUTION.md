@@ -4,7 +4,7 @@
 
 ## 开关
 
-在 `config/agent.json` 中把 `active_mode` 改为 `prompt_evolution`。Prompt Evolution 参数在 `config/modes/prompt_evolution.json`；Teacher API 等共享设置在 `agent.json` 的 `shared.teacher`。
+在 `config/agent.json` 中把 `active_mode` 改为 `prompt_evolution`。Prompt Evolution 默认参数在 `config/modes/prompt_evolution.json`。本机调整写在 `agent.json` 的 `mode_overrides.prompt_evolution` 下，教师 API 的共享连接信息写在 `shared.teacher`。
 
 当前配置使用阿里云 DeepSeek；如需改服务，修改 `shared.teacher`。活动 profile 会自动选择教师后端并关闭 Qwen 与终局归因，避免手工开关冲突。
 

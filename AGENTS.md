@@ -13,7 +13,8 @@ trajectories, SFT export and baseline evaluation. The in-game recorder is a sepa
 ```sh
 python -m compileall -q sts_agent tests
 python -m unittest discover -s tests -v
-python -m sts_agent.commands.preview_policy_prompt   # rewrites doc/POLICY_PROMPT_PREVIEW.md
+python -m sts_agent.commands.check_config            # checks the active profile offline
+python -m sts_agent.commands.preview_policy_prompt   # prints the Markdown preview
 git diff --check
 ```
 

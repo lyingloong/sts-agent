@@ -110,8 +110,7 @@ S = 已清楼层数 + (50 / 3) × 已击败的幕末 Boss 数
 ### 运行
 
 1. 自建模型服务使用 `baseline_inference`，托管 API 使用 `baseline_api`。
-   本机 `agent.json.active_mode` 必须与之一致。模型与 API 参数仍只在对应模式配置中维护，
-   测试集不重复定义它们。
+   在本机 `config/agent.json` 设置相应的 `active_mode`，并按[运行配置](../config/README.md)填写模型与连接信息。
 2. 重启游戏/controller，使新增批量协议生效，停在普通主菜单。
 3. 关闭 Overlay 和终端客户端。controller 只接一个客户端，批量脚本占用该连接；
    不要另开一个 controller，也不要在测评期间点击游戏。

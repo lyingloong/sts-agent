@@ -1,6 +1,7 @@
 {
   "schema_version": 2,
   "active_mode": "collect_human",
+  "mode_overrides": {},
   "shared": {
     "server": {"host": "127.0.0.1", "port": 8765},
     "recording": {
