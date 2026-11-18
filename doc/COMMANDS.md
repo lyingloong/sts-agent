@@ -10,7 +10,7 @@
 | 本地 Qwen JSONL 服务 | `python -m sts_agent.policy.local_qwen` | `sts-agent-policy` |
 | 下载基座模型 | `python -m sts_agent.commands.download_model` | `sts-agent-download-model` |
 | CommunicationMod 只读探针 | `python -m sts_agent.commands.communication_probe` | 无 |
-| 官方模型固定种子批量测评 | `python -m sts_agent.commands.evaluate_baseline` | `sts-agent-evaluate-baseline` |
+| 自建或托管模型的固定种子评测 | `python -m sts_agent.commands.evaluate_baseline` | `sts-agent-evaluate-baseline` |
 | 合并多个已完成批次为同一 cohort | `python -m sts_agent.commands.merge_batches <批次目录>...` | `sts-agent-merge-batches` |
 | 导出已完成基线局的原始输入输出复盘 | `python -m sts_agent.commands.export_baseline_io --batch-report <批次目录>` | 无 |
 | CommunicationMod 状态/动作事务桥 | `python -m sts_agent.recording.communication_bridge --config config/agent.json` | `sts-agent-communication-bridge` |

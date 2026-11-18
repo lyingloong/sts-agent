@@ -33,8 +33,8 @@ start the game, an SSH tunnel, a model download or a real model/teacher endpoint
 ## Data
 
 Never commit `data/trajectories/`, `data/experiments/`, `data/reviews/`, `data/transfer/`, models,
-checkpoints, `*_api.txt` or `config/online_rl.json`. `config/agent.json` is tracked: keep it free of
-secrets and personal host names or user paths.
+checkpoints, `*_api.txt`, `config/agent.json` or `config/online_rl.json`. Keep shared defaults in
+`config/agent.example.json`. Use portable paths and placeholder host names in tracked examples.
 
 ## Workflow
 

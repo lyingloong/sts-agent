@@ -1,5 +1,7 @@
 # 人类示范 SFT 基线：实现状态与实验路径
 
+历史记录（2026 年 10 月）。SFT 工具和用法见[数据集指南](HUMAN_SFT_DATASET.md)，本页的研究计划已停止。
+
 更新：2026-10-04。本文记录已落地的工程路线与尚未由真实数据证明的部分，不把计划写成实验结果。
 
 2026-10-06 补充：先用官方 Qwen3.8-27B BF16 做未微调的完整游戏基线，
@@ -20,7 +22,7 @@
 ## 当前已实现的代码路径
 
 - 游戏内原始记录、状态契约和对局筛选：独立仓库 `../ActionRecorder`；协议见其
-  [状态契约](../../ActionRecorder/docs/STATE_SCHEMA.md) 与 [数据集提取](../../ActionRecorder/docs/DATASET_EXTRACTION.md)。
+  [状态契约](https://github.com/lyingloong/sts-action-recorder/blob/master/docs/STATE_SCHEMA.md) 与 [数据集提取](https://github.com/lyingloong/sts-action-recorder/blob/master/docs/DATASET_EXTRACTION.md)。
 - 原始事件到下游训练轨迹：`sts_agent/recording/communication_bridge.py`、
   `trajectory_assembler.py`。
 - 人类 SFT 样本导出：`sts_agent/learning/export_human_sft.py`；细节见

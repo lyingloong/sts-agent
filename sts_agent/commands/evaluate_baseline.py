@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from sts_agent.config import ConfigError, load_agent_config
+from sts_agent.config import ConfigError, config_path, load_agent_config
 from sts_agent.core.modes import MODE_FRAMEWORKS
 from sts_agent.evaluation.progress import aggregate_summaries
 from sts_agent.evaluation.reuse import expected_fingerprint, find_reusable_runs
@@ -707,13 +707,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         root = PROJECT_ROOT
-        config_file = Path(args.config)
-        config_file = config_file if config_file.is_absolute() else root / config_file
+        config_file = config_path(root, args.config)
         suite_path = Path(args.suite)
         suite_path = suite_path if suite_path.is_absolute() else root / suite_path
         config = load_agent_config(root=root, config_file=config_file)
         if config["framework"] != MODE_FRAMEWORKS["baseline_inference"] or config["policy"]["runtime"] != "remote_api":
-            raise BatchError("active config must select baseline_inference (autonomous remote_api, no learning)")
+            raise BatchError("active config must select baseline_inference or baseline_api")
         suite = load_suite(suite_path)
         host = args.host if args.host is not None else config["server"]["host"]
         port = args.port if args.port is not None else config["server"]["port"]

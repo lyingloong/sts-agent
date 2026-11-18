@@ -1,14 +1,12 @@
-# 实验执行交接：A0 铁甲战士 30 种子基线
+# A0 铁甲战士 30 种子基线（历史批次）
 
-这份文档给接手跑批次的 agent 或人。目标是把 `a0-ironclad-fixed30-v1` 跑满 30 局，
-已有 10 局会自动复用，实际只需新跑 20 局。全程不改代码、不改配置。
+2026-11-18 已停止该批次。托管模型的固定 10 局全部完成。扩展到 30 个种子时复用了这 10 局，第 11 个种子在第 4 层中断，扩展批次新增终局数为 0。
+以下保留当时的配置和操作记录，供排查历史结果。其他使用者可按[固定种子评测说明](BASELINE_EVALUATION.md)选择自己的配置。
 
 ## 0. 一分钟版
 
 ```powershell
-cd D:\Code\spire-mod\sts-agent
-
-# 先确认计划：应显示 reused=10、to_run=20
+# 从仓库根目录运行。历史批次复用了 10 局，新检出仓库的复用数量取决于本机数据。
 .\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline `
   --suite config/evaluation/a0_ironclad_30.json --dry-run
 
@@ -123,7 +121,7 @@ if ($done) { "mean so far = {0:N2}" -f (($done | Measure-Object progress_score -
 - 批次运行期间不要点游戏、不要开 Overlay、不要切换模式。
 - 数据目录是 git 忽略的，不要提交轨迹或日志。
 
-## 8. 换模型（下一批再做）
+## 8. 其他模型的配置
 
 只改一个字段，然后**必须重启游戏**：
 
@@ -132,19 +130,4 @@ if ($done) { "mean so far = {0:N2}" -f (($done | Measure-Object progress_score -
 "policy": {"model": {"base": "qwen3.8-flash"}}   // 换成目标模型
 ```
 
-再跑同一条命令。不同模型不会复用彼此的局，会自动跑满 30 局（约 6 小时）。
-
-## 9. 接手 agent 的启动指令（可直接粘贴）
-
-> 你在 `D:\Code\spire-mod\sts-agent` 执行一次固定种子基线实验。先完整阅读
-> `doc/EXPERIMENT_HANDOFF.md` 并严格按步骤操作；不要修改代码、配置或测试集。
->
-> 任务：用当前配置（`baseline_api`，`qwen3.8-chat`）跑
-> `config/evaluation/a0_ironclad_30.json`。先 dry-run，确认 `reused=10`、`to_run=20`；
-> 然后启动批次，每 10–15 分钟用文档里的命令检查一次进度。
->
-> 游戏由人启动并停在主菜单；批次期间不要点击游戏或打开 Overlay。任何批次报错都
-> 立即停止操作，把报错、批次目录和 `manifest.json` 的 failure 发回来，不要自行改配置绕过。
->
-> 结束后汇报：批次目录、30 局均值与标准差、各幕通过率、通关率、总耗时、
-> 异常局与 API 调用/延迟统计。
+使用 `--dry-run` 查看所选模型已完成和待运行的种子；不同模型各自保留独立结果。

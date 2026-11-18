@@ -1,12 +1,17 @@
 # 运行配置
 
-新环境可从 [agent.example.json](agent.example.json) 复制生成 `agent.json`，模板默认只采集人工轨迹，
-不会部署模型或请求教师。`gpu-server` 和 `/srv/sts-agent` 是远端模式的占位值，需要替换。
-已有配置请保留，不要用模板覆盖；切换模式仍只需修改 `agent.json` 的 `active_mode`。
+新检出默认使用 [agent.example.json](agent.example.json) 的 `collect_human` 模式，可直接采集人工轨迹。
+需要改模式或共享参数时，将它复制为同目录的 `agent.json`，在副本中修改。
+`config/agent.json` 是 Git 忽略的本机设置，存在时优先生效。省略 `--config` 或传入标准
+`config/agent.json` 路径都会遵循上述规则。传入其他路径时只读取指定文件。
+`gpu-server` 和 `/srv/sts-agent` 是远端模式的占位值，使用远端模式前需要替换。
+
+从旧版本升级且希望沿用原配置，请在拉取更新前另存当前的 `config/agent.json`，
+更新后将副本放回原位置。若已完成更新，之前提交过的配置可从相应 Git 版本恢复。
 
 ## 切换运行模式
 
-日常只改 [`agent.json`](agent.json) 里的 `active_mode`，不要分别拼装控制方式、模型后端和学习方法：
+在本机 `agent.json` 里选择 `active_mode`，框架会据此设置控制方式、模型后端和学习方法。
 
 ```json
 "active_mode": "collect_human"

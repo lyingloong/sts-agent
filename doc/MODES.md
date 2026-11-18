@@ -5,6 +5,8 @@
 | 模式 | 作用 |
 | --- | --- |
 | `collect_human` | 人类直接在游戏内游玩，记录完整状态-动作轨迹。当前推荐的采集方式。 |
+| `baseline_inference` | 使用自建模型服务自动游玩并评测完整对局。 |
+| `baseline_api` | 通过托管的 OpenAI 兼容 API 游玩，可使用相同的固定种子套件。 |
 | `candidate_assist_local` / `candidate_assist_remote` | Qwen 提供动作候选，由玩家确认或修改；按置信度配置可自动执行首选。 |
 | `teacher_sft` | 远端教师模型游玩并生成 SFT 训练数据。 |
 | `dagger_local` / `dagger_remote` | 模型候选由人类确认或纠正，形成 DAgger 样本。 |

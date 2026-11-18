@@ -1,6 +1,8 @@
 # StS Agent
 
-基于 CommunicationMod 的《Slay the Spire 1》Agent 框架。它把游戏接入、状态与合法动作、策略后端、UI、轨迹和学习流程组织在同一个 Python 包中；运行方式由一份配置选择，而不是由不同脚本分叉实现。
+StS Agent 通过 CommunicationMod 连接《Slay the Spire 1》，支持采集玩家操作、让模型选择合法动作，以及按固定种子评测完整对局。
+
+仓库继续维护游戏接入、录制和评测工具。论文计划及配套跑批已于 2026-11-18 停止。
 
 ## 当前能力
 
@@ -17,8 +19,8 @@
 ## 安装
 
 需要 Python 3.10+ 和已安装的 Slay the Spire 1、ModTheSpire、BaseMod、CommunicationMod。
-推荐同时启用 [ActionRecorder](https://github.com/lyingloong/sts-action-recorder)，以获得运行时实体说明、
-完整选牌状态及精确动作关联。游戏和第三方 Mod/模型不随仓库分发。
+录制玩家操作时还需启用 [ActionRecorder](https://github.com/lyingloong/sts-action-recorder)，
+由它提供运行时实体说明、选牌状态与动作关联。游戏和第三方 Mod/模型不随仓库分发。
 本机游戏接入与 Overlay 主要在 Windows 验证；远端模型服务与训练主要在 Linux 验证。
 
 ```powershell
@@ -29,10 +31,10 @@ uv pip install --python .venv\Scripts\python.exe -e .
 以上足够运行核心控制器和人工采集。本机 Candidate Assist 另装 `requirements/policy.txt`，
 训练机使用 `requirements/train.txt`；远端基线依赖见 [基线推理](doc/BASELINE_INFERENCE.md)。
 CUDA 版 PyTorch 应按机器驱动单独安装，不应从普通 PyPI 镜像误装 CPU wheel。
-首次运行前检查 `config/agent.json` 的活动模式和连接信息，替换其中的示例部署配置；
-只采集人工数据时选择 `collect_human`，不需要部署模型。
-可参考 [通用配置模板](config/agent.example.json)；首次配置时复制为 `config/agent.json` 后按需调整，
-已有可用配置不要直接覆盖。
+全新检出默认读取[通用配置模板](config/agent.example.json)，以 `collect_human` 模式录制玩家操作。
+如需切换模式或修改连接参数，在 `config/` 下将模板复制为 `agent.json` 后编辑。
+程序优先使用这份本机配置，Git 会忽略它。由旧版本升级且需沿用原配置时，请先备份自己的
+`config/agent.json`，更新后将备份放回原路径。
 
 ## 启动
 
@@ -44,7 +46,8 @@ runAtGameStart=true
 maxInitializationTimeout=300
 ```
 
-启动游戏后，在项目根目录打开 Overlay：
+默认的 `collect_human` 模式下，启动游戏后直接游玩即可，数据写入 `data/trajectories/human/`。
+切换到需要交互控制的模式后，可在项目根目录打开 Overlay：
 
 ```powershell
 .\.venv\Scripts\python.exe -m sts_agent.ui.overlay
@@ -56,20 +59,27 @@ maxInitializationTimeout=300
 .\.venv\Scripts\python.exe -m sts_agent.ui.terminal
 ```
 
-controller 必须由 CommunicationMod 启动，一次只接受一个终端类客户端。主菜单输入 `s [角色] [进阶] [种子]`；种子可省略。运行模式由 [config/agent.json](config/agent.json) 的 `active_mode` 决定，模式专属参数位于 `config/modes/`；修改配置后重启游戏/controller 和 UI。
+controller 由 CommunicationMod 启动，一次只接受一个终端类客户端。主菜单输入 `s [角色] [进阶] [种子]`，种子可省略。切换 `active_mode` 后重启游戏/controller 和 UI。各模式的参数见[运行配置](config/README.md)。
 
-### 官方权重基线测试
+### 固定种子评测
 
 选择 `baseline_inference` 可用远端常驻模型服务测试官方 Qwen3.8-27B BF16：本机仅控制游戏，
 通过 SSH 通道请求单一动作；不启用训练或教师模式，评测轨迹与人工采集分开。
 远端与本机使用同仓库的不同入口，准备命令和全部参数见 [基线推理](doc/BASELINE_INFERENCE.md)。
 进度分、通关率及实验比较口径见 [基线评测方案](doc/BASELINE_EVALUATION.md)。
 
-固定 10 种子批量测评：保持 `active_mode: "baseline_inference"`，准备好远端服务，重启游戏/controller，
-停在普通主菜单并关闭 Overlay/终端客户端，然后运行：
+已有托管 API 账户时，也可选择 `baseline_api`，在[模式配置](config/modes/baseline_api.json)中设置模型名、
+API 地址和本机密钥文件路径。示例使用中国科大网关；个人密钥保存在 Git 忽略的文件中。
+
+选好模式后，在仓库根目录用下面的命令预览种子、复用结果和待跑列表。这一步可离线执行。
 
 ```powershell
 .\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline --dry-run
+```
+
+实际评测需要可用的模型后端。重启游戏和 controller，停在普通主菜单并关闭 Overlay 或终端客户端，再运行：
+
+```powershell
 .\.venv\Scripts\python.exe -m sts_agent.commands.evaluate_baseline
 ```
 
@@ -179,8 +189,8 @@ doc/             架构、协议和实验说明
 - [策略 Prompt](doc/POLICY_PROMPT.md)
 - [教师 SFT 与 GRPO](doc/TEACHER_SFT_GRPO.md)
 - [Prompt Evolution](doc/PROMPT_EVOLUTION.md)
-- [研究计划（工作稿）](doc/PAPER_PLAN.md)
-- [实验执行交接](doc/EXPERIMENT_HANDOFF.md)
+- [固定种子评测与计分](doc/BASELINE_EVALUATION.md)
+- [历史研究计划](doc/PAPER_PLAN.md) · [30 种子批次记录](doc/EXPERIMENT_HANDOFF.md)
 - [变更记录](CHANGELOG.md)
 - [Agent 协作约定](AGENTS.md)
 

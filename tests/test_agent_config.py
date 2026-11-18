@@ -11,6 +11,26 @@ from sts_agent.paths import PROJECT_ROOT
 
 
 class AgentConfigTests(unittest.TestCase):
+    def test_default_config_uses_public_example_until_local_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_dir = root / "config"
+            shutil.copytree(PROJECT_ROOT / "config" / "modes", config_dir / "modes")
+            shutil.copy(PROJECT_ROOT / "config" / "agent.example.json", config_dir)
+            local = config_dir / "agent.json"
+            for selection in (None, "config/agent.json", local):
+                config = agent_config.load_agent_config(root, selection)
+                self.assertEqual(config["framework"]["learning_method"], "collect_human")
+            with self.assertRaisesRegex(agent_config.ConfigError, "missing configuration file"):
+                agent_config.load_agent_config(root, "config/custom.json")
+
+            local.write_text('{"schema_version": 2, "active_mode": "baseline_api"}', encoding="utf-8")
+            config = agent_config.load_agent_config(root, "config/agent.json")
+            self.assertEqual(config["policy"]["api"]["provider"], "openai_compatible")
+            local.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(agent_config.ConfigError, "invalid JSON"):
+                agent_config.load_agent_config(root)
+
     def test_public_example_is_offline_human_collection(self) -> None:
         config = agent_config.load_agent_config(PROJECT_ROOT, "config/agent.example.json")
         self.assertEqual(config["framework"]["learning_method"], "collect_human")

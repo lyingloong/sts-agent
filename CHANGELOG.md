@@ -27,6 +27,12 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Changed
 
+- A fresh checkout uses the human recording profile. Personal settings in `config/agent.json`
+  take precedence and are ignored by Git. Users upgrading an old checkout should back up that
+  file before pulling and restore it at the same path afterward.
+- Updated the setup and evaluation guides for the self-hosted and hosted backends. Recorded
+  the two completed ten-seed runs and marked the paper plan and interrupted thirty-seed
+  batch as historical.
 - Baseline batches reuse completed seeds by default: a new run of the 30-seed suite detects rows
   from earlier batches with the same model, revision, prompt-code hash and request settings and
   only starts the missing seeds. `--no-reuse` forces a full replay.

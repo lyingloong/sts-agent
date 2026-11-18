@@ -96,7 +96,7 @@ class OverlayFormattingTests(unittest.TestCase):
                 "stage": "正在执行第 2/4 次 rollout",
                 "gpu": {"index": 5, "free_memory_mib": 18432, "utilization_percent": 12},
             },
-            "/data/wanghao/sts-agent/models/base/Qwen3-0.6B",
+            "/srv/sts-agent/models/base/Qwen3-0.6B",
         )
         self.assertIn("模型：Qwen3-0.6B", rendered)
         self.assertIn("策略版本：v000003  |  参数更新：第 3 次", rendered)
@@ -160,7 +160,7 @@ class OverlayFormattingTests(unittest.TestCase):
 
     def test_model_name_uses_only_the_final_path_component(self) -> None:
         self.assertEqual(
-            overlay_terminal.display_model_name("/data/wanghao/sts-agent/models/base/Qwen3-0.6B+sft-v0-r001"),
+            overlay_terminal.display_model_name("/srv/sts-agent/models/base/Qwen3-0.6B+sft-v0-r001"),
             "Qwen3-0.6B+sft-v0-r001",
         )
 

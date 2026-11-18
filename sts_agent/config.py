@@ -207,13 +207,14 @@ def project_root() -> Path:
 
 
 def config_path(root: Path | None = None, config_file: str | Path | None = None) -> Path:
-    """Resolve the selected config relative to the project root by default."""
+    """Use the example on fresh checkouts until a local agent.json is created."""
 
     base = root or project_root()
-    if config_file is None:
-        return base / "config" / "agent.json"
-    path = Path(config_file)
-    return path if path.is_absolute() else base / path
+    local = base / "config" / "agent.json"
+    path = local if config_file is None else base / config_file
+    if not path.exists() and path.resolve() == local.resolve() and not path.is_symlink():
+        return local.with_name("agent.example.json")
+    return path
 
 
 def _merge(default: dict[str, Any], provided: dict[str, Any], location: str = "") -> dict[str, Any]:
