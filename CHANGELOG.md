@@ -30,6 +30,9 @@ When the first tag is created, move the `[Unreleased]` section under that versio
 
 ### Changed
 
+- The README now walks through recording a first game, locating its JSONL trace and choosing a
+  model workflow. The linked guides cover configuration, evaluation and dataset export.
+
 - Personal settings can override a single mode through `mode_overrides` in the local config.
   The configuration, game startup, and training guides describe the inputs each workflow needs.
 - A fresh checkout uses the human recording profile. Personal settings in `config/agent.json`
