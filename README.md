@@ -1,18 +1,20 @@
 # StS Agent
 
-[![离线测试](https://github.com/lyingloong/sts-agent/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/lyingloong/sts-agent/actions/workflows/tests.yml)
+**English** · [简体中文](README-zh.md)
 
-把《Slay the Spire 1》的一局游戏录成可分析的动作轨迹，或让模型通过同一个接口游玩。StS Agent 支持人工录制、出牌建议、自动决策、固定种子评测，以及训练数据导出。
+[![Offline tests](https://github.com/lyingloong/sts-agent/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/lyingloong/sts-agent/actions/workflows/tests.yml)
 
-录制时，CommunicationMod 提供游戏状态，ActionRecorder 记录玩家实际执行的动作。StS Agent 按状态和动作 ID 将两者关联，每局生成一份 JSONL。在模型模式下，StS Agent 把局面和合法动作交给模型，再通过 CommunicationMod 执行所选动作。
+Record a *Slay the Spire 1* run, get suggestions while you play, or let a model play through the same interface. You can evaluate models on fixed seeds and export gameplay decisions as training data.
 
-## 录制第一局
+CommunicationMod reports the game state. The companion ActionRecorder mod captures the actions you take. StS Agent matches the two by their state and action IDs and writes one JSONL trace per run. In model-controlled modes, StS Agent sends the state and legal actions to the model and executes its choice through CommunicationMod.
 
-以下流程使用 Windows PowerShell。默认的 `collect_human` 模式只需玩家正常游玩，无需 GPU、模型或 API 密钥。
+## Record your first run
 
-### 安装
+The steps below use Windows PowerShell. The default `collect_human` mode records as you play. It runs without a GPU, model or API key.
 
-准备 Git、Python 3.10+ 和已安装的《Slay the Spire 1》。在路径不含空格的目录中克隆仓库，并使用可编辑安装，让游戏进程也能找到仓库中的配置、提示词和输出目录。
+### Install StS Agent
+
+You need Git, Python 3.10 or later, and a copy of *Slay the Spire 1*. Clone the repository into a path without spaces. Install it in editable mode so the game process can use the configuration, prompts and output directories in your checkout.
 
 ```powershell
 git clone https://github.com/lyingloong/sts-agent.git
@@ -22,12 +24,12 @@ python -m venv .venv
 .\.venv\Scripts\sts-agent-config.exe
 ```
 
-最后一条命令会显示配置文件位置和当前模式。全新检出应显示 `collect_human`。
+The last command shows the configuration path and active mode. On a fresh checkout, the mode should be `collect_human`.
 
 <details>
-<summary>Linux 或 macOS 上安装离线工具</summary>
+<summary>Install the offline tools on Linux or macOS</summary>
 
-在克隆后的仓库根目录运行以下命令。游戏接入和 Overlay 主要在 Windows 验证，模型服务与训练主要在 Linux 验证。
+Run these commands from the root of the cloned repository. Game integration and the overlay are tested primarily on Windows. Model serving and training are tested primarily on Linux.
 
 ```sh
 python3 -m venv .venv
@@ -37,10 +39,10 @@ python3 -m venv .venv
 
 </details>
 
-### 启动
+### Start the game
 
-1. 安装 ModTheSpire、BaseMod、CommunicationMod 和 ActionRecorder。在 ModTheSpire 中启用后三个 Mod，首次加载后退出游戏。[CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod) · [ActionRecorder 安装指南](https://github.com/lyingloong/sts-action-recorder)
-2. 打开 `%LOCALAPPDATA%\ModTheSpire\CommunicationMod\config.properties`，设置下面三个值。将 `C\:/path/to/sts-agent` 替换为仓库的绝对路径，沿用正斜杠。CommunicationMod 按空白拆分命令，因此解释器路径不能含空格。
+1. Install ModTheSpire, BaseMod, CommunicationMod and ActionRecorder. Enable the last three in ModTheSpire, launch the game once, then exit. [CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod) · [ActionRecorder installation guide](https://github.com/lyingloong/sts-action-recorder)
+2. Open `%LOCALAPPDATA%\ModTheSpire\CommunicationMod\config.properties` and set the three values below. Replace `C\:/path/to/sts-agent` with the absolute path to your checkout, using forward slashes as shown. CommunicationMod splits the command on whitespace, so the path to `pythonw.exe` must be free of spaces.
 
    ```properties
    command=C\:/path/to/sts-agent/.venv/Scripts/pythonw.exe -m sts_agent.runtime.controller
@@ -48,37 +50,39 @@ python3 -m venv .venv
    maxInitializationTimeout=300
    ```
 
-3. 通过 ModTheSpire 重新启动游戏，开始一局并打出一张牌。CommunicationMod 会自动启动录制进程，人工录制无需打开 Overlay。
+3. Relaunch through ModTheSpire, start a run and play a card. CommunicationMod starts the StS Agent controller, which records the run in `collect_human` mode. You can leave the overlay closed.
 
-### 查看轨迹
+### Find your recording
 
-在仓库根目录可以列出最近的对局文件。
+From the repository root, list the most recent run files by modification time.
 
 ```powershell
 Get-ChildItem .\data\trajectories\human\human-*.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 3 Name,Length
 ```
 
-`human-*.jsonl` 按局保存动作前的局面、合法动作和玩家选择。ActionRecorder 的原始事件另存在**游戏工作目录**的 `data/actionrecorder/`。如果仓库里只有 `communication-bridge-*.jsonl`，请检查 ActionRecorder 是否启用，以及它的发送端口与 StS Agent 的录制监听端口是否一致（默认 `127.0.0.1:8766`）。[轨迹字段](doc/DATA_AND_TRACE_SCHEMA.md) · [动作与状态的关联规则](doc/PROTOCOL.md)
+Each `human-*.jsonl` file records the state before an action, the legal choices and the action the player took. ActionRecorder also writes its raw events to `data/actionrecorder/` under the **game’s working directory**. If your checkout contains only `communication-bridge-*.jsonl` files, check that ActionRecorder is enabled and that its destination matches the recorder listener (default `127.0.0.1:8766`). [Trace fields](doc/DATA_AND_TRACE_SCHEMA.md) · [How states and actions are matched](doc/PROTOCOL.md) (in Chinese)
 
-## 切换模式
+## Choose a mode
 
-首次自定义配置时，将 `config/agent.example.json` 复制为同目录的 `agent.json`。在副本中设置 `active_mode`，将特定模式的参数放入 `mode_overrides`。本机配置由 Git 忽略。运行 `sts-agent-config --list` 可列出模式，`--mode 模式名` 可在切换前离线检查配置。修改生效需要重启游戏和正在使用的客户端。[配置模板](config/agent.example.json) · [配置示例与参数优先级](config/README.md)
+To customize the configuration, copy `config/agent.example.json` to `config/agent.json`. Git ignores this local file. Set `active_mode` to the mode you want, and put changes specific to that mode under `mode_overrides`. Run `sts-agent-config --list` to see the available modes or `sts-agent-config --mode baseline_api` to check a mode offline before switching. Restart the game and any connected client after making changes. [Configuration template](config/agent.example.json) · [Configuration examples and precedence (in Chinese)](config/README.md)
 
-| 想做什么 | 选用模式或工具 | 使用说明 |
+The detailed guides in the table are in Chinese.
+
+| Task | Mode or tool | Guide |
 | --- | --- | --- |
-| 获取出牌建议，或交给本机、远端模型操作 | `candidate_assist_local`、`local_inference` 等，可用 Overlay 或终端交互 | [运行模式](doc/MODES.md) · [启动命令](doc/COMMANDS.md) |
-| 用相同种子评测完整对局 | 托管 API 用 `baseline_api`，自建模型服务用 `baseline_inference`。先用 `sts-agent-evaluate-baseline --dry-run` 查看计划 | [配置后端](doc/BASELINE_INFERENCE.md) · [运行与计分](doc/BASELINE_EVALUATION.md) |
-| 让 Codex 玩一局 A0 铁甲战士 | `collect_codex`，通过本地 MCP 服务连接控制器 | [Codex 游玩指南](doc/CODEX_PLAY_A0_IRONCLAD.md) |
-| 导出训练数据或运行在线更新 | 从 ActionRecorder 数据集导出人类 SFT，或使用教师轨迹和远端训练工具 | [人类 SFT](doc/HUMAN_SFT_DATASET.md) · [教师数据与训练](doc/TRAINING_ON_4090.md) · [在线 RL](doc/REMOTE_ONLINE_RL.md) |
+| Get suggestions or let a local or remote model play | Use `candidate_assist_local` for suggestions or `local_inference` for automatic play. Both have remote variants and work with the overlay or terminal. | [Modes](doc/MODES.md) · [Commands](doc/COMMANDS.md) |
+| Compare models on the same seeds | Use `baseline_api` for a hosted API or `baseline_inference` for a self-hosted model. Preview the batch with `sts-agent-evaluate-baseline --dry-run`. | [Configure a backend](doc/BASELINE_INFERENCE.md) · [Run and score an evaluation](doc/BASELINE_EVALUATION.md) |
+| Let Codex play an Ascension 0 Ironclad run | `collect_codex` connects Codex to the controller through a local MCP server. | [Play with Codex](doc/CODEX_PLAY_A0_IRONCLAD.md) |
+| Build a training dataset or update a policy online | Export human demonstrations from an ActionRecorder dataset, train on teacher trajectories, or run online reinforcement learning on a remote machine. | [Human demonstrations for SFT](doc/HUMAN_SFT_DATASET.md) · [Teacher data and training](doc/TRAINING_ON_4090.md) · [Online reinforcement learning](doc/REMOTE_ONLINE_RL.md) |
 
-使用上表的短命令时，先激活虚拟环境，或直接调用 `.venv\Scripts\` 下的对应程序。交互控制和固定种子批量评测各自占用控制器的单一客户端连接。完整命令与模块名见[命令索引](doc/COMMANDS.md)。
+To use the short command names above, activate the virtual environment or run the corresponding executables from `.venv\Scripts\`. The controller accepts one client at a time, so disconnect the interactive client before starting a batch evaluation. [Command reference (in Chinese)](doc/COMMANDS.md)
 
-## 开发与维护
+## Development and support
 
-[文档目录](doc/README.md) · [代码架构](doc/ARCHITECTURE.md) · [提示词示例](doc/POLICY_PROMPT_PREVIEW.md) · [变更记录](CHANGELOG.md)
+[Documentation index (in Chinese)](doc/README.md) · [Architecture](doc/ARCHITECTURE.md) · [Example policy prompt](doc/POLICY_PROMPT_PREVIEW.md) · [Changelog](CHANGELOG.md)
 
-项目继续维护游戏接入、录制与评测工具，原论文计划和配套实验已停止。[论文计划与历史结果](doc/PAPER_PLAN.md)
+Maintenance continues on game integration, recording and evaluation tools. Work on the original paper and its experiments has stopped. [Research plan and historical results (in Chinese)](doc/PAPER_PLAN.md)
 
-普通问题请在 GitHub Issues 反馈，安全问题请使用私密渠道。贡献指南列出了离线测试命令和提交流程。[反馈问题](https://github.com/lyingloong/sts-agent/issues) · [安全报告](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
+Use GitHub Issues for questions and bug reports. Please report security issues privately. The contributing guide covers offline tests and the pull request process. [Open an issue](https://github.com/lyingloong/sts-agent/issues) · [Report a security issue](SECURITY.md) · [Contribute](CONTRIBUTING.md)
 
-本仓库代码采用 MIT 许可证。游戏、第三方 Mod、模型权重和数据集各自遵循其许可。[MIT 许可证](LICENSE)
+StS Agent is licensed under MIT. The game, third-party mods, model weights and datasets have their own licenses. [MIT License](LICENSE)
